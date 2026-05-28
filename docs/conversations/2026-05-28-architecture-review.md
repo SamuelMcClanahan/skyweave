@@ -258,3 +258,43 @@ reconstruction/track error.
 - Hardware PTP accuracy depends heavily on NIC, switch, driver, and hardware
   timestamp support.
 
+## Technical Points, Condensed
+
+With 15-50 m baselines and 6-8 cameras, triangulation becomes much more viable,
+especially for association and false-positive rejection. More cameras reduce
+uncertainty, but they do not erase the basic range geometry issue: far range
+error still depends heavily on baseline, focal length, pixel error, and camera
+pose accuracy.
+
+Use Hungarian assignment for matching detections/candidate measurements to
+tracks. Use Mahalanobis distance for gating and assignment cost. Do not use
+Hungarian to make voxels align; use voxel likelihood scoring plus continuous
+reprojection optimization for that.
+
+Frustum/range shell idea: a 2D detection box projects into a 3D cone/pyramid
+from the camera. A range shell is just a depth band along that cone. Intersect
+or score those shells across cameras instead of filling a massive world grid.
+
+The rough-intersection-then-local-optimization intuition is right. Do coarse
+ray/voxel candidate generation, allocate a local chunk, score it, then refine
+continuously using reprojection error.
+
+KNN helps, but clouds/birds need more: fixed exposure, temporal high-pass,
+multi-camera ray consistency, track continuity, angular velocity/acceleration
+limits, apparent size/flicker, altitude/range priors, and eventually classifiers
+from field data.
+
+For Luckfox Pico Ultra-class nodes, public docs list 10/100M Ethernet, not GbE.
+A GbE switch is still fine, but each node may be 100M. That matters for
+streaming raw frames; edge-side detection packets are much more realistic.
+
+V1 time sync path: start with chrony/NTP and measured skew, then test linuxptp
+only if the MAC/driver exposes useful timestamping, then move to GNSS PPS or
+hardware trigger. GNSS helps most if frame-start timestamps are tied to PPS or a
+synchronized hardware clock.
+
+Calibration: AprilTag/ChArUco for near-field, sun for orientation sanity checks,
+ADS-B only as weak long-run validation, GNSS for rough node positions, RTK drone
+with a known lever arm plus visible LED/marker for real bundle adjustment. Laser
+rangefinder/trig is usable for rough extrinsics, but angular measurement error
+will dominate fast.
