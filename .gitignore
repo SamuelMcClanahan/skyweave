@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Generated data and logs
+data/
+*.log
+*.jsonl
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Voxel/projector outputs
+*.bin
+voxel_grid.bin
+screenshots/
+reconstruction_sr.png
+reconstruction_sr_before_fill.png
+debug_gridtrack/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
