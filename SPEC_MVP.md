@@ -179,6 +179,11 @@ skyweave/
 │   │   ├── v4l2.py                   # USB / V4L2 implementation
 │   │   ├── replay.py                 # source from recorded sessions
 │   │   └── network.py                # V1 network receiver placeholder
+│   ├── sim/                          # synthetic scenes and packet generation
+│   │   ├── __init__.py
+│   │   ├── scene.py                  # virtual cameras, trajectories, objects
+│   │   ├── generator.py              # scene -> MotionPacket stream
+│   │   └── ground_truth.py           # known truth packets / error metrics
 │   ├── detection/                    # detection pipeline (per camera)
 │   │   ├── __init__.py
 │   │   ├── pipeline.py               # composes the stages
@@ -872,6 +877,49 @@ MVP defaults:
 - coast for `>= 2s`;
 - keep trail length long enough for the three.js trajectory view.
 
+### 7.11 Synthetic packet source
+
+The first MVP vertical slice should not require live cameras or rendered video.
+It should generate synthetic `MotionPacket`s directly from a virtual calibrated
+scene:
+
+```text
+virtual cameras + known 3D trajectory
+  -> project true object position into each camera
+  -> create fake blob centroid, bbox, and MotionPatch around each projected pixel
+  -> publish normal MotionPacket streams
+  -> Rayweave scoring -> WeavefieldVolume -> Measurement3D -> Track -> VizFrame
+```
+
+This synthetic source is not a separate algorithm path. It is a controlled
+camera-side producer that feeds the same message boundary as real motion
+extraction. Rayweave, triangulation, Kalman tracking, recording, replay, and
+visualization should not know whether packets came from real cameras or the
+synthetic generator.
+
+`skyweave.sim.scene` defines:
+- virtual camera intrinsics, image sizes, and `T_world_cam` poses;
+- scripted trajectories such as `paper_airplane_arc`, `straight_line`,
+  `constant_velocity`, and `occlusion_pass`;
+- object display metadata for the three.js explainer;
+- optional perturbations: pixel noise, dropped camera packets, timestamp jitter,
+  bbox size changes, and false-positive blobs.
+
+`skyweave.sim.generator` emits:
+- one `MotionPacket` per virtual camera per timestep;
+- small `MotionBlob`s with known centroids and bboxes;
+- small `MotionPatch` payloads, initially simple square or Gaussian masks;
+- optional `DetectionPacket`s for triangulation comparison;
+- ground-truth samples containing true position, velocity, and source scene ID.
+
+Acceptance for the first synthetic path:
+- with zero noise, projected pixels re-triangulate near the known 3D trajectory;
+- Rayweave peaks follow the known trajectory within a tolerance set by voxel
+  size;
+- the three.js UI shows cameras, rays, Weavefield evidence, voxel peak,
+  triangulation marker, track, and truth marker;
+- replaying the synthetic session reproduces the same Weavefield and track.
+
 ---
 
 ## 8. Calibration
@@ -1538,7 +1586,15 @@ recording:
 
 simulation:
   enable: true
+  source: "packet_generator"       # packet_generator first; rendered_frames later
   default_scene: "paper_airplane_arc"
+  timestep_hz: 30
+  patch_encoding: "rle_u8"
+  patch_size_px: 8
+  pixel_noise_std_px: 0.5
+  dropout_probability: 0.0
+  timestamp_jitter_ms: 0.0
+  emit_ground_truth: true
   export_dir: "data/sim_exports"
 
 v1_edge:
@@ -1577,7 +1633,7 @@ messages/config -> camera/motion -> Rayweave evidence -> measurements/tracks -> 
 | MVP-05 | Timestamp utilities | `skyweave/timestamps.py` | `monotonic_ns()`, `wall_ns()`, conversion helpers |
 | MVP-06 | Geometry primitives | `skyweave/fusion/geom.py` | SE(3) ops, projection, undistortion, ray construction, camera frustums, CPA; full unit tests |
 | MVP-07 | `CameraSource` abstract + V4L2 impl | `skyweave/camera/base.py`, `skyweave/camera/v4l2.py` | asyncio task wraps `cv2.VideoCapture`; emits `(frame, capture_ts_ns)` tuples |
-| MVP-08 | Replay and synthetic camera sources | `skyweave/camera/replay.py`, test fixtures | Emit frames or packet streams from recorded/synthetic sessions |
+| MVP-08 | Replay and synthetic packet sources | `skyweave/camera/replay.py`, `skyweave/sim/`, test fixtures | Emit recorded sessions or virtual-camera `MotionPacket`s with known ground truth |
 | MVP-09 | Frame differencing / temporal high-pass | `skyweave/detection/pipeline.py` | Cheap motion image path, close to V1 edge-node default |
 | MVP-10 | KNN background subtractor | `skyweave/detection/knn_bg.py` | Thin wrapper around `cv2.createBackgroundSubtractorKNN` with config |
 | MVP-11 | ROI mask and morphology | `skyweave/detection/morphology.py`, `tools/horizon_mask_gen.py` | Static masks, thresholding, erode/dilate cleanup |
@@ -1609,7 +1665,7 @@ messages/config -> camera/motion -> Rayweave evidence -> measurements/tracks -> 
 | MVP-37 | V1 turret contracts | `skyweave/turret/` | Turret pose/observation schemas and camera-geometry placeholder |
 | MVP-38 | MVP app entrypoint | `skyweave/app/mvp.py` | Composes config, cameras/replay/sim, motion, Rayweave, tracking, recording, viz; CLI `skyweave-mvp --config configs/mvp.yaml` |
 | MVP-39 | Unit tests | `tests/` | Focused tests for geometry, DDA, scorer, peaks, triangulator, Kalman, blob/coherence, aligner, recording |
-| MVP-40 | Synthetic integration test | `tests/test_e2e_synthetic.py` | Synthetic 3-camera scene with known trajectory; assert voxel peak and track match within tolerance |
+| MVP-40 | Synthetic integration test | `tests/test_e2e_synthetic.py` | Synthetic 3-camera `MotionPacket` scene with known trajectory; assert Weavefield peak and track match within tolerance |
 | MVP-41 | Performance/latency profiling | `tools/profile_mvp.py`, logs | Capture p50/p95 stage latency and recorder queue health on target host |
 | MVP-42 | Demo recording and docs | `data/recordings/livingroom_demo_v1/`, `README.md` | Capture paper-airplane run, replayable session manifest, quickstart, calibration notes |
 
