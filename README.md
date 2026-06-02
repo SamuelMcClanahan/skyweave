@@ -57,6 +57,9 @@ Resolution profiles are available at `configs/sim_075.yaml` and
 `configs/sim_perturb_false_positive.yaml`, and
 `configs/sim_perturb_dropout.yaml`.
 
+For the first Rubik Pi 3 target sweep, use
+`docs/rubik-pi-setup.md`.
+
 The command prints per-frame truth, voxel peak, triangulation, track estimate,
 errors, score, and latency, then writes JSONL logs under `data/logs/`. Final
 summaries separate packet drops from `not_visible` camera/object pairs where the

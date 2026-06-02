@@ -29,9 +29,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default="configs/sim.yaml", help="Path to the simulation YAML config.")
     parser.add_argument("--record", action="store_true", help="Record packets and outputs for replay.")
     parser.add_argument("--record-dir", default="data/recordings", help="Directory for recorded sessions.")
+    parser.add_argument("--log-stages", action="store_true", help="Write per-frame stage timings to JSONL logs.")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
+    if args.log_stages:
+        config.logging.log_stage_timings = True
     logger = JsonlLogger(config.logging.log_dir)
     recorder = Recorder.create(args.record_dir, config, args.config) if args.record else None
     try:
@@ -82,6 +85,7 @@ def run_sim_check(
 
     for frame in generator.frames():
         start = time.perf_counter()
+        stage_ms = _empty_stage_timings()
         dropped_packets += frame.dropped_packets
         not_visible_packets += frame.not_visible_packets
         false_positive_packets += frame.false_positive_packets
@@ -99,18 +103,32 @@ def run_sim_check(
                 n_patches=len(packet.motion_patches),
             )
 
+        stage_start = time.perf_counter()
         aligned = aligner.align_frame(frame.motion_packets, frame.detection_packets)
+        stage_ms["alignment"] = _elapsed_ms(stage_start)
         if aligned is None:
+            stage_start = time.perf_counter()
             track = tracks.update(None, frame.truth.ts_ns)
+            stage_ms["kalman"] = _elapsed_ms(stage_start)
+            stage_ms["total"] = _elapsed_ms(start)
+            _log_stage_timings(config, logger, frame.truth.frame_seq, frame.truth.ts_ns, False, stage_ms)
             _console_frame(config, frame.truth.frame_seq, frame.truth.position, None, None, track, math.inf, math.inf, 0.0, 0.0)
             continue
 
+        stage_start = time.perf_counter()
         scored = scorer.score(aligned)
+        stage_ms["scoring"] = _elapsed_ms(stage_start)
+        stage_start = time.perf_counter()
         peaks, measurements = peak_extractor.extract(scored)
         scored.volume.peaks = peaks
         measurement = measurements[0] if measurements else None
+        stage_ms["peaks"] = _elapsed_ms(stage_start)
+        stage_start = time.perf_counter()
         tri = triangulate_detections(aligned.ts_ns, aligned.detection_packets, scene.cameras, config.fusion.pixel_noise_px)
+        stage_ms["triangulation"] = _elapsed_ms(stage_start)
+        stage_start = time.perf_counter()
         track = tracks.update(measurement, aligned.ts_ns)
+        stage_ms["kalman"] = _elapsed_ms(stage_start)
         if recorder:
             recorder.record_weavefield(scored.volume)
             if measurement:
@@ -124,8 +142,10 @@ def run_sim_check(
         track_error = point_distance(tuple(track.state[:3]), frame.truth.position) if track else math.inf
         peak_errors.append(peak_error)
         track_errors.append(track_error)
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        elapsed_ms = _elapsed_ms(start)
+        stage_ms["total"] = elapsed_ms
         latencies_ms.append(elapsed_ms)
+        _log_stage_timings(config, logger, frame.truth.frame_seq, aligned.ts_ns, True, stage_ms)
 
         logger.event(
             "weavefield_volume_scored",
@@ -210,6 +230,40 @@ def _fmt_pos(pos) -> str:
         return "(nan,nan,nan)"
     x, y, z = [float(v) for v in pos]
     return f"({x:.2f},{y:.2f},{z:.2f})"
+
+
+def _empty_stage_timings() -> dict[str, float]:
+    return {
+        "alignment": 0.0,
+        "scoring": 0.0,
+        "peaks": 0.0,
+        "triangulation": 0.0,
+        "kalman": 0.0,
+        "total": 0.0,
+    }
+
+
+def _log_stage_timings(
+    config,
+    logger: JsonlLogger,
+    frame_seq: int,
+    ts_ns: int,
+    aligned: bool,
+    stage_ms: dict[str, float],
+) -> None:
+    if not config.logging.log_stage_timings:
+        return
+    logger.event(
+        "frame_stage_timings",
+        frame_seq=frame_seq,
+        ts_ns=ts_ns,
+        aligned=aligned,
+        stage_ms={stage: round(ms, 6) for stage, ms in stage_ms.items()},
+    )
+
+
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000.0
 
 
 def _summary(

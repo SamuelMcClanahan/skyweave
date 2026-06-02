@@ -36,3 +36,29 @@ def test_filterpy_track_manager_updates_and_coasts() -> None:
     assert coasted is not None
     assert coasted.status == "coasting"
     assert coasted.state[0] > third.state[0]
+
+
+def test_track_manager_retires_stale_track_and_starts_new_id() -> None:
+    manager = TrackManager(KalmanConfig(coast_seconds=2.0))
+
+    first = manager.update(_measurement(0, 0.0), 0)
+    manager.update(_measurement(1_000_000_000, 1.0), 1_000_000_000)
+    active = manager.update(_measurement(2_000_000_000, 2.0), 2_000_000_000)
+    assert first is not None
+    assert active is not None
+    assert active.id == first.id
+
+    exactly_at_limit = manager.update(None, 4_000_000_000)
+    assert exactly_at_limit is not None
+    assert exactly_at_limit.status == "coasting"
+    assert exactly_at_limit.id == first.id
+
+    expired = manager.update(None, 4_100_000_000)
+    assert expired is None
+
+    next_throw = manager.update(_measurement(30_000_000_000, -1.0), 30_000_000_000)
+    assert next_throw is not None
+    assert next_throw.id == first.id + 1
+    assert next_throw.status == "candidate"
+    assert next_throw.created_ts_ns == 30_000_000_000
+    assert len(next_throw.trail) == 1

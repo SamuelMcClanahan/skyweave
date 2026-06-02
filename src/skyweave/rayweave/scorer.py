@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 
@@ -21,7 +22,28 @@ class ScoredWeavefield:
     camera_scores: dict[int, np.ndarray]
 
 
+class ScorerBackend(Protocol):
+    def score(self, aligned: AlignedEvidence) -> ScoredWeavefield:
+        ...
+
+
 class RayweaveScorer:
+    def __init__(
+        self,
+        grid: VoxelGrid,
+        cameras: dict[int, CameraCalib],
+        config: ScorerConfig,
+    ) -> None:
+        self.grid = grid
+        self.cameras = cameras
+        self.config = config
+        self.backend = _build_backend(grid, cameras, config)
+
+    def score(self, aligned: AlignedEvidence) -> ScoredWeavefield:
+        return self.backend.score(aligned)
+
+
+class PythonNumpyScorerBackend:
     def __init__(
         self,
         grid: VoxelGrid,
@@ -72,6 +94,16 @@ class RayweaveScorer:
         return ScoredWeavefield(volume, combined, support_counts, camera_scores)
 
 
+def _build_backend(
+    grid: VoxelGrid,
+    cameras: dict[int, CameraCalib],
+    config: ScorerConfig,
+) -> ScorerBackend:
+    if config.backend == "python_numpy":
+        return PythonNumpyScorerBackend(grid, cameras, config)
+    raise ValueError(f"Unsupported Rayweave scorer backend: {config.backend!r}")
+
+
 def _iter_patch_pixels(patches) -> list[tuple[float, float, float]]:
     pixels: list[tuple[float, float, float]] = []
     for patch in patches:
@@ -99,4 +131,3 @@ def _top_k_sparse(scores: np.ndarray, top_k: int) -> list[SparseVoxel]:
         SparseVoxel(ix=int(ix), iy=int(iy), iz=int(iz), score=float(scores[ix, iy, iz]))
         for ix, iy, iz in coords
     ]
-

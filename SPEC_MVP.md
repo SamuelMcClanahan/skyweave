@@ -1183,6 +1183,21 @@ MVP should include both live/replay visualization and a visually strong
 interactive simulation mode that explains the technology even without cameras
 connected.
 
+Implementation order should keep visualization useful without blocking hardware
+validation:
+- first build a `VizFrameBuilder` that turns existing sparse Weavefield,
+  measurement, track, camera, and stats models into browser-ready JSON;
+- then build a static replay/simulation export that can feed a polished three.js
+  explainer;
+- then add WebSocket streaming that uses the same `VizFrame` shape for live and
+  replay runs.
+
+For Rubik Pi 3-class testing, the target device does not need to render the
+visualization locally. It may run the core pipeline and either record data or
+stream compact sparse `VizFrame`s to a developer laptop/MacBook, where the
+browser does all three.js rendering. The live visualization path must therefore
+remain sparse and transport-friendly, just like replay.
+
 ### 10.1 Backend (`skyweave.viz.server`)
 
 Use one `aiohttp` app as the lightweight Python web backend:
@@ -1203,6 +1218,10 @@ At runtime, the server publishes downsampled `VizFrame` messages at a target of
 `30 Hz` or lower if browser/network load requires it. In simulation mode, the
 server may publish synthetic camera/object/voxel data or the frontend may run
 the simulation fully client-side.
+
+A static JSON replay/simulation asset should be able to drive the same frontend
+scene state as the WebSocket stream. This keeps after-the-fact replay, explainer
+mode, and live visualization from becoming separate implementations.
 
 ### 10.2 Frontend goals
 
@@ -1226,8 +1245,8 @@ The three.js UI should make these things visible at a glance:
 ### 10.3 Interactive simulation mode
 
 The MVP should include a visually polished simulation/explainer scene. This is
-allowed to be more illustrative than the live telemetry view, but it should use
-the same geometry concepts:
+the primary "sell the MVP" visualization: it is allowed to be more illustrative
+than the live telemetry view, but it should use the same geometry concepts:
 
 - a small flying object that can be moved in 3D with gizmo/drag controls;
 - visible `x`, `y`, and `z` axes on or near the object;
@@ -1240,9 +1259,9 @@ the same geometry concepts:
 - a toggle that compares voxel peak and triangulated estimate;
 - playback controls for a scripted paper-airplane-like path.
 
-The simulation can be built after the core MVP algorithms, but it is part of the
-demo goal. It should be impressive enough that someone can understand the
-technology from the browser before seeing the real cameras run.
+The explainer can be fed by synthetic data or exported replay data. It should be
+impressive enough that someone can understand the technology from the browser
+before seeing the real cameras run.
 
 ### 10.4 Live/replay scene elements
 
@@ -1441,8 +1460,8 @@ Replay use cases:
 - debug calibration errors;
 - regenerate three.js demo/simulation scenes after the fact.
 
-Simulation export should eventually turn a real or synthetic run into a compact
-JSON asset for the interactive three.js explainer:
+Simulation export should turn a real or synthetic run into a compact JSON asset
+for the interactive three.js explainer:
 
 ```text
 recorded run -> cleaned trajectory + camera poses + sampled rays + Weavefield history -> sim asset

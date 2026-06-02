@@ -14,15 +14,25 @@ TrackStatus = Literal["candidate", "active", "coasting"]
 class TrackManager:
     def __init__(self, config: KalmanConfig) -> None:
         self.config = config
+        self._next_track_id = 1
+        self._track_id: int | None = None
         self._kf: KalmanFilter | None = None
         self._created_ts_ns: int | None = None
         self._last_ts_ns: int | None = None
+        self._last_measurement_ts_ns: int | None = None
         self._update_count = 0
         self._miss_count = 0
         self._trail: list[tuple[float, float, float, int]] = []
 
     def update(self, measurement: Measurement3D | None, ts_ns: int) -> Track | None:
         if self._kf is None:
+            if measurement is None:
+                return None
+            self._initialize(measurement)
+            return self._to_track("candidate")
+
+        if self._coast_expired(ts_ns):
+            self._retire()
             if measurement is None:
                 return None
             self._initialize(measurement)
@@ -38,6 +48,7 @@ class TrackManager:
         self._correct(measurement)
         self._update_count += 1
         self._miss_count = 0
+        self._last_measurement_ts_ns = measurement.ts_ns
         self._append_trail_point()
         return self._to_track("active" if self._update_count >= 3 else "candidate")
 
@@ -50,11 +61,15 @@ class TrackManager:
         kf.Q = _process_noise_matrix(0.0, self.config.sigma_accel_mps2)
         kf.R = _measurement_noise_matrix(measurement, self.config.measurement_var_scale)
 
+        self._track_id = self._next_track_id
+        self._next_track_id += 1
         self._kf = kf
         self._created_ts_ns = measurement.ts_ns
         self._last_ts_ns = measurement.ts_ns
+        self._last_measurement_ts_ns = measurement.ts_ns
         self._update_count = 1
         self._miss_count = 0
+        self._trail = []
         self._append_trail_point()
 
     def _predict(self, dt: float) -> None:
@@ -76,8 +91,9 @@ class TrackManager:
 
     def _to_track(self, status: TrackStatus) -> Track:
         assert self._kf is not None
+        assert self._track_id is not None
         return Track(
-            id=1,
+            id=self._track_id,
             state=[float(x) for x in self._state()],
             covariance=np.asarray(self._kf.P, dtype=np.float64).tolist(),
             status=status,
@@ -91,6 +107,21 @@ class TrackManager:
     def _state(self) -> np.ndarray:
         assert self._kf is not None
         return np.asarray(self._kf.x, dtype=np.float64).reshape(6)
+
+    def _coast_expired(self, ts_ns: int) -> bool:
+        if self._last_measurement_ts_ns is None:
+            return False
+        return _elapsed_seconds(self._last_measurement_ts_ns, ts_ns) > self.config.coast_seconds
+
+    def _retire(self) -> None:
+        self._track_id = None
+        self._kf = None
+        self._created_ts_ns = None
+        self._last_ts_ns = None
+        self._last_measurement_ts_ns = None
+        self._update_count = 0
+        self._miss_count = 0
+        self._trail = []
 
 
 def _initial_state(measurement: Measurement3D) -> np.ndarray:

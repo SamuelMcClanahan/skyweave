@@ -62,6 +62,7 @@ class KalmanConfig(BaseModel):
 class LoggingConfig(BaseModel):
     log_dir: str = "data/logs"
     console_every: int = 1
+    log_stage_timings: bool = False
 
 
 class SimCheckConfig(BaseModel):

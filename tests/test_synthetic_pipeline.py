@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from skyweave.config import SimCheckConfig
 from skyweave.fusion.aligner import TimeAligner
@@ -47,3 +48,12 @@ def test_voxel_size_sweep_smoke() -> None:
         assert peaks
         assert measurements
 
+
+def test_unknown_scorer_backend_rejected() -> None:
+    config = SimCheckConfig()
+    config.rayweave.scorer.backend = "missing_backend"
+    scene = build_scene(config.simulation)
+    grid = VoxelGrid.from_config(config.rayweave.grid)
+
+    with pytest.raises(ValueError, match="Unsupported Rayweave scorer backend"):
+        RayweaveScorer(grid, scene.cameras, config.rayweave.scorer)
