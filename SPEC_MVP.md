@@ -167,77 +167,78 @@ skyweave/
 ├── pyproject.toml
 ├── SPEC_MVP.md                       # this document
 ├── README.md
-├── skyweave/                         # main Python package
-│   ├── __init__.py
-│   ├── messages.py                   # all message schemas (pydantic + msgpack)
-│   ├── config.py                     # pydantic config models, YAML loading
-│   ├── log.py                        # structlog setup
-│   ├── timestamps.py                 # ns timestamp utilities
-│   ├── camera/                       # frame source abstraction
-│   │   ├── __init__.py
-│   │   ├── base.py                   # CameraSource abstract
-│   │   ├── v4l2.py                   # USB / V4L2 implementation
-│   │   ├── replay.py                 # source from recorded sessions
-│   │   └── network.py                # V1 network receiver placeholder
-│   ├── sim/                          # synthetic scenes and packet generation
-│   │   ├── __init__.py
-│   │   ├── scene.py                  # virtual cameras, trajectories, objects
-│   │   ├── generator.py              # scene -> MotionPacket stream
-│   │   └── ground_truth.py           # known truth packets / error metrics
-│   ├── detection/                    # detection pipeline (per camera)
-│   │   ├── __init__.py
-│   │   ├── pipeline.py               # composes the stages
-│   │   ├── knn_bg.py                 # KNN background subtractor
-│   │   ├── morphology.py             # erode + dilate
-│   │   ├── blob.py                   # connected components + filtering
-│   │   ├── centroid.py               # sub-pixel center-of-mass
-│   │   ├── motion_patch.py           # cropped/RLE foreground patch helpers
-│   │   └── coherence.py              # temporal coherence filter
-│   ├── rayweave/                     # pixel/ray evidence scoring engine
-│   │   ├── __init__.py
-│   │   ├── grid.py                   # bounded voxel grids/chunks
-│   │   ├── dda.py                    # ray-AABB + voxel traversal
-│   │   ├── scorer.py                 # Rayweave mask/ray/frustum scoring
-│   │   ├── peaks.py                  # peak extraction + measurement covariance
-│   │   └── history.py                # Weavefield ring buffer / decay
-│   ├── fusion/                       # central-side fusion
-│   │   ├── __init__.py
-│   │   ├── aligner.py                # time alignment of multi-camera motion evidence
-│   │   ├── associator.py             # cross-camera evidence/measurement association
-│   │   ├── geom.py                   # SE(3), projection, ray math
-│   │   ├── measurements.py           # voxel/triangulation measurement types
-│   │   ├── triangulator.py           # DLT + L-M refinement + covariance
-│   │   ├── kalman.py                 # filterpy-based per-track filter
-│   │   └── tracks.py                 # track manager (create/update/kill)
-│   ├── edge/                         # V1 edge-node packet contracts/stubs
-│   │   ├── __init__.py
-│   │   ├── packets.py                # MotionPacket, DebugFramePacket
-│   │   └── rv1106.py                 # V1 implementation placeholder
-│   ├── turret/                       # V1 turret contracts/stubs
-│   │   ├── __init__.py
-│   │   ├── packets.py                # turret pose/observation schemas
-│   │   └── model.py                  # pan/tilt camera geometry
-│   ├── calib/                        # calibration tools
-│   │   ├── __init__.py
-│   │   ├── intrinsic.py              # ChAruco-based per-camera intrinsics
-│   │   ├── extrinsic.py              # AprilTag-based multi-camera extrinsics
-│   │   ├── bundle.py                 # bundle adjustment
-│   │   └── store.py                  # load/save calibration files
-│   ├── viz/                          # viz backend
-│   │   ├── __init__.py
-│   │   ├── server.py                 # aiohttp static files + WebSocket endpoint
-│   │   └── frames.py                 # builds VizFrame from track state
-│   ├── recording/                    # flight record/replay
-│   │   ├── __init__.py
-│   │   ├── recorder.py               # writes packets, voxels, tracks, optional media
-│   │   └── replayer.py               # replays recorded sessions
-│   ├── transport/                    # message transport
-│   │   ├── __init__.py
-│   │   ├── bus.py                    # in-process asyncio pub/sub
-│   │   └── pack.py                   # MsgPack wrappers
-│   └── app/
+├── src/
+│   └── skyweave/                     # main Python package
 │       ├── __init__.py
-│       └── mvp.py                    # MVP entry point: composes all above
+│       ├── messages.py               # all message schemas (pydantic + msgpack)
+│       ├── config.py                 # pydantic config models, YAML loading
+│       ├── log.py                    # structlog setup
+│       ├── timestamps.py             # ns timestamp utilities
+│       ├── camera/                   # frame source abstraction
+│       │   ├── __init__.py
+│       │   ├── base.py               # CameraSource abstract
+│       │   ├── v4l2.py               # USB / V4L2 implementation
+│       │   ├── replay.py             # source from recorded sessions
+│       │   └── network.py            # V1 network receiver placeholder
+│       ├── sim/                      # synthetic scenes and packet generation
+│       │   ├── __init__.py
+│       │   ├── scene.py              # virtual cameras, trajectories, objects
+│       │   ├── generator.py          # scene -> MotionPacket stream
+│       │   └── ground_truth.py       # known truth packets / error metrics
+│       ├── detection/                # detection pipeline (per camera)
+│       │   ├── __init__.py
+│       │   ├── pipeline.py           # composes the stages
+│       │   ├── knn_bg.py             # KNN background subtractor
+│       │   ├── morphology.py         # erode + dilate
+│       │   ├── blob.py               # connected components + filtering
+│       │   ├── centroid.py           # sub-pixel center-of-mass
+│       │   ├── motion_patch.py       # cropped/RLE foreground patch helpers
+│       │   └── coherence.py          # temporal coherence filter
+│       ├── rayweave/                 # pixel/ray evidence scoring engine
+│       │   ├── __init__.py
+│       │   ├── grid.py               # bounded voxel grids/chunks
+│       │   ├── dda.py                # ray-AABB + voxel traversal
+│       │   ├── scorer.py             # Rayweave mask/ray/frustum scoring
+│       │   ├── peaks.py              # peak extraction + measurement covariance
+│       │   └── history.py            # Weavefield ring buffer / decay
+│       ├── fusion/                   # central-side fusion
+│       │   ├── __init__.py
+│       │   ├── aligner.py            # time alignment of multi-camera motion evidence
+│       │   ├── associator.py         # cross-camera evidence/measurement association
+│       │   ├── geom.py               # SE(3), projection, ray math
+│       │   ├── measurements.py       # voxel/triangulation measurement types
+│       │   ├── triangulator.py       # DLT + L-M refinement + covariance
+│       │   ├── kalman.py             # filterpy-based per-track filter
+│       │   └── tracks.py             # track manager (create/update/kill)
+│       ├── edge/                     # V1 edge-node packet contracts/stubs
+│       │   ├── __init__.py
+│       │   ├── packets.py            # MotionPacket, DebugFramePacket
+│       │   └── rv1106.py             # V1 implementation placeholder
+│       ├── turret/                   # V1 turret contracts/stubs
+│       │   ├── __init__.py
+│       │   ├── packets.py            # turret pose/observation schemas
+│       │   └── model.py              # pan/tilt camera geometry
+│       ├── calib/                    # calibration tools
+│       │   ├── __init__.py
+│       │   ├── intrinsic.py          # ChAruco-based per-camera intrinsics
+│       │   ├── extrinsic.py          # AprilTag-based multi-camera extrinsics
+│       │   ├── bundle.py             # bundle adjustment
+│       │   └── store.py              # load/save calibration files
+│       ├── viz/                      # viz backend
+│       │   ├── __init__.py
+│       │   ├── server.py             # aiohttp static files + WebSocket endpoint
+│       │   └── frames.py             # builds VizFrame from track state
+│       ├── recording/                # flight record/replay
+│       │   ├── __init__.py
+│       │   ├── recorder.py           # writes packets, voxels, tracks, optional media
+│       │   └── replayer.py           # replays recorded sessions
+│       ├── transport/                # message transport
+│       │   ├── __init__.py
+│       │   ├── bus.py                # in-process asyncio pub/sub
+│       │   └── pack.py               # MsgPack wrappers
+│       └── app/
+│           ├── __init__.py
+│           └── mvp.py                # MVP entry point: composes all above
 ├── viz_web/                          # three.js frontend
 │   ├── index.html
 │   ├── src/
@@ -268,7 +269,12 @@ skyweave/
 │   └── data/                         # tiny test fixtures
 ├── configs/
 │   ├── mvp.yaml                      # MVP config (3 cams, Rubik Pi 3)
-│   └── livingroom.yaml               # paper-airplane-in-living-room variant
+│   ├── livingroom.yaml               # paper-airplane-in-living-room variant
+│   ├── sim.yaml                      # headless synthetic 10cm baseline
+│   ├── sim_075.yaml                  # headless synthetic 7.5cm profile
+│   └── sim_05.yaml                   # headless synthetic 5cm profile
+├── reference/
+│   └── pixel-to-voxel-projector/     # preserved prototype/reference code
 └── data/                             # gitignored, local datasets
     └── .gitkeep
 ```

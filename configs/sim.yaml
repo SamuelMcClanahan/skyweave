@@ -1,0 +1,46 @@
+simulation:
+  scene: "paper_airplane_arc"
+  frames: 90
+  timestep_hz: 30.0
+  image_width: 640
+  image_height: 480
+  focal_length_px: 360.0
+  patch_size_px: 5
+  pixel_noise_std_px: 0.0
+  dropout_probability: 0.0
+  timestamp_jitter_ms: 0.0
+  false_positive_probability: 0.0
+  seed: 7
+
+rayweave:
+  grid:
+    frame_id: "world"
+    origin_m: [-2.0, -2.0, 0.0]
+    dims: [48, 48, 32]
+    voxel_size_m: 0.10
+  scorer:
+    min_supporting_cameras: 2
+    top_k_voxels: 5000
+    backend: "python_numpy"
+  peaks:
+    threshold_percentile: 99.5
+    max_peaks: 1
+
+fusion:
+  align_window_ns: 33000000
+  min_cameras_per_frame: 2
+  pixel_noise_px: 1.0
+
+kalman:
+  sigma_accel_mps2: 6.0
+  initial_position_var: 1.0
+  initial_velocity_var: 4.0
+  measurement_var_scale: 1.0
+  coast_seconds: 2.0
+
+logging:
+  log_dir: "data/logs"
+  console_every: 1
+
+pass_peak_rmse_m: 0.20
+pass_track_rmse_m: 0.20

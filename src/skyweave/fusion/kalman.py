@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+from typing import Literal
+
+import numpy as np
+from filterpy.kalman import KalmanFilter
+
+from skyweave.config import KalmanConfig
+from skyweave.messages import Measurement3D, Track
+
+TrackStatus = Literal["candidate", "active", "coasting"]
+
+
+class TrackManager:
+    def __init__(self, config: KalmanConfig) -> None:
+        self.config = config
+        self._kf: KalmanFilter | None = None
+        self._created_ts_ns: int | None = None
+        self._last_ts_ns: int | None = None
+        self._update_count = 0
+        self._miss_count = 0
+        self._trail: list[tuple[float, float, float, int]] = []
+
+    def update(self, measurement: Measurement3D | None, ts_ns: int) -> Track | None:
+        if self._kf is None:
+            if measurement is None:
+                return None
+            self._initialize(measurement)
+            return self._to_track("candidate")
+
+        self._predict(_elapsed_seconds(self._last_ts_ns, ts_ns))
+        self._last_ts_ns = ts_ns
+
+        if measurement is None:
+            self._miss_count += 1
+            return self._to_track("coasting")
+
+        self._correct(measurement)
+        self._update_count += 1
+        self._miss_count = 0
+        self._append_trail_point()
+        return self._to_track("active" if self._update_count >= 3 else "candidate")
+
+    def _initialize(self, measurement: Measurement3D) -> None:
+        kf = KalmanFilter(dim_x=6, dim_z=3)
+        kf.x = _initial_state(measurement)
+        kf.P = _initial_covariance(self.config)
+        kf.H = _measurement_matrix()
+        kf.F = _transition_matrix(0.0)
+        kf.Q = _process_noise_matrix(0.0, self.config.sigma_accel_mps2)
+        kf.R = _measurement_noise_matrix(measurement, self.config.measurement_var_scale)
+
+        self._kf = kf
+        self._created_ts_ns = measurement.ts_ns
+        self._last_ts_ns = measurement.ts_ns
+        self._update_count = 1
+        self._miss_count = 0
+        self._append_trail_point()
+
+    def _predict(self, dt: float) -> None:
+        assert self._kf is not None
+        self._kf.F = _transition_matrix(dt)
+        self._kf.Q = _process_noise_matrix(dt, self.config.sigma_accel_mps2)
+        self._kf.predict()
+
+    def _correct(self, measurement: Measurement3D) -> None:
+        assert self._kf is not None
+        self._kf.R = _measurement_noise_matrix(measurement, self.config.measurement_var_scale)
+        self._kf.update(_measurement_vector(measurement))
+        self._last_ts_ns = measurement.ts_ns
+
+    def _append_trail_point(self) -> None:
+        state = self._state()
+        self._trail.append((float(state[0]), float(state[1]), float(state[2]), int(self._last_ts_ns or 0)))
+        self._trail = self._trail[-200:]
+
+    def _to_track(self, status: TrackStatus) -> Track:
+        assert self._kf is not None
+        return Track(
+            id=1,
+            state=[float(x) for x in self._state()],
+            covariance=np.asarray(self._kf.P, dtype=np.float64).tolist(),
+            status=status,
+            created_ts_ns=int(self._created_ts_ns or self._last_ts_ns or 0),
+            last_update_ts_ns=int(self._last_ts_ns or 0),
+            update_count=self._update_count,
+            miss_count=self._miss_count,
+            trail=self._trail,
+        )
+
+    def _state(self) -> np.ndarray:
+        assert self._kf is not None
+        return np.asarray(self._kf.x, dtype=np.float64).reshape(6)
+
+
+def _initial_state(measurement: Measurement3D) -> np.ndarray:
+    px, py, pz = measurement.position
+    return np.array(
+        [
+            [px],
+            [py],
+            [pz],
+            [0.0],
+            [0.0],
+            [0.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _initial_covariance(config: KalmanConfig) -> np.ndarray:
+    p = config.initial_position_var
+    v = config.initial_velocity_var
+    return np.array(
+        [
+            [p, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, p, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, p, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, v, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, v, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, v],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _measurement_matrix() -> np.ndarray:
+    # State is [px, py, pz, vx, vy, vz]. Measurement is [px, py, pz].
+    return np.array(
+        [
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _transition_matrix(dt: float) -> np.ndarray:
+    return np.array(
+        [
+            [1.0, 0.0, 0.0, dt, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, dt, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, dt],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _process_noise_matrix(dt: float, sigma_accel_mps2: float) -> np.ndarray:
+    q = sigma_accel_mps2**2
+    pos = 0.25 * dt**4 * q
+    cross = 0.5 * dt**3 * q
+    vel = dt**2 * q
+
+    return np.array(
+        [
+            [pos, 0.0, 0.0, cross, 0.0, 0.0],
+            [0.0, pos, 0.0, 0.0, cross, 0.0],
+            [0.0, 0.0, pos, 0.0, 0.0, cross],
+            [cross, 0.0, 0.0, vel, 0.0, 0.0],
+            [0.0, cross, 0.0, 0.0, vel, 0.0],
+            [0.0, 0.0, cross, 0.0, 0.0, vel],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _measurement_vector(measurement: Measurement3D) -> np.ndarray:
+    mx, my, mz = measurement.position
+    return np.array(
+        [
+            [mx],
+            [my],
+            [mz],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _measurement_noise_matrix(measurement: Measurement3D, scale: float) -> np.ndarray:
+    return np.asarray(measurement.covariance, dtype=np.float64) * scale
+
+
+def _elapsed_seconds(last_ts_ns: int | None, ts_ns: int) -> float:
+    if last_ts_ns is None:
+        return 0.0
+    return max((ts_ns - last_ts_ns) / 1_000_000_000.0, 0.0)

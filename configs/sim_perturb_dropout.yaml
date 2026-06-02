@@ -1,0 +1,7 @@
+simulation:
+  dropout_probability: 0.03
+  seed: 17
+
+logging:
+  console_every: 999999
+

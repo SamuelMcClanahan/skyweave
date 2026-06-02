@@ -1,0 +1,7 @@
+simulation:
+  timestamp_jitter_ms: 5.0
+  seed: 23
+
+logging:
+  console_every: 999999
+

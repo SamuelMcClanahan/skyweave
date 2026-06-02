@@ -1,0 +1,7 @@
+simulation:
+  false_positive_probability: 0.15
+  seed: 19
+
+logging:
+  console_every: 999999
+

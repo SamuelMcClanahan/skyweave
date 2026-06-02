@@ -1,0 +1,2 @@
+"""Synthetic scene generation."""
+

@@ -1,0 +1,7 @@
+simulation:
+  pixel_noise_std_px: 1.5
+  seed: 13
+
+logging:
+  console_every: 999999
+

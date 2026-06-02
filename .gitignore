@@ -10,6 +10,7 @@ venv/
 
 # Generated data and logs
 data/
+archive/
 *.log
 *.jsonl
 *.mp4
@@ -29,4 +30,3 @@ debug_gridtrack/
 .DS_Store
 .idea/
 .vscode/
-
