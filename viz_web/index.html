@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Skyweave - Tactical Airspace Visualization</title>
+    <link rel="stylesheet" href="styles/main.css">
+    <link rel="stylesheet" href="styles/anduril-theme.css">
+    <link rel="stylesheet" href="styles/panels.css">
+
+    <!-- Cesium.js -->
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.113/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.113/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+
+    <!-- MsgPack for decoding -->
+    <script src="https://cdn.jsdelivr.net/npm/msgpack-lite@0.1.26/dist/msgpack.min.js"></script>
+
+    <!-- Import map for ES modules -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <!-- Top Status Bar -->
+    <div id="top-bar">
+        <div class="logo">
+            <span class="logo-icon">◈</span>
+            <span class="logo-text">SKYWEAVE</span>
+        </div>
+        <div class="status-indicators">
+            <div class="status-item">
+                <span class="status-label">TRACKS</span>
+                <span class="status-value" id="track-count">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">FPS</span>
+                <span class="status-value" id="fps-display">--</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">LATENCY</span>
+                <span class="status-value" id="latency-display">--</span>
+            </div>
+            <div class="status-item connection-status">
+                <span class="status-indicator" id="connection-indicator"></span>
+                <span class="status-value" id="connection-status">CONNECTING</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content Area -->
+    <div id="main-container">
+        <!-- Left Sidebar: Analytics -->
+        <div id="left-sidebar" class="sidebar">
+            <div class="sidebar-section">
+                <div class="section-header">
+                    <span class="section-icon">◆</span>
+                    <span class="section-title">SYSTEM STATUS</span>
+                </div>
+                <div class="section-content">
+                    <div class="info-row">
+                        <span class="info-label">Cameras Online</span>
+                        <span class="info-value" id="cameras-online">0/0</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Active Tracks</span>
+                        <span class="info-value" id="active-tracks">0</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Processing Rate</span>
+                        <span class="info-value" id="processing-rate">-- Hz</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Voxel Count</span>
+                        <span class="info-value" id="voxel-count">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="section-header">
+                    <span class="section-icon">◆</span>
+                    <span class="section-title">ACTIVE TRACKS</span>
+                </div>
+                <div class="section-content" id="track-list">
+                    <div class="empty-state">No active tracks</div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="section-header">
+                    <span class="section-icon">◆</span>
+                    <span class="section-title">CAMERAS</span>
+                </div>
+                <div class="section-content" id="camera-list">
+                    <div class="empty-state">No cameras</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Center: 3D Visualization -->
+        <div id="viz-container">
+            <!-- Cesium Container (底层 - satellite imagery) -->
+            <div id="cesiumContainer"></div>
+
+            <!-- Three.js Canvas (覆盖层 - tactical overlay) -->
+            <canvas id="three-canvas"></canvas>
+
+            <!-- Floating Track Detail Panel (hidden by default) -->
+            <div id="track-detail-panel" class="floating-panel" style="display: none;">
+                <div class="panel-header">
+                    <span class="panel-title" id="panel-track-title">Track #--</span>
+                    <button class="panel-close" id="panel-close">✕</button>
+                </div>
+                <div class="panel-content">
+                    <div class="detail-group">
+                        <div class="detail-row">
+                            <span class="detail-label">Classification</span>
+                            <span class="detail-value" id="detail-classification">Unknown</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Confidence</span>
+                            <span class="detail-value" id="detail-confidence">--</span>
+                        </div>
+                    </div>
+                    <div class="detail-group">
+                        <div class="detail-row">
+                            <span class="detail-label">Position</span>
+                            <span class="detail-value mono" id="detail-position">--, --, --</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Altitude AGL</span>
+                            <span class="detail-value" id="detail-altitude">-- m</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Speed</span>
+                            <span class="detail-value" id="detail-speed">-- m/s</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Heading</span>
+                            <span class="detail-value" id="detail-heading">--°</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Climb Rate</span>
+                            <span class="detail-value" id="detail-climb-rate">-- m/s</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Acceleration</span>
+                            <span class="detail-value" id="detail-acceleration">-- m/s²</span>
+                        </div>
+                    </div>
+                    <div class="detail-group">
+                        <div class="detail-row">
+                            <span class="detail-label">Track Age</span>
+                            <span class="detail-value" id="detail-age">-- s</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Updates</span>
+                            <span class="detail-value" id="detail-updates">--</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Cameras</span>
+                            <span class="detail-value" id="detail-cameras">--</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="panel-actions">
+                    <button class="btn-primary" id="btn-follow-track">Follow Camera</button>
+                    <button class="btn-secondary" id="btn-center-track">Center View</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Sidebar: Controls (placeholder for future replay) -->
+        <div id="right-sidebar" class="sidebar">
+            <div class="sidebar-section">
+                <div class="section-header">
+                    <span class="section-icon">◆</span>
+                    <span class="section-title">VIEW CONTROLS</span>
+                </div>
+                <div class="section-content">
+                    <div class="control-group">
+                        <label class="control-label">Scale</label>
+                        <input type="range" id="scale-slider" min="0" max="100" value="50" class="slider">
+                        <div class="scale-labels">
+                            <span>1m</span>
+                            <span>100m</span>
+                            <span>10km</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">
+                            <input type="checkbox" id="auto-zoom" checked>
+                            Auto-Zoom to Tracks
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="section-header">
+                    <span class="section-icon">◆</span>
+                    <span class="section-title">RAY VISUALIZATION</span>
+                </div>
+                <div class="section-content">
+                    <div class="control-group">
+                        <label class="control-label">
+                            <input type="radio" name="ray-mode" value="none" checked>
+                            None
+                        </label>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">
+                            <input type="radio" name="ray-mode" value="all">
+                            All Cameras
+                        </label>
+                    </div>
+                    <div class="control-group" id="per-camera-rays">
+                        <!-- Dynamically populated per camera -->
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="section-header">
+                    <span class="section-icon">◆</span>
+                    <span class="section-title">CONNECTION</span>
+                </div>
+                <div class="section-content">
+                    <div class="info-row">
+                        <span class="info-label">WebSocket</span>
+                        <span class="info-value" id="ws-status">Disconnected</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Messages Received</span>
+                        <span class="info-value" id="msg-count">0</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bottom Control Bar -->
+    <div id="bottom-bar">
+        <div class="control-section">
+            <label class="toggle-control">
+                <input type="checkbox" id="toggle-cameras" checked>
+                <span class="icon">🎥</span>
+                <span>Cameras</span>
+            </label>
+            <label class="toggle-control">
+                <input type="checkbox" id="toggle-frustums" checked>
+                <span class="icon">📐</span>
+                <span>Frustums</span>
+            </label>
+            <label class="toggle-control">
+                <input type="checkbox" id="toggle-voxels" checked>
+                <span class="icon">📍</span>
+                <span>Voxels</span>
+            </label>
+            <label class="toggle-control">
+                <input type="checkbox" id="toggle-tracks" checked>
+                <span class="icon">🎯</span>
+                <span>Tracks</span>
+            </label>
+            <label class="toggle-control">
+                <input type="checkbox" id="toggle-trails" checked>
+                <span class="icon">━</span>
+                <span>Trails</span>
+            </label>
+            <label class="toggle-control">
+                <input type="checkbox" id="toggle-grid" checked>
+                <span class="icon">⊞</span>
+                <span>Grid</span>
+            </label>
+        </div>
+
+        <div class="control-section">
+            <button class="btn-secondary" id="btn-reset-camera">Reset Camera</button>
+            <button class="btn-secondary" id="btn-fit-all">Fit All</button>
+        </div>
+    </div>
+
+    <!-- Load application modules -->
+    <script type="module" src="src/main.js"></script>
+</body>
+</html>
