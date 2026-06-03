@@ -70,6 +70,24 @@ image geometry. Perturbation profiles are available at
 `configs/sim_perturb_false_positive.yaml`, and
 `configs/sim_perturb_dropout.yaml`.
 
+Export a deterministic visualization bundle:
+
+```bash
+.venv/bin/python -m pip install -e '.[dev,numba]'
+.venv/bin/skyweave-viz-export --config configs/sim_mvp_ov9281_100hz_numba.yaml --output data/viz/mvp-100hz --frames 120
+```
+
+The bundle contract is documented in `docs/viz-data-contract.md`.
+
+Run the headless camera packet-generation smoke check:
+
+```bash
+.venv/bin/skyweave-camera-check --frames 120 --width 1280 --height 800 --fps 100 --square-size 18 --console-every 20
+```
+
+This validates frame differencing, blob extraction, bounded motion patches, and
+packet latency without requiring real cameras or a browser.
+
 For the first Rubik Pi 3 target sweep, use
 `docs/rubik-pi-setup.md`.
 

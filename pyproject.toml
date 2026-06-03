@@ -28,6 +28,8 @@ numba = [
 skyweave-sim-check = "skyweave.cli.sim_check:main"
 skyweave-replay = "skyweave.cli.replay:main"
 skyweave-benchmark = "skyweave.cli.benchmark:main"
+skyweave-viz-export = "skyweave.cli.viz_export:main"
+skyweave-camera-check = "skyweave.cli.camera_check:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

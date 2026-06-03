@@ -1,0 +1,1 @@
+"""Headless camera packet generation."""

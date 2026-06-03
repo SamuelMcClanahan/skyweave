@@ -140,11 +140,13 @@ class VizCamera(SkyweaveModel):
 
 
 class VizFrame(SkyweaveModel):
+    frame_seq: int
     ts_ns: int
     tracks: list[Track]
     cameras: list[VizCamera]
     measurements: list[Measurement3D]
     weavefield_history: list[WeavefieldVolume]
+    truth_position: tuple[float, float, float] | None = None
     stats: dict[str, float]
 
 
