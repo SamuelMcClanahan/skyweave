@@ -101,10 +101,10 @@
 
         <!-- Center: 3D Visualization -->
         <div id="viz-container">
-            <!-- Cesium Container (底层 - satellite imagery) -->
+            <!-- Cesium earth context -->
             <div id="cesiumContainer"></div>
 
-            <!-- Three.js Canvas (覆盖层 - tactical overlay) -->
+            <!-- Three.js tactical overlay -->
             <canvas id="three-canvas"></canvas>
 
             <!-- Floating Track Detail Panel (hidden by default) -->
@@ -184,8 +184,8 @@
                         <label class="control-label">Scale</label>
                         <input type="range" id="scale-slider" min="0" max="100" value="50" class="slider">
                         <div class="scale-labels">
-                            <span>1m</span>
-                            <span>100m</span>
+                            <span>50m</span>
+                            <span>700m</span>
                             <span>10km</span>
                         </div>
                     </div>

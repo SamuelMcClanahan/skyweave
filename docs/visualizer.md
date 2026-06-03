@@ -3,7 +3,7 @@
 The visualizer is a browser UI for Skyweave `VizFrame` streams. It keeps the
 original intended setup:
 
-- Cesium.js for the Earth/terrain context
+- Cesium.js for the earth context
 - Three.js overlay for cameras, rays, voxels, tracks, trails, and labels
 - `aiohttp` WebSocket server for live frames
 - no frontend build step
@@ -26,6 +26,15 @@ same machine.
 Open `http://localhost:8080`.
 
 The demo streams synthetic camera, track, and voxel data over `/ws`.
+The camera arrays are fixed. Tracks only emit voxel evidence when at least two
+fixed cameras can see the synthetic target by range and FOV.
+Use `--camera-array` to switch layouts:
+
+```bash
+.venv/bin/skyweave-viz-demo --camera-array perimeter-6
+.venv/bin/skyweave-viz-demo --camera-array mixed-8
+.venv/bin/skyweave-viz-demo --list-camera-arrays
+```
 
 ## Data Shape
 
@@ -87,5 +96,8 @@ src/skyweave/viz/
 ## Notes
 
 - Cesium and Three.js load from CDNs, so the browser needs internet access.
+- The default base map uses OpenStreetMap tiles to avoid requiring a Cesium Ion token for the demo.
+- Set `window.CESIUM_ION_TOKEN` or `window.SKYWEAVE_CESIUM_ION_TOKEN` before startup if you want Cesium Ion terrain.
+- Without a terrain provider, the base map is imagery on a globe. The visualizer darkens the imagery by default for contrast.
 - The current demo uses a local San Francisco ENU origin for terrain context.
 - If Cesium fails to load, check browser console output and network access.

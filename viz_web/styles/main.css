@@ -13,7 +13,7 @@ body {
     height: 100%;
 }
 
-/* Layer Cesium (底层) and Three.js (覆盖层) properly */
+/* Layer Cesium below the transparent Three.js overlay. */
 #cesiumContainer {
     position: absolute;
     top: 0;
@@ -30,7 +30,7 @@ body {
     width: 100%;
     height: 100%;
     z-index: 2;
-    pointer-events: none; /* Let mouse events pass to Cesium for earth interaction */
+    pointer-events: none; /* Let mouse events pass to Cesium navigation. */
 }
 
 /* Allow pointer events on interactive Three.js objects */
@@ -38,9 +38,12 @@ body {
     pointer-events: auto;
 }
 
-/* Override Cesium default UI elements to match Anduril theme */
+/* Keep map data attribution visible while matching the interface. */
 .cesium-viewer .cesium-viewer-bottom {
-    display: none; /* Hide default credits bar */
+    right: 8px;
+    bottom: 4px;
+    color: rgba(255, 255, 255, 0.6);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
 }
 
 .cesium-viewer-toolbar {

@@ -1,42 +1,48 @@
 // World grid rendering
 import * as THREE from 'three';
 
+const GRID_MIN_SIZE_M = 100;
+const GRID_MAX_SIZE_M = 20000;
+const GRID_DIVISIONS = 50;
+const MARKER_COUNT_PER_AXIS = 5;
+const LABEL_SCALE = [40, 10, 1];
+
 export class GridRenderer {
     constructor(scene) {
         this.scene = scene;
         this.gridGroup = new THREE.Group();
         this.gridGroup.name = 'grid';
 
-        this.createGrid();
+        this.createGrid(GRID_MIN_SIZE_M);
         this.scene.add(this.gridGroup);
     }
 
-    createGrid() {
+    createGrid(size) {
         // Main ground grid
-        const size = 100;
-        const divisions = 50;
-
-        const grid = new THREE.GridHelper(size, divisions, 0x333333, 0x111111);
+        const grid = new THREE.GridHelper(size, GRID_DIVISIONS, 0x333333, 0x111111);
         grid.material.transparent = true;
         grid.material.opacity = 0.15;
         this.gridGroup.add(grid);
 
         // Axes helper
-        const axes = new THREE.AxesHelper(10);
+        const axes = new THREE.AxesHelper(size / 10);
         axes.material.transparent = true;
         axes.material.opacity = 0.6;
         this.gridGroup.add(axes);
 
         // Add distance markers
-        for (let i = -50; i <= 50; i += 10) {
+        const halfSize = size / 2;
+        const step = this.niceStep(halfSize / MARKER_COUNT_PER_AXIS);
+        for (let i = -halfSize; i <= halfSize; i += step) {
             if (i === 0) continue;
+            const label = `${Math.round(i)}m`;
 
             // X-axis markers
-            const markerX = this.createDistanceMarker(`${i}m`, new THREE.Vector3(i, 0, 0));
+            const markerX = this.createDistanceMarker(label, new THREE.Vector3(i, 0, 0));
             this.gridGroup.add(markerX);
 
             // Y-axis markers
-            const markerY = this.createDistanceMarker(`${i}m`, new THREE.Vector3(0, i, 0));
+            const markerY = this.createDistanceMarker(label, new THREE.Vector3(0, i, 0));
             this.gridGroup.add(markerY);
         }
     }
@@ -64,7 +70,7 @@ export class GridRenderer {
 
         const sprite = new THREE.Sprite(material);
         sprite.position.copy(position);
-        sprite.scale.set(2, 0.5, 1);
+        sprite.scale.set(...LABEL_SCALE);
 
         return sprite;
     }
@@ -74,9 +80,37 @@ export class GridRenderer {
     }
 
     updateScale(scaleValue) {
-        // scaleValue: 0-100
-        // Adjust grid size based on scale
-        const size = 10 + (scaleValue / 100) * 10000;
-        // Could dynamically recreate grid here
+        const t = Math.min(100, Math.max(0, scaleValue)) / 100;
+        const size = GRID_MIN_SIZE_M * Math.pow(GRID_MAX_SIZE_M / GRID_MIN_SIZE_M, t);
+
+        this.clearGrid();
+        this.createGrid(size);
+    }
+
+    clearGrid() {
+        while (this.gridGroup.children.length > 0) {
+            const child = this.gridGroup.children.pop();
+            if (child.geometry) child.geometry.dispose();
+            this.disposeMaterial(child.material);
+        }
+    }
+
+    disposeMaterial(material) {
+        if (!material) {
+            return;
+        }
+        if (Array.isArray(material)) {
+            material.forEach(item => this.disposeMaterial(item));
+            return;
+        }
+        if (material.map) material.map.dispose();
+        material.dispose();
+    }
+
+    niceStep(value) {
+        const exponent = Math.floor(Math.log10(value));
+        const fraction = value / Math.pow(10, exponent);
+        const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
+        return niceFraction * Math.pow(10, exponent);
     }
 }

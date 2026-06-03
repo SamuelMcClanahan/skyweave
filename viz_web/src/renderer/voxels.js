@@ -1,6 +1,8 @@
 // Voxel point cloud rendering with temporal decay
 import * as THREE from 'three';
 
+const VOXEL_POINT_SIZE_PX = 6;
+
 export class VoxelRenderer {
     constructor(scene) {
         this.scene = scene;
@@ -48,10 +50,10 @@ export class VoxelRenderer {
         const sizes = [];
 
         voxels.forEach(voxel => {
-            // Convert voxel indices to world position
-            const x = grid.origin[0] + voxel.ix * grid.voxel_size_m;
-            const y = grid.origin[1] + voxel.iy * grid.voxel_size_m;
-            const z = grid.origin[2] + voxel.iz * grid.voxel_size_m;
+            // Convert voxel indices to voxel centers in world meters.
+            const x = grid.origin[0] + (voxel.ix + 0.5) * grid.voxel_size_m;
+            const y = grid.origin[1] + (voxel.iy + 0.5) * grid.voxel_size_m;
+            const z = grid.origin[2] + (voxel.iz + 0.5) * grid.voxel_size_m;
 
             positions.push(x, y, z);
 
@@ -72,12 +74,12 @@ export class VoxelRenderer {
 
         // Create shader material for glowing points
         const material = new THREE.PointsMaterial({
-            size: 0.2,
+            size: VOXEL_POINT_SIZE_PX,
             vertexColors: true,
             transparent: true,
             opacity: 0.8 * decayFactor,
             blending: THREE.AdditiveBlending,
-            sizeAttenuation: true,
+            sizeAttenuation: false,
             depthWrite: false
         });
 

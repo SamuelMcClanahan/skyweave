@@ -163,6 +163,10 @@ export class UIManager {
             case 'follow':
                 this.updateFollowButton();
                 break;
+
+            case 'settings':
+                this.updateSettingsControls();
+                break;
         }
     }
 
@@ -312,6 +316,15 @@ export class UIManager {
         });
     }
 
+    updateSettingsControls() {
+        if (this.elements.scaleSlider) {
+            this.elements.scaleSlider.value = this.state.settings.scaleValue;
+        }
+        if (this.elements.autoZoom) {
+            this.elements.autoZoom.checked = this.state.settings.autoZoom;
+        }
+    }
+
     showTrackDetailPanel() {
         this.elements.trackDetailPanel.style.display = 'block';
     }
@@ -361,8 +374,10 @@ export class UIManager {
         document.getElementById('detail-age').textContent = `${age.toFixed(1)} s`;
         document.getElementById('detail-updates').textContent = track.update_count;
 
-        // Supporting cameras (not in current message format, placeholder)
-        document.getElementById('detail-cameras').textContent = '--';
+        const cameraIds = track.visible_camera_ids || [];
+        document.getElementById('detail-cameras').textContent = cameraIds.length > 0
+            ? cameraIds.map(id => `CAM ${id}`).join(', ')
+            : 'None';
     }
 
     updateFollowButton() {

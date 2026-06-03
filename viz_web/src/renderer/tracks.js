@@ -1,6 +1,17 @@
 // Track sphere and trail rendering
 import * as THREE from 'three';
 
+const TRACK_RADIUS_M = 18;
+const TRACK_LABEL_OFFSET_M = 35;
+const TRACK_LABEL_SCALE = [90, 22, 1];
+const MIN_ARROW_LENGTH_M = 45;
+const ARROW_SPEED_SCALE = 4;
+const ARROW_HEAD_LENGTH_M = 12;
+const ARROW_HEAD_WIDTH_M = 8;
+const MIN_DIRECTION_SPEED_MPS = 0.01;
+const SELECTED_TRACK_COLOR = 0x00e5ff;
+const SELECTED_HALO_RADIUS_M = TRACK_RADIUS_M * 1.8;
+
 export class TrackRenderer {
     constructor(scene) {
         this.scene = scene;
@@ -12,6 +23,7 @@ export class TrackRenderer {
         this.trailMeshes = new Map();
         this.velocityArrows = new Map();
         this.labels = new Map();
+        this.selectionHalos = new Map();
     }
 
     update(tracks, visibility, selectedTrackId) {
@@ -48,9 +60,16 @@ export class TrackRenderer {
         trackMesh.scale.setScalar(isSelected ? 1.5 : 1.0);
 
         // Update color based on classification
-        const color = this.getTrackColor(track);
+        const color = isSelected ? SELECTED_TRACK_COLOR : this.getTrackColor(track);
         trackMesh.material.color.setHex(color);
         trackMesh.material.emissive.setHex(color);
+        trackMesh.material.emissiveIntensity = isSelected ? 0.9 : 0.3;
+
+        if (this.selectionHalos.has(track.id)) {
+            const halo = this.selectionHalos.get(track.id);
+            halo.position.copy(position);
+            halo.visible = isSelected;
+        }
 
         // Update trail
         if (visibility.trails && track.trail && track.trail.length > 1) {
@@ -64,16 +83,22 @@ export class TrackRenderer {
         if (this.velocityArrows.has(track.id)) {
             const arrow = this.velocityArrows.get(track.id);
             arrow.position.copy(position);
-            arrow.setDirection(velocity.normalize());
             const speed = Math.sqrt(track.state[3]**2 + track.state[4]**2 + track.state[5]**2);
-            arrow.setLength(Math.max(2, speed * 0.5), 0.5, 0.3);
+            if (speed > MIN_DIRECTION_SPEED_MPS) {
+                arrow.setDirection(velocity.clone().normalize());
+            }
+            arrow.setLength(
+                Math.max(MIN_ARROW_LENGTH_M, speed * ARROW_SPEED_SCALE),
+                ARROW_HEAD_LENGTH_M,
+                ARROW_HEAD_WIDTH_M
+            );
         }
 
         // Update label
         if (this.labels.has(track.id)) {
             const label = this.labels.get(track.id);
             label.position.copy(position);
-            label.position.z += 2;
+            label.position.z += TRACK_LABEL_OFFSET_M;
         }
     }
 
@@ -81,7 +106,7 @@ export class TrackRenderer {
         const group = new THREE.Group();
 
         // Main track sphere
-        const geometry = new THREE.SphereGeometry(0.5, 16, 16);
+        const geometry = new THREE.SphereGeometry(TRACK_RADIUS_M, 24, 24);
         const material = new THREE.MeshStandardMaterial({
             color: this.getTrackColor(track),
             emissive: this.getTrackColor(track),
@@ -94,15 +119,28 @@ export class TrackRenderer {
         mesh.userData.trackId = track.id;
         group.add(mesh);
 
+        const haloGeometry = new THREE.SphereGeometry(SELECTED_HALO_RADIUS_M, 24, 24);
+        const haloMaterial = new THREE.MeshBasicMaterial({
+            color: SELECTED_TRACK_COLOR,
+            transparent: true,
+            opacity: 0.22,
+            wireframe: true,
+            depthWrite: false
+        });
+        const halo = new THREE.Mesh(haloGeometry, haloMaterial);
+        halo.visible = false;
+        group.add(halo);
+        this.selectionHalos.set(track.id, halo);
+
         // Velocity arrow
         const arrowColor = this.getTrackColor(track);
         const arrow = new THREE.ArrowHelper(
             new THREE.Vector3(1, 0, 0),
             new THREE.Vector3(0, 0, 0),
-            2,
+            MIN_ARROW_LENGTH_M,
             arrowColor,
-            0.5,
-            0.3
+            ARROW_HEAD_LENGTH_M,
+            ARROW_HEAD_WIDTH_M
         );
         group.add(arrow);
         this.velocityArrows.set(track.id, arrow);
@@ -164,6 +202,13 @@ export class TrackRenderer {
             this.trackMeshes.delete(trackId);
         }
 
+        if (this.selectionHalos.has(trackId)) {
+            const halo = this.selectionHalos.get(trackId);
+            halo.geometry.dispose();
+            halo.material.dispose();
+            this.selectionHalos.delete(trackId);
+        }
+
         if (this.trailMeshes.has(trackId)) {
             const trail = this.trailMeshes.get(trackId);
             this.trackGroup.remove(trail);
@@ -220,7 +265,7 @@ export class TrackRenderer {
         });
 
         const sprite = new THREE.Sprite(material);
-        sprite.scale.set(2, 0.5, 1);
+        sprite.scale.set(...TRACK_LABEL_SCALE);
 
         return sprite;
     }

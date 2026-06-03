@@ -1,14 +1,27 @@
-// Scene manager - handles Three.js initialization and rendering
+// Scene manager: Cesium earth context plus a transparent Three.js overlay.
 import * as THREE from 'three';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
 import { CameraRenderer } from './cameras.js';
 import { TrackRenderer } from './tracks.js';
 import { VoxelRenderer } from './voxels.js';
 import { RayRenderer } from './rays.js';
 import { GridRenderer } from './grid.js';
+
+const OSM_TILE_URL = 'https://tile.openstreetmap.org/';
+const OSM_CREDIT = 'Map data (c) OpenStreetMap contributors';
+const EARTH_FALLBACK_COLOR = '#10131a';
+const AUTO_FIT_INTERVAL_MS = 1500;
+const SCALE_MIN_RANGE_M = 50;
+const SCALE_MAX_RANGE_M = 10000;
+const DEFAULT_VIEW_PITCH_RAD = -Math.PI / 4;
+const POINTER_DRAG_THRESHOLD_PX = 6;
+const DRAG_CLICK_SUPPRESS_MS = 250;
+const BASE_LAYER_DARK_STYLE = {
+    brightness: 0.48,
+    contrast: 1.35,
+    saturation: 0.35,
+    gamma: 0.85
+};
 
 export class SceneManager {
     constructor(state) {
@@ -22,7 +35,6 @@ export class SceneManager {
         this.camera = null;
         this.renderer = null;
         this.controls = null;
-        this.composer = null;
 
         // Renderers for different object types
         this.cameraRenderer = null;
@@ -36,15 +48,20 @@ export class SceneManager {
         this.mouse = new THREE.Vector2();
 
         this.canvas = null;
+        this.lastAutoFitMs = 0;
+        this.lastAppliedScaleValue = state.settings.scaleValue;
+        this.pointerDown = null;
+        this.pointerDragged = false;
+        this.lastDragEndMs = 0;
     }
 
     async init() {
         this.canvas = document.getElementById('three-canvas');
 
-        // Initialize Cesium first (底层)
+        // Initialize Cesium first as the earth layer.
         this.initCesium();
 
-        // Initialize Three.js overlay (覆盖层)
+        // Initialize Three.js as the transparent tactical overlay.
         this.initThree();
 
         // Initialize renderers
@@ -53,6 +70,7 @@ export class SceneManager {
         this.voxelRenderer = new VoxelRenderer(this.scene);
         this.rayRenderer = new RayRenderer(this.scene);
         this.gridRenderer = new GridRenderer(this.scene);
+        this.applySettings(this.state.settings, true);
 
         // Setup event listeners
         this.setupEventListeners();
@@ -62,7 +80,9 @@ export class SceneManager {
     }
 
     initCesium() {
-        // Initialize Cesium viewer focused on San Francisco
+        this.configureCesiumIon();
+
+        // Initialize Cesium viewer focused on San Francisco.
         const viewerOptions = {
             baseLayerPicker: false,
             geocoder: false,
@@ -90,8 +110,10 @@ export class SceneManager {
             delete viewerOptions.imageryProvider;
             this.cesiumViewer = new Cesium.Viewer('cesiumContainer', viewerOptions);
         }
+        this.installImageryDiagnostics();
+        this.installManualNavigationHandlers();
 
-        // Define local origin for our tracking coordinate system (SF downtown)
+        // Define local origin for our tracking coordinate system.
         // This is the reference point: our local (0,0,0) corresponds to this lat/lon
         this.localOriginLongitude = -122.4194;
         this.localOriginLatitude = 37.7749;
@@ -101,14 +123,13 @@ export class SceneManager {
             0
         );
 
-        // Compute the ENU (East-North-Up) transformation matrix at our local origin
-        // This converts from ECEF to our local coordinate system
+        // ENU maps Skyweave local meters to Cesium earth coordinates.
         this.enuTransform = Cesium.Transforms.eastNorthUpToFixedFrame(this.localOriginCartesian);
         this.enuTransformInverse = Cesium.Matrix4.inverse(this.enuTransform, new Cesium.Matrix4());
 
         // Set initial view to San Francisco downtown
         this.cesiumViewer.camera.setView({
-            destination: Cesium.Cartesian3.fromDegrees(-122.4194, 37.7749, 2000), // SF coords + 2km altitude
+            destination: Cesium.Cartesian3.fromDegrees(-122.4194, 37.7749, 2000),
             orientation: {
                 heading: Cesium.Math.toRadians(0),
                 pitch: Cesium.Math.toRadians(-45),
@@ -127,9 +148,26 @@ export class SceneManager {
             this.cesiumViewer.scene.moon.show = false;
         }
         this.cesiumViewer.scene.backgroundColor = Cesium.Color.BLACK;
+        if (this.cesiumViewer.scene.globe) {
+            this.cesiumViewer.scene.globe.baseColor = Cesium.Color.fromCssColorString(EARTH_FALLBACK_COLOR);
+        }
+    }
+
+    configureCesiumIon() {
+        const token = window.SKYWEAVE_CESIUM_ION_TOKEN || window.CESIUM_ION_TOKEN;
+        if (token && Cesium.Ion) {
+            Cesium.Ion.defaultAccessToken = token;
+        }
+    }
+
+    hasCesiumIonToken() {
+        return Boolean(window.SKYWEAVE_CESIUM_ION_TOKEN || window.CESIUM_ION_TOKEN);
     }
 
     addTerrainOption(viewerOptions) {
+        if (!this.hasCesiumIonToken()) {
+            return;
+        }
         if (Cesium.Terrain?.fromWorldTerrain) {
             viewerOptions.terrain = Cesium.Terrain.fromWorldTerrain();
         } else if (Cesium.createWorldTerrain) {
@@ -138,19 +176,99 @@ export class SceneManager {
     }
 
     addImageryOption(viewerOptions) {
-        if (Cesium.IonImageryProvider?.fromAssetId && Cesium.ImageryLayer?.fromProviderAsync) {
-            viewerOptions.baseLayer = Cesium.ImageryLayer.fromProviderAsync(
-                Cesium.IonImageryProvider.fromAssetId(2)
-            );
-        } else if (Cesium.IonImageryProvider) {
-            viewerOptions.imageryProvider = new Cesium.IonImageryProvider({ assetId: 2 });
+        const provider = this.createOsmImageryProvider();
+        if (!provider) {
+            return;
+        }
+
+        if (Cesium.ImageryLayer) {
+            viewerOptions.baseLayer = new Cesium.ImageryLayer(provider);
+        } else {
+            viewerOptions.imageryProvider = provider;
         }
     }
 
+    createOsmImageryProvider() {
+        if (Cesium.OpenStreetMapImageryProvider) {
+            return new Cesium.OpenStreetMapImageryProvider({
+                url: OSM_TILE_URL,
+                credit: OSM_CREDIT,
+                maximumLevel: 19
+            });
+        }
+        if (Cesium.UrlTemplateImageryProvider) {
+            return new Cesium.UrlTemplateImageryProvider({
+                url: `${OSM_TILE_URL}{z}/{x}/{y}.png`,
+                credit: OSM_CREDIT,
+                maximumLevel: 19,
+                enablePickFeatures: false
+            });
+        }
+        return null;
+    }
+
+    installImageryDiagnostics() {
+        const layers = this.cesiumViewer.scene.imageryLayers;
+        if (!layers || layers.length === 0) {
+            console.warn('Cesium initialized without a base imagery layer.');
+            return;
+        }
+
+        const baseLayer = layers.get(0);
+        const provider = baseLayer?.imageryProvider;
+        console.info(`Cesium base imagery: ${provider?.constructor?.name || 'unknown'}`);
+        provider?.errorEvent?.addEventListener(error => {
+            console.warn('Cesium imagery tile error', error);
+        });
+        baseLayer.show = true;
+        baseLayer.alpha = 1.0;
+        baseLayer.brightness = BASE_LAYER_DARK_STYLE.brightness;
+        baseLayer.contrast = BASE_LAYER_DARK_STYLE.contrast;
+        baseLayer.saturation = BASE_LAYER_DARK_STYLE.saturation;
+        baseLayer.gamma = BASE_LAYER_DARK_STYLE.gamma;
+    }
+
+    installManualNavigationHandlers() {
+        const canvas = this.cesiumViewer.scene?.canvas;
+        if (!canvas) {
+            return;
+        }
+
+        const disableAutoZoom = () => {
+            this.cesiumViewer.camera.cancelFlight?.();
+            if (this.state.settings.autoZoom) {
+                this.state.setSetting('autoZoom', false);
+            }
+        };
+
+        canvas.addEventListener('pointerdown', event => {
+            this.pointerDown = { x: event.clientX, y: event.clientY };
+            this.pointerDragged = false;
+        }, { passive: true });
+        canvas.addEventListener('pointermove', event => {
+            if (!this.pointerDown) {
+                return;
+            }
+            const dx = event.clientX - this.pointerDown.x;
+            const dy = event.clientY - this.pointerDown.y;
+            if (Math.hypot(dx, dy) >= POINTER_DRAG_THRESHOLD_PX) {
+                this.pointerDragged = true;
+                disableAutoZoom();
+            }
+        }, { passive: true });
+        canvas.addEventListener('pointerup', () => {
+            if (this.pointerDragged) {
+                this.lastDragEndMs = performance.now();
+            }
+            this.pointerDown = null;
+        }, { passive: true });
+        canvas.addEventListener('wheel', disableAutoZoom, { passive: true });
+        canvas.addEventListener('touchstart', disableAutoZoom, { passive: true });
+    }
+
     initThree() {
-        // Create scene with transparent background to overlay on Cesium
+        // Create scene with a transparent background to overlay on Cesium.
         this.scene = new THREE.Scene();
-        // No background color - fully transparent to show Cesium underneath
 
         // Create camera (will sync with Cesium camera each frame)
         const width = this.canvas.clientWidth;
@@ -166,23 +284,10 @@ export class SceneManager {
         this.renderer.setSize(width, height);
         this.renderer.setPixelRatio(window.devicePixelRatio);
         this.renderer.setClearColor(0x000000, 0); // Fully transparent
+        this.renderer.autoClear = true;
 
         // No OrbitControls - Cesium handles camera navigation
         // Three.js camera will sync to Cesium's camera position
-
-        // Setup post-processing (bloom effect)
-        this.composer = new EffectComposer(this.renderer);
-
-        const renderPass = new RenderPass(this.scene, this.camera);
-        this.composer.addPass(renderPass);
-
-        const bloomPass = new UnrealBloomPass(
-            new THREE.Vector2(width, height),
-            0.3,  // strength - much more subtle
-            0.3,  // radius
-            0.9   // threshold - higher = less glow
-        );
-        this.composer.addPass(bloomPass);
 
         // Lighting
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -247,11 +352,17 @@ export class SceneManager {
         // Window resize
         window.addEventListener('resize', () => this.onWindowResize());
 
-        // Mouse click for track selection
-        this.canvas.addEventListener('click', (event) => this.onMouseClick(event));
+        const interactionCanvas = this.getInteractionCanvas();
+
+        // Click the Cesium canvas because the Three canvas lets map events pass through.
+        interactionCanvas.addEventListener('click', event => this.onMouseClick(event));
 
         // Mouse move for hover effects
-        this.canvas.addEventListener('mousemove', (event) => this.onMouseMove(event));
+        interactionCanvas.addEventListener('mousemove', event => this.onMouseMove(event));
+    }
+
+    getInteractionCanvas() {
+        return this.cesiumViewer.scene?.canvas || this.canvas;
     }
 
     onWindowResize() {
@@ -262,12 +373,15 @@ export class SceneManager {
         this.camera.updateProjectionMatrix();
 
         this.renderer.setSize(width, height);
-        this.composer.setSize(width, height);
     }
 
     onMouseClick(event) {
+        if (performance.now() - this.lastDragEndMs < DRAG_CLICK_SUPPRESS_MS) {
+            return;
+        }
+
         // Calculate mouse position in normalized device coordinates
-        const rect = this.canvas.getBoundingClientRect();
+        const rect = this.getInteractionCanvas().getBoundingClientRect();
         this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
@@ -279,13 +393,16 @@ export class SceneManager {
             const trackId = this.trackRenderer.raycast(this.raycaster);
             if (trackId !== null) {
                 this.state.selectTrack(trackId);
+                if (this.state.settings.autoZoom) {
+                    this.state.followTrack(trackId);
+                }
             }
         }
     }
 
     onMouseMove(event) {
         // Update mouse position for hover effects
-        const rect = this.canvas.getBoundingClientRect();
+        const rect = this.getInteractionCanvas().getBoundingClientRect();
         this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     }
@@ -334,14 +451,47 @@ export class SceneManager {
                 }
                 break;
 
+            case 'selection':
+                if (this.trackRenderer) {
+                    this.trackRenderer.update(state.tracks, state.visibility, state.selectedTrackId);
+                }
+                break;
+
+            case 'settings':
+                this.applySettings(state.settings);
+                break;
+
             case 'follow':
                 this.updateCameraFollow();
                 break;
         }
     }
 
+    applySettings(settings, force = false) {
+        if (this.gridRenderer) {
+            this.gridRenderer.updateScale(settings.scaleValue);
+        }
+        if (force || settings.scaleValue !== this.lastAppliedScaleValue) {
+            this.lastAppliedScaleValue = settings.scaleValue;
+            this.applyViewScale(settings.scaleValue);
+        }
+    }
+
+    applyViewScale(scaleValue) {
+        const focus = this.getCurrentFocusPoint();
+        if (!focus) {
+            return;
+        }
+        this.lookAtLocalPoint(focus, this.scaleValueToRangeMeters(scaleValue));
+    }
+
     updateCameraFollow() {
         if (!this.state.settings.autoZoom) return;
+        const now = performance.now();
+        if (now - this.lastAutoFitMs < AUTO_FIT_INTERVAL_MS) {
+            return;
+        }
+        this.lastAutoFitMs = now;
 
         const followingTrack = this.state.getFollowingTrack();
         if (followingTrack) {
@@ -354,12 +504,9 @@ export class SceneManager {
 
     centerOnTrack(track) {
         const pos = track.state.slice(0, 3);
-        const localPoint = new Cesium.Cartesian3(pos[0], pos[1], pos[2]);
-        const ecefPoint = new Cesium.Cartesian3();
-        Cesium.Matrix4.multiplyByPoint(this.enuTransform, localPoint, ecefPoint);
-        this.cesiumViewer.camera.lookAt(
-            ecefPoint,
-            new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), 500)
+        this.lookAtLocalPoint(
+            new THREE.Vector3(pos[0], pos[1], pos[2]),
+            this.scaleValueToRangeMeters(this.state.settings.scaleValue)
         );
     }
 
@@ -378,58 +525,95 @@ export class SceneManager {
     fitToTracks() {
         if (this.state.tracks.size === 0) return;
 
-        const bounds = new THREE.Box3();
-        this.state.tracks.forEach(track => {
-            const pos = track.state.slice(0, 3);
-            bounds.expandByPoint(new THREE.Vector3(pos[0], pos[1], pos[2]));
-        });
+        const bounds = this.getTrackBounds();
+        if (!bounds) return;
 
         const center = bounds.getCenter(new THREE.Vector3());
         const size = bounds.getSize(new THREE.Vector3());
         const maxDim = Math.max(size.x, size.y, size.z);
 
-        // Determine distance based on track classification if available
-        let distance = maxDim * 2;
-        if (this.state.tracks.size === 1) {
-            const track = Array.from(this.state.tracks.values())[0];
-            if (track.classification === 'plane') {
-                distance = 2000;
-            } else if (track.classification === 'drone') {
-                distance = 500;
-            } else {
-                distance = 300;
-            }
+        const distance = Math.max(maxDim * 2, this.scaleValueToRangeMeters(this.state.settings.scaleValue));
+        this.flyToLocalPoint(center, distance);
+    }
+
+    getTrackBounds() {
+        if (this.state.tracks.size === 0) {
+            return null;
         }
 
-        // Convert local ENU center to ECEF for Cesium
-        const localCenter = new Cesium.Cartesian3(center.x, center.y, center.z);
-        const ecefCenter = new Cesium.Cartesian3();
-        Cesium.Matrix4.multiplyByPoint(this.enuTransform, localCenter, ecefCenter);
+        const bounds = new THREE.Box3();
+        this.state.tracks.forEach(track => {
+            const pos = track.state.slice(0, 3);
+            bounds.expandByPoint(new THREE.Vector3(pos[0], pos[1], pos[2]));
+        });
+        return bounds;
+    }
 
-        // Convert to Cartographic to get lat/lon/height
+    getCurrentFocusPoint() {
+        const followingTrack = this.state.getFollowingTrack();
+        const selectedTrack = this.state.getActiveTrack();
+        const track = followingTrack || selectedTrack;
+        if (track) {
+            return new THREE.Vector3(track.state[0], track.state[1], track.state[2]);
+        }
+
+        const bounds = this.getTrackBounds();
+        if (bounds) {
+            return bounds.getCenter(new THREE.Vector3());
+        }
+
+        return new THREE.Vector3(0, 0, 0);
+    }
+
+    scaleValueToRangeMeters(scaleValue) {
+        const t = Math.min(100, Math.max(0, scaleValue)) / 100;
+        return SCALE_MIN_RANGE_M * Math.pow(SCALE_MAX_RANGE_M / SCALE_MIN_RANGE_M, t);
+    }
+
+    lookAtLocalPoint(localPoint, rangeMeters) {
+        const ecefPoint = this.localToEcef(localPoint);
+        const camera = this.cesiumViewer.camera;
+        const heading = Number.isFinite(camera.heading) ? camera.heading : 0;
+        const pitch = Number.isFinite(camera.pitch) ? camera.pitch : DEFAULT_VIEW_PITCH_RAD;
+
+        camera.lookAt(
+            ecefPoint,
+            new Cesium.HeadingPitchRange(heading, pitch, rangeMeters)
+        );
+        camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+    }
+
+    flyToLocalPoint(localPoint, rangeMeters) {
+        const ecefCenter = this.localToEcef(localPoint);
         const cartographic = Cesium.Cartographic.fromCartesian(ecefCenter);
 
-        // Use Cesium camera to fly to the view
         this.cesiumViewer.camera.flyTo({
             destination: Cesium.Cartesian3.fromRadians(
                 cartographic.longitude,
                 cartographic.latitude,
-                cartographic.height + distance
+                cartographic.height + rangeMeters
             ),
             orientation: {
                 heading: Cesium.Math.toRadians(0),
-                pitch: Cesium.Math.toRadians(-45),
+                pitch: DEFAULT_VIEW_PITCH_RAD,
                 roll: 0.0
             },
             duration: 2.0
         });
     }
 
+    localToEcef(localPoint) {
+        const localCartesian = new Cesium.Cartesian3(localPoint.x, localPoint.y, localPoint.z);
+        const ecefPoint = new Cesium.Cartesian3();
+        Cesium.Matrix4.multiplyByPoint(this.enuTransform, localCartesian, ecefPoint);
+        return ecefPoint;
+    }
+
     render() {
         // Sync Three.js camera with Cesium before rendering
         this.syncCameraWithCesium();
 
-        // Render Three.js overlay with bloom effect
-        this.composer.render();
+        // Render Three.js overlay directly to preserve canvas transparency.
+        this.renderer.render(this.scene, this.camera);
     }
 }
