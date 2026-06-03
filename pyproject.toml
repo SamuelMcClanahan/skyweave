@@ -20,6 +20,9 @@ dependencies = [
 dev = [
   "pytest>=8.0",
 ]
+numba = [
+  "numba>=0.61",
+]
 
 [project.scripts]
 skyweave-sim-check = "skyweave.cli.sim_check:main"

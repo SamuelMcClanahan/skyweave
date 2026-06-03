@@ -94,6 +94,108 @@ class PythonNumpyScorerBackend:
         return ScoredWeavefield(volume, combined, support_counts, camera_scores)
 
 
+class NumbaScorerBackend:
+    def __init__(
+        self,
+        grid: VoxelGrid,
+        cameras: dict[int, CameraCalib],
+        config: ScorerConfig,
+    ) -> None:
+        from skyweave.rayweave.numba_scorer import combine_scores_numba, score_rays_numba
+
+        self.grid = grid
+        self.cameras = cameras
+        self.config = config
+        self._score_rays = score_rays_numba
+        self._combine_scores = combine_scores_numba
+        self._camera_ids = sorted(cameras)
+        self._camera_slots = {camera_id: idx for idx, camera_id in enumerate(self._camera_ids)}
+        self._camera_positions = np.asarray([cameras[camera_id].position for camera_id in self._camera_ids], dtype=np.float64)
+        self._camera_rotations = np.asarray(
+            [cameras[camera_id].T_world_cam[:3, :3] for camera_id in self._camera_ids],
+            dtype=np.float64,
+        )
+        self._camera_intrinsics = np.asarray(
+            [
+                [
+                    cameras[camera_id].K[0, 0],
+                    cameras[camera_id].K[1, 1],
+                    cameras[camera_id].K[0, 2],
+                    cameras[camera_id].K[1, 2],
+                ]
+                for camera_id in self._camera_ids
+            ],
+            dtype=np.float64,
+        )
+        self._grid_origin = self.grid.origin.astype(np.float64)
+        self._dims = np.asarray(self.grid.dims, dtype=np.int64)
+
+    def score(self, aligned: AlignedEvidence) -> ScoredWeavefield:
+        ray_camera_slots, ray_u, ray_v, ray_weight = self._rays_from_packets(aligned)
+        score_by_camera = np.zeros((len(self._camera_ids), *self.grid.dims), dtype=np.float32)
+        if ray_u.size:
+            self._score_rays(
+                score_by_camera,
+                ray_camera_slots,
+                ray_u,
+                ray_v,
+                ray_weight,
+                self._camera_positions,
+                self._camera_rotations,
+                self._camera_intrinsics,
+                self._grid_origin,
+                self._dims,
+                float(self.grid.voxel_size),
+            )
+
+        combined = self.grid.zeros()
+        support_counts = np.zeros(self.grid.dims, dtype=np.uint8)
+        self._combine_scores(score_by_camera, combined, support_counts, int(self.config.min_supporting_cameras))
+        sparse = _top_k_sparse(combined, self.config.top_k_voxels)
+        volume = WeavefieldVolume(
+            ts_ns=aligned.ts_ns,
+            grid=self.grid.spec,
+            voxels=sparse,
+            peaks=[],
+            decay_s=1.0,
+            source_packet_ids=aligned.source_packet_ids,
+        )
+        camera_scores = {
+            camera_id: score_by_camera[slot]
+            for camera_id, slot in self._camera_slots.items()
+            if np.any(score_by_camera[slot] > 0.0)
+        }
+        return ScoredWeavefield(volume, combined, support_counts, camera_scores)
+
+    def _rays_from_packets(self, aligned: AlignedEvidence) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        camera_slots: list[int] = []
+        us: list[float] = []
+        vs: list[float] = []
+        weights: list[float] = []
+        for packet in aligned.motion_packets:
+            pixels = list(_iter_patch_pixels(packet.motion_patches))
+            if not pixels and packet.blobs:
+                blob = max(packet.blobs, key=lambda item: item.confidence)
+                pixels = [(blob.cx, blob.cy, blob.confidence)]
+            if not pixels:
+                continue
+
+            normalizer = max(sum(weight for *_uv, weight in pixels), 1e-9)
+            slot = self._camera_slots[packet.camera_id]
+            for u, v, weight in pixels:
+                camera_slots.append(slot)
+                us.append(u)
+                vs.append(v)
+                weights.append(float(weight / normalizer))
+
+        return (
+            np.asarray(camera_slots, dtype=np.int64),
+            np.asarray(us, dtype=np.float64),
+            np.asarray(vs, dtype=np.float64),
+            np.asarray(weights, dtype=np.float32),
+        )
+
+
 def _build_backend(
     grid: VoxelGrid,
     cameras: dict[int, CameraCalib],
@@ -101,6 +203,8 @@ def _build_backend(
 ) -> ScorerBackend:
     if config.backend == "python_numpy":
         return PythonNumpyScorerBackend(grid, cameras, config)
+    if config.backend == "numba":
+        return NumbaScorerBackend(grid, cameras, config)
     raise ValueError(f"Unsupported Rayweave scorer backend: {config.backend!r}")
 
 

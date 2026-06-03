@@ -1,0 +1,9 @@
+rayweave:
+  grid:
+    frame_id: "world"
+    origin_m: [-2.0, -2.0, 0.0]
+    dims: [96, 96, 64]
+    voxel_size_m: 0.05
+  scorer:
+    backend: "numba"
+

@@ -51,8 +51,21 @@ Benchmark stage latency without per-frame logging:
 .venv/bin/skyweave-benchmark --config configs/sim.yaml --frames 300 --warmup 30
 ```
 
+Run the optimized Numba scorer profile:
+
+```bash
+.venv/bin/python -m pip install -e '.[numba]'
+.venv/bin/skyweave-benchmark --config configs/sim_numba.yaml --frames 300 --warmup 30
+.venv/bin/skyweave-benchmark --config configs/sim_05_numba.yaml --frames 300 --warmup 30
+.venv/bin/skyweave-benchmark --config configs/sim_mvp_ov9281_100hz_numba.yaml --frames 300 --warmup 90
+```
+
 Resolution profiles are available at `configs/sim_075.yaml` and
-`configs/sim_05.yaml`. Perturbation profiles are available at
+`configs/sim_05.yaml`. `configs/sim_numba.yaml` keeps the 10 cm baseline grid
+and switches only the scorer backend. `configs/sim_05_numba.yaml` runs the
+optimized scorer at 5 cm. `configs/sim_mvp_ov9281_100hz_numba.yaml` keeps the
+5 cm grid, uses 100 Hz synthetic timestamps, and uses OV9281-like 1280x800
+image geometry. Perturbation profiles are available at
 `configs/sim_perturb_pixel_noise.yaml`, `configs/sim_perturb_jitter.yaml`,
 `configs/sim_perturb_false_positive.yaml`, and
 `configs/sim_perturb_dropout.yaml`.

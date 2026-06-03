@@ -16,19 +16,23 @@ class PeakExtractor:
         self.config = config
 
     def extract(self, scored: ScoredWeavefield) -> tuple[list[VoxelPeak], list[Measurement3D]]:
-        scores = scored.dense_scores
-        positive = scores[scores > 0]
-        if positive.size == 0:
+        sparse = scored.volume.voxels
+        if not sparse:
             return [], []
-        threshold = float(np.percentile(positive, self.config.threshold_percentile))
-        mask = scores >= threshold
-        components = _connected_components(mask)
+        values = np.asarray([voxel.score for voxel in sparse], dtype=np.float32)
+        threshold = float(np.percentile(values, self.config.threshold_percentile))
+        candidates = {
+            (voxel.ix, voxel.iy, voxel.iz): voxel.score
+            for voxel in sparse
+            if voxel.score >= threshold
+        }
+        components = _connected_components_sparse(candidates)
 
         peaks: list[VoxelPeak] = []
         for component in components:
-            component = sorted(component, key=lambda idx: scores[idx], reverse=True)
-            weights = np.asarray([scores[idx] for idx in component], dtype=np.float64)
-            centers = np.asarray([self.grid.index_to_center(idx) for idx in component], dtype=np.float64)
+            component = sorted(component, key=lambda idx: candidates[idx], reverse=True)
+            weights = np.asarray([candidates[idx] for idx in component], dtype=np.float64)
+            centers = self.grid.origin + (np.asarray(component, dtype=np.float64) + 0.5) * self.grid.voxel_size
             total = float(np.sum(weights))
             if total <= 0:
                 continue
@@ -62,35 +66,31 @@ class PeakExtractor:
         return peaks, measurements
 
 
-def _connected_components(mask: np.ndarray) -> list[list[tuple[int, int, int]]]:
-    visited = np.zeros(mask.shape, dtype=bool)
+def _connected_components_sparse(scores: dict[tuple[int, int, int], float]) -> list[list[tuple[int, int, int]]]:
+    visited: set[tuple[int, int, int]] = set()
     components: list[list[tuple[int, int, int]]] = []
-    starts = np.argwhere(mask)
-    dims = mask.shape
-    for start_arr in starts:
-        start = tuple(int(x) for x in start_arr)
-        if visited[start]:
+    candidates = set(scores)
+    for start in candidates:
+        if start in visited:
             continue
         queue: deque[tuple[int, int, int]] = deque([start])
-        visited[start] = True
+        visited.add(start)
         component: list[tuple[int, int, int]] = []
         while queue:
             idx = queue.popleft()
             component.append(idx)
-            for neighbor in _neighbors(idx, dims):
-                if mask[neighbor] and not visited[neighbor]:
-                    visited[neighbor] = True
+            for neighbor in _neighbors(idx):
+                if neighbor in candidates and neighbor not in visited:
+                    visited.add(neighbor)
                     queue.append(neighbor)
         components.append(component)
     return components
 
 
-def _neighbors(idx: tuple[int, int, int], dims: tuple[int, int, int]):
+def _neighbors(idx: tuple[int, int, int]):
     ix, iy, iz = idx
     for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
-        nx, ny, nz = ix + dx, iy + dy, iz + dz
-        if 0 <= nx < dims[0] and 0 <= ny < dims[1] and 0 <= nz < dims[2]:
-            yield nx, ny, nz
+        yield ix + dx, iy + dy, iz + dz
 
 
 def _supporting_cameras(
@@ -102,4 +102,3 @@ def _supporting_cameras(
         if any(scores[idx] > 0 for idx in component):
             supporting.append(camera_id)
     return supporting
-

@@ -1,0 +1,4 @@
+rayweave:
+  scorer:
+    backend: "numba"
+
