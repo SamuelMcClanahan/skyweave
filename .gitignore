@@ -9,8 +9,8 @@ __pycache__/
 venv/
 
 # Generated data and logs
-data/
-archive/
+/data/
+/archive/
 *.log
 *.jsonl
 *.mp4

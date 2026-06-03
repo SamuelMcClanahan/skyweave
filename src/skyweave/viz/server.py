@@ -28,13 +28,12 @@ class VizServer:
         self._setup_routes()
 
     def _setup_routes(self):
-        # Static file serving
         self.app.router.add_get("/", self._handle_index)
         self.app.router.add_static("/src", self.viz_dir / "src", name="src")
         self.app.router.add_static("/styles", self.viz_dir / "styles", name="styles")
-        self.app.router.add_static("/assets", self.viz_dir / "assets", name="assets")
-
-        # WebSocket endpoint
+        assets_dir = self.viz_dir / "assets"
+        if assets_dir.exists():
+            self.app.router.add_static("/assets", assets_dir, name="assets")
         self.app.router.add_get("/ws", self._handle_websocket)
 
     async def _handle_index(self, request: web.Request) -> web.Response:
@@ -79,8 +78,8 @@ class VizServer:
         for ws in self.ws_clients:
             try:
                 await ws.send_str(message)
-            except Exception as e:
-                logger.error(f"Failed to send to client: {e}")
+            except Exception as exc:
+                logger.error("Failed to send to client: %s", exc)
                 disconnected.add(ws)
 
         # Remove disconnected clients
@@ -142,13 +141,13 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    viz_dir = Path(__file__).parent.parent.parent / "viz_web"
+    viz_dir = Path(__file__).resolve().parents[3] / "viz_web"
     if not viz_dir.exists():
         print(f"Error: viz_web directory not found at {viz_dir}")
         sys.exit(1)
 
     server = VizServer(viz_dir)
-    print(f"Starting visualization server...")
-    print(f"Open http://localhost:8080 in your browser")
+    print("Starting visualization server...")
+    print("Open http://localhost:8080 in your browser")
 
     server.run()

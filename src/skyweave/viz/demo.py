@@ -246,8 +246,12 @@ async def main() -> None:
     await stream_demo_data(server)
 
 
-if __name__ == "__main__":
+def run() -> None:
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Demo server stopped")
+
+
+if __name__ == "__main__":
+    run()

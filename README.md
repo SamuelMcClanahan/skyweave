@@ -79,6 +79,15 @@ Export a deterministic visualization bundle:
 
 The bundle contract is documented in `docs/viz-data-contract.md`.
 
+Run the live Three.js/Cesium visualizer demo:
+
+```bash
+.venv/bin/python -m pip install -e '.[dev,viz]'
+.venv/bin/skyweave-viz-demo
+```
+
+Visualizer notes are in `docs/visualizer.md`.
+
 Run the headless camera packet-generation smoke check:
 
 ```bash

@@ -117,15 +117,13 @@ export class UIManager {
         this.elements.btnCenterTrack.addEventListener('click', () => {
             const track = this.state.getActiveTrack();
             if (track) {
-                const pos = track.state.slice(0, 3);
-                this.sceneManager.controls.target.set(pos[0], pos[1], pos[2]);
+                this.sceneManager.centerOnTrack(track);
             }
         });
 
         // Camera controls
         this.elements.btnResetCamera.addEventListener('click', () => {
-            this.sceneManager.camera.position.set(0, -50, 30);
-            this.sceneManager.controls.target.set(0, 0, 0);
+            this.sceneManager.resetCamera();
         });
 
         this.elements.btnFitAll.addEventListener('click', () => {

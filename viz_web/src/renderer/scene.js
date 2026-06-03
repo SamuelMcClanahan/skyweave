@@ -1,6 +1,5 @@
 // Scene manager - handles Three.js initialization and rendering
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
@@ -311,23 +310,34 @@ export class SceneManager {
 
         const followingTrack = this.state.getFollowingTrack();
         if (followingTrack) {
-            // Follow the track by moving Cesium camera
-            const pos = followingTrack.state.slice(0, 3);
-
-            // Convert local ENU coordinates to ECEF for Cesium
-            const localPoint = new Cesium.Cartesian3(pos[0], pos[1], pos[2]);
-            const ecefPoint = new Cesium.Cartesian3();
-            Cesium.Matrix4.multiplyByPoint(this.enuTransform, localPoint, ecefPoint);
-
-            // Move Cesium camera to look at this point
-            this.cesiumViewer.camera.lookAt(
-                ecefPoint,
-                new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), 500)
-            );
+            this.centerOnTrack(followingTrack);
         } else if (this.state.tracks.size > 0) {
             // Auto-zoom to fit all tracks
             this.fitToTracks();
         }
+    }
+
+    centerOnTrack(track) {
+        const pos = track.state.slice(0, 3);
+        const localPoint = new Cesium.Cartesian3(pos[0], pos[1], pos[2]);
+        const ecefPoint = new Cesium.Cartesian3();
+        Cesium.Matrix4.multiplyByPoint(this.enuTransform, localPoint, ecefPoint);
+        this.cesiumViewer.camera.lookAt(
+            ecefPoint,
+            new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), 500)
+        );
+    }
+
+    resetCamera() {
+        this.cesiumViewer.camera.setView({
+            destination: Cesium.Cartesian3.fromDegrees(-122.4194, 37.7749, 2000),
+            orientation: {
+                heading: Cesium.Math.toRadians(0),
+                pitch: Cesium.Math.toRadians(-45),
+                roll: 0.0
+            }
+        });
+        this.cesiumViewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
     }
 
     fitToTracks() {

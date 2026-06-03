@@ -23,12 +23,16 @@ dev = [
 numba = [
   "numba>=0.61",
 ]
+viz = [
+  "aiohttp>=3.9",
+]
 
 [project.scripts]
 skyweave-sim-check = "skyweave.cli.sim_check:main"
 skyweave-replay = "skyweave.cli.replay:main"
 skyweave-benchmark = "skyweave.cli.benchmark:main"
 skyweave-viz-export = "skyweave.cli.viz_export:main"
+skyweave-viz-demo = "skyweave.viz.demo:run"
 skyweave-camera-check = "skyweave.cli.camera_check:main"
 
 [tool.setuptools.packages.find]
