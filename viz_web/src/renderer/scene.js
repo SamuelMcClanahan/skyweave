@@ -63,7 +63,7 @@ export class SceneManager {
 
     initCesium() {
         // Initialize Cesium viewer focused on San Francisco
-        this.cesiumViewer = new Cesium.Viewer('cesiumContainer', {
+        const viewerOptions = {
             baseLayerPicker: false,
             geocoder: false,
             homeButton: false,
@@ -75,10 +75,21 @@ export class SceneManager {
             vrButton: false,
             infoBox: false,
             selectionIndicator: false,
-            shadows: false,
-            terrainProvider: Cesium.createWorldTerrain(),
-            imageryProvider: new Cesium.IonImageryProvider({ assetId: 2 })
-        });
+            shadows: false
+        };
+        this.addTerrainOption(viewerOptions);
+        this.addImageryOption(viewerOptions);
+
+        try {
+            this.cesiumViewer = new Cesium.Viewer('cesiumContainer', viewerOptions);
+        } catch (error) {
+            console.warn('Cesium terrain or imagery failed; falling back to plain globe.', error);
+            delete viewerOptions.terrain;
+            delete viewerOptions.terrainProvider;
+            delete viewerOptions.baseLayer;
+            delete viewerOptions.imageryProvider;
+            this.cesiumViewer = new Cesium.Viewer('cesiumContainer', viewerOptions);
+        }
 
         // Define local origin for our tracking coordinate system (SF downtown)
         // This is the reference point: our local (0,0,0) corresponds to this lat/lon
@@ -106,10 +117,34 @@ export class SceneManager {
         });
 
         // Disable Cesium's default atmosphere effects for cleaner look
-        this.cesiumViewer.scene.skyAtmosphere.show = false;
-        this.cesiumViewer.scene.sun.show = false;
-        this.cesiumViewer.scene.moon.show = false;
+        if (this.cesiumViewer.scene.skyAtmosphere) {
+            this.cesiumViewer.scene.skyAtmosphere.show = false;
+        }
+        if (this.cesiumViewer.scene.sun) {
+            this.cesiumViewer.scene.sun.show = false;
+        }
+        if (this.cesiumViewer.scene.moon) {
+            this.cesiumViewer.scene.moon.show = false;
+        }
         this.cesiumViewer.scene.backgroundColor = Cesium.Color.BLACK;
+    }
+
+    addTerrainOption(viewerOptions) {
+        if (Cesium.Terrain?.fromWorldTerrain) {
+            viewerOptions.terrain = Cesium.Terrain.fromWorldTerrain();
+        } else if (Cesium.createWorldTerrain) {
+            viewerOptions.terrainProvider = Cesium.createWorldTerrain();
+        }
+    }
+
+    addImageryOption(viewerOptions) {
+        if (Cesium.IonImageryProvider?.fromAssetId && Cesium.ImageryLayer?.fromProviderAsync) {
+            viewerOptions.baseLayer = Cesium.ImageryLayer.fromProviderAsync(
+                Cesium.IonImageryProvider.fromAssetId(2)
+            );
+        } else if (Cesium.IonImageryProvider) {
+            viewerOptions.imageryProvider = new Cesium.IonImageryProvider({ assetId: 2 });
+        }
     }
 
     initThree() {
