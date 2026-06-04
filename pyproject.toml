@@ -23,6 +23,9 @@ dev = [
 numba = [
   "numba>=0.61",
 ]
+camera = [
+  "opencv-contrib-python-headless>=4.9",
+]
 viz = [
   "aiohttp>=3.9",
 ]
@@ -34,6 +37,11 @@ skyweave-benchmark = "skyweave.cli.benchmark:main"
 skyweave-viz-export = "skyweave.cli.viz_export:main"
 skyweave-viz-demo = "skyweave.viz.demo:run"
 skyweave-camera-check = "skyweave.cli.camera_check:main"
+skyweave-live-benchmark = "skyweave.cli.live_benchmark:main"
+skyweave-charuco-check = "skyweave.cli.charuco_check:main"
+skyweave-charuco-live = "skyweave.cli.charuco_live:main"
+skyweave-camera-inventory = "skyweave.cli.camera_inventory:main"
+skyweave-charuco-capture = "skyweave.cli.charuco_capture:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

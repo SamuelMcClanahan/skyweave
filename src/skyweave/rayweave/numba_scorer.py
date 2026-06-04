@@ -11,6 +11,9 @@ except ImportError as exc:  # pragma: no cover - exercised only when backend is 
 @njit(cache=True)
 def score_rays_numba(
     score_by_camera: np.ndarray,
+    touched_indices: np.ndarray,
+    touched_stamps: np.ndarray,
+    frame_stamp: int,
     ray_camera_slots: np.ndarray,
     ray_u: np.ndarray,
     ray_v: np.ndarray,
@@ -21,10 +24,11 @@ def score_rays_numba(
     grid_origin: np.ndarray,
     dims: np.ndarray,
     voxel_size: float,
-) -> None:
+) -> int:
     bounds_max0 = grid_origin[0] + dims[0] * voxel_size
     bounds_max1 = grid_origin[1] + dims[1] * voxel_size
     bounds_max2 = grid_origin[2] + dims[2] * voxel_size
+    touched_count = 0
 
     for ray_idx in range(ray_u.shape[0]):
         slot = ray_camera_slots[ray_idx]
@@ -101,6 +105,11 @@ def score_rays_numba(
         weight = ray_weight[ray_idx]
         while 0 <= ix < dims[0] and 0 <= iy < dims[1] and 0 <= iz < dims[2]:
             score_by_camera[slot, ix, iy, iz] += weight
+            flat_index = (ix * dims[1] + iy) * dims[2] + iz
+            if touched_stamps[flat_index] != frame_stamp:
+                touched_stamps[flat_index] = frame_stamp
+                touched_indices[touched_count] = flat_index
+                touched_count += 1
             if t_max0 <= t_max1 and t_max0 <= t_max2:
                 if t_max0 > t_exit:
                     break
@@ -116,6 +125,8 @@ def score_rays_numba(
                     break
                 iz += step2
                 t_max2 += t_delta2
+
+    return touched_count
 
 
 @njit(cache=True, parallel=True)
@@ -141,6 +152,35 @@ def combine_scores_numba(
                         score += camera_score
                 support_counts[ix, iy, iz] = support
                 combined[ix, iy, iz] = score if support >= min_supporting_cameras else 0.0
+
+
+@njit(cache=True)
+def combine_touched_scores_numba(
+    score_by_camera: np.ndarray,
+    combined: np.ndarray,
+    support_counts: np.ndarray,
+    touched_indices: np.ndarray,
+    min_supporting_cameras: int,
+) -> None:
+    n_cameras = score_by_camera.shape[0]
+    ny = score_by_camera.shape[2]
+    nz = score_by_camera.shape[3]
+    yz = ny * nz
+    for idx in range(touched_indices.shape[0]):
+        flat = touched_indices[idx]
+        ix = flat // yz
+        rem = flat - ix * yz
+        iy = rem // nz
+        iz = rem - iy * nz
+        score = 0.0
+        support = 0
+        for camera_idx in range(n_cameras):
+            camera_score = score_by_camera[camera_idx, ix, iy, iz]
+            if camera_score > 0.0:
+                support += 1
+                score += camera_score
+        support_counts[ix, iy, iz] = support
+        combined[ix, iy, iz] = score if support >= min_supporting_cameras else 0.0
 
 
 @njit(cache=True)

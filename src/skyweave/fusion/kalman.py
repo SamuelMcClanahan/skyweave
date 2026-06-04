@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from typing import Literal
 
 import numpy as np
@@ -22,7 +23,7 @@ class TrackManager:
         self._last_measurement_ts_ns: int | None = None
         self._update_count = 0
         self._miss_count = 0
-        self._trail: list[tuple[float, float, float, int]] = []
+        self._trail: deque[tuple[float, float, float, int]] = deque(maxlen=200)
 
     def update(self, measurement: Measurement3D | None, ts_ns: int) -> Track | None:
         if self._kf is None:
@@ -69,13 +70,13 @@ class TrackManager:
         self._last_measurement_ts_ns = measurement.ts_ns
         self._update_count = 1
         self._miss_count = 0
-        self._trail = []
+        self._trail = deque(maxlen=200)
         self._append_trail_point()
 
     def _predict(self, dt: float) -> None:
         assert self._kf is not None
-        self._kf.F = _transition_matrix(dt)
-        self._kf.Q = _process_noise_matrix(dt, self.config.sigma_accel_mps2)
+        _set_transition_matrix(self._kf.F, dt)
+        _set_process_noise_matrix(self._kf.Q, dt, self.config.sigma_accel_mps2)
         self._kf.predict()
 
     def _correct(self, measurement: Measurement3D) -> None:
@@ -87,12 +88,11 @@ class TrackManager:
     def _append_trail_point(self) -> None:
         state = self._state()
         self._trail.append((float(state[0]), float(state[1]), float(state[2]), int(self._last_ts_ns or 0)))
-        self._trail = self._trail[-200:]
 
     def _to_track(self, status: TrackStatus) -> Track:
         assert self._kf is not None
         assert self._track_id is not None
-        return Track(
+        return Track.model_construct(
             id=self._track_id,
             state=[float(x) for x in self._state()],
             covariance=np.asarray(self._kf.P, dtype=np.float64).tolist(),
@@ -101,7 +101,7 @@ class TrackManager:
             last_update_ts_ns=int(self._last_ts_ns or 0),
             update_count=self._update_count,
             miss_count=self._miss_count,
-            trail=self._trail,
+            trail=list(self._trail),
         )
 
     def _state(self) -> np.ndarray:
@@ -121,7 +121,7 @@ class TrackManager:
         self._last_measurement_ts_ns = None
         self._update_count = 0
         self._miss_count = 0
-        self._trail = []
+        self._trail = deque(maxlen=200)
 
 
 def _initial_state(measurement: Measurement3D) -> np.ndarray:
@@ -181,6 +181,19 @@ def _transition_matrix(dt: float) -> np.ndarray:
     )
 
 
+def _set_transition_matrix(matrix: np.ndarray, dt: float) -> None:
+    matrix.fill(0.0)
+    matrix[0, 0] = 1.0
+    matrix[1, 1] = 1.0
+    matrix[2, 2] = 1.0
+    matrix[3, 3] = 1.0
+    matrix[4, 4] = 1.0
+    matrix[5, 5] = 1.0
+    matrix[0, 3] = dt
+    matrix[1, 4] = dt
+    matrix[2, 5] = dt
+
+
 def _process_noise_matrix(dt: float, sigma_accel_mps2: float) -> np.ndarray:
     q = sigma_accel_mps2**2
     pos = 0.25 * dt**4 * q
@@ -198,6 +211,27 @@ def _process_noise_matrix(dt: float, sigma_accel_mps2: float) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def _set_process_noise_matrix(matrix: np.ndarray, dt: float, sigma_accel_mps2: float) -> None:
+    q = sigma_accel_mps2**2
+    pos = 0.25 * dt**4 * q
+    cross = 0.5 * dt**3 * q
+    vel = dt**2 * q
+
+    matrix.fill(0.0)
+    matrix[0, 0] = pos
+    matrix[1, 1] = pos
+    matrix[2, 2] = pos
+    matrix[0, 3] = cross
+    matrix[1, 4] = cross
+    matrix[2, 5] = cross
+    matrix[3, 0] = cross
+    matrix[4, 1] = cross
+    matrix[5, 2] = cross
+    matrix[3, 3] = vel
+    matrix[4, 4] = vel
+    matrix[5, 5] = vel
 
 
 def _measurement_vector(measurement: Measurement3D) -> np.ndarray:

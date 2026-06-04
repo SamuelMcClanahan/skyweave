@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-import time
-from pathlib import Path
 
-from skyweave.camera.motion import FrameDiffMotionPacketBuilder, MotionPacketConfig, synthetic_motion_frames
+from skyweave.camera.check_common import (
+    MotionCameraState,
+    _open_jsonl,
+    _percentile,
+    _write_pgm_snapshot,
+)
+from skyweave.camera.check_parallel import _process_motion_source
+from skyweave.camera.check_runtime import _run_live, _run_synthetic
+from skyweave.camera.motion import MotionPacketConfig
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,74 +26,49 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-motion-pixels", type=int, default=225)
     parser.add_argument("--console-every", type=int, default=1)
     parser.add_argument("--jsonl", default=None, help="Optional JSONL output path.")
+    parser.add_argument("--device", default=None, help="Single live camera device, e.g. /dev/video0 or 0.")
+    parser.add_argument("--devices", default=None, help="Comma-separated live camera devices.")
+    parser.add_argument("--fourcc", default=None, help="Best-effort requested fourcc, e.g. MJPG or YUYV.")
+    parser.add_argument("--snapshot-dir", default=None, help="Optional live-mode directory for first-frame PGM snapshots.")
+    parser.add_argument("--warmup-frames", type=int, default=5, help="Live frames to drop before packet stats.")
+    parser.add_argument("--profile-stages", action="store_true", help="Print live capture/decode/build stage timing.")
+    parser.add_argument("--parallel-cameras", action="store_true", help="Process live cameras concurrently.")
+    parser.add_argument(
+        "--motion-backend",
+        choices=("python", "opencv", "opencv_contours"),
+        default="python",
+        help="Motion packet backend for frame diff and connected components.",
+    )
+    parser.add_argument(
+        "--live-pipeline",
+        choices=("motion-packet", "jpeg-frame"),
+        default="motion-packet",
+        help="Live mode pipeline: motion packets or whole-frame JPEG benchmark.",
+    )
+    parser.add_argument("--jpeg-quality", type=int, default=80, help="JPEG quality for --live-pipeline jpeg-frame.")
     args = parser.parse_args(argv)
+    if args.device and args.devices:
+        parser.error("use either --device or --devices, not both")
+    if args.fourcc and len(args.fourcc) != 4:
+        parser.error("--fourcc must be exactly 4 characters")
+    if not 1 <= args.jpeg_quality <= 100:
+        parser.error("--jpeg-quality must be between 1 and 100")
 
     config = MotionPacketConfig(
         threshold=args.threshold,
         max_patch_side_px=args.max_patch_side,
         max_motion_pixels=args.max_motion_pixels,
+        backend=args.motion_backend,
     )
-    builder = FrameDiffMotionPacketBuilder(0, args.width, args.height, config=config, source_id="headless_cam0")
-    frames = synthetic_motion_frames(args.width, args.height, args.frames, args.square_size)
-    jsonl_path = Path(args.jsonl) if args.jsonl else None
-    writer = jsonl_path.open("w", encoding="utf-8") if jsonl_path else None
-
-    packet_latencies: list[float] = []
-    total_blobs = 0
-    total_motion_pixels = 0
-    previous = None
+    writer = _open_jsonl(args.jsonl)
     try:
-        for frame_seq, frame in enumerate(frames):
-            ts_ns = int(round(frame_seq / args.fps * 1_000_000_000))
-            start = time.perf_counter()
-            packet = builder.build(previous, frame, frame_seq, ts_ns)
-            latency_ms = (time.perf_counter() - start) * 1000.0
-            previous = frame
-            motion_pixels = sum(blob.area_px for blob in packet.blobs)
-            total_blobs += len(packet.blobs)
-            total_motion_pixels += motion_pixels
-            packet_latencies.append(latency_ms)
-            event = {
-                "frame_seq": frame_seq,
-                "ts_ns": ts_ns,
-                "n_blobs": len(packet.blobs),
-                "n_patches": len(packet.motion_patches),
-                "motion_pixels": motion_pixels,
-                "latency_ms": latency_ms,
-            }
-            if frame_seq % max(args.console_every, 1) == 0:
-                print(
-                    f"frame={frame_seq:03d} blobs={event['n_blobs']} patches={event['n_patches']} "
-                    f"motion_pixels={motion_pixels} latency={latency_ms:.3f}ms"
-                )
-            if writer:
-                writer.write(json.dumps(event, sort_keys=True) + "\n")
+        if args.device or args.devices:
+            devices = [args.device] if args.device else [item.strip() for item in args.devices.split(",") if item.strip()]
+            return _run_live(args, config, devices, writer)
+        return _run_synthetic(args, config, writer)
     finally:
         if writer:
             writer.close()
-
-    print(
-        "camera_check "
-        f"frames={args.frames} size={args.width}x{args.height} fps={args.fps:.1f} "
-        f"total_blobs={total_blobs} avg_motion_pixels={total_motion_pixels / max(args.frames, 1):.1f} "
-        f"latency_p50={_percentile(packet_latencies, 50.0):.3f}ms "
-        f"latency_p95={_percentile(packet_latencies, 95.0):.3f}ms"
-    )
-    if jsonl_path:
-        print(f"log_path={jsonl_path}")
-    return 0
-
-
-def _percentile(values: list[float], pct: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    idx = (len(ordered) - 1) * pct / 100.0
-    lo = int(idx)
-    hi = min(lo + 1, len(ordered) - 1)
-    if lo == hi:
-        return ordered[lo]
-    return ordered[lo] * (hi - idx) + ordered[hi] * (idx - lo)
 
 
 if __name__ == "__main__":
