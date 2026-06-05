@@ -2,22 +2,6 @@
 
 Experimental multi-camera aircraft and drone tracking system.
 
-The current repo contains:
-
-- `SPEC_MVP.md` - draft Skyweave MVP software specification.
-- `src/skyweave/` - headless synthetic MVP core implementation.
-- `configs/sim*.yaml` - synthetic packet validation configs.
-- `tests/` - unit and synthetic pipeline tests.
-- `docs/conversations/` - design discussion notes and decision logs.
-- `docs/specs/` - older/high-level spec notes.
-- `reference/pixel-to-voxel-projector/` - preserved reference projector code.
-
-- **Rayweave**: calibrated 2D motion evidence projected into 3D voxel evidence;
-- **Weavefield**: sparse 4D evidence history for visualization, replay, and
-  tracking;
-- **Tracking**: voxel peaks and triangulation baselines filtered into stable
-  object tracks.
-
 ## Headless Synthetic Check
 
 Create a local virtual environment and install the package:
