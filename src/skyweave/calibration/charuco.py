@@ -5,6 +5,12 @@ from pathlib import Path
 
 import numpy as np
 
+DEFAULT_CHARUCO_SQUARES_X = 8
+DEFAULT_CHARUCO_SQUARES_Y = 6
+DEFAULT_CHARUCO_SQUARE_MM = 30.0
+DEFAULT_CHARUCO_MARKER_MM = 21.6
+DEFAULT_CHARUCO_DICTIONARY = "DICT_4X4"
+
 
 @dataclass(frozen=True)
 class CharucoBoardSpec:
@@ -66,35 +72,36 @@ def detect_charuco(gray: np.ndarray, spec: CharucoBoardSpec) -> tuple[CharucoDet
         if dictionary_id is None:
             continue
         dictionary = aruco.getPredefinedDictionary(dictionary_id)
-        board = create_board(aruco, spec, dictionary)
         marker_corners, marker_ids, _ = _detect_markers(aruco, image, dictionary)
-        marker_count = 0 if marker_ids is None else int(len(marker_ids))
-        charuco_corners, charuco_ids = _interpolate_charuco(
-            aruco,
-            marker_corners,
-            marker_ids,
-            image,
-            board,
-        )
-        corner_count = 0 if charuco_ids is None else int(len(charuco_ids))
-        detection = CharucoDetection(
-            detected=corner_count > 0,
-            dictionary=dictionary_name,
-            marker_count=marker_count,
-            corner_count=corner_count,
-            image_width=int(image.shape[1]),
-            image_height=int(image.shape[0]),
-        )
-        payload = {
-            "dictionary": dictionary,
-            "marker_corners": marker_corners,
-            "marker_ids": marker_ids,
-            "charuco_corners": charuco_corners,
-            "charuco_ids": charuco_ids,
-        }
-        if best_detection is None or _score_detection(detection) > _score_detection(best_detection):
-            best_detection = detection
-            best_payload = payload
+        for board, pattern_name in create_board_candidates(aruco, spec, dictionary):
+            charuco_corners, charuco_ids, used_marker_corners, used_marker_ids = _detect_board_corners(
+                aruco,
+                marker_corners,
+                marker_ids,
+                image,
+                board,
+            )
+            marker_count = 0 if used_marker_ids is None else int(len(used_marker_ids))
+            corner_count = 0 if charuco_ids is None else int(len(charuco_ids))
+            detection = CharucoDetection(
+                detected=corner_count > 0,
+                dictionary=dictionary_name,
+                marker_count=marker_count,
+                corner_count=corner_count,
+                image_width=int(image.shape[1]),
+                image_height=int(image.shape[0]),
+            )
+            payload = {
+                "dictionary": dictionary,
+                "pattern": pattern_name,
+                "marker_corners": used_marker_corners,
+                "marker_ids": used_marker_ids,
+                "charuco_corners": charuco_corners,
+                "charuco_ids": charuco_ids,
+            }
+            if best_detection is None or _score_detection(detection) > _score_detection(best_detection):
+                best_detection = detection
+                best_payload = payload
 
     if best_detection is None:
         raise ValueError(f"no OpenCV dictionary matched {spec.dictionary!r}")
@@ -121,6 +128,16 @@ def create_board(aruco, spec: CharucoBoardSpec, dictionary):
             dictionary,
         )
     raise RuntimeError("OpenCV build does not include ChArUco board creation.")
+
+
+def create_board_candidates(aruco, spec: CharucoBoardSpec, dictionary) -> list[tuple[object, str]]:
+    board = create_board(aruco, spec, dictionary)
+    candidates = [(board, "current")]
+    if hasattr(board, "setLegacyPattern"):
+        legacy_board = create_board(aruco, spec, dictionary)
+        legacy_board.setLegacyPattern(True)
+        candidates.append((legacy_board, "legacy"))
+    return candidates
 
 
 def draw_annotated_detection(gray: np.ndarray, payload: object | None):
@@ -171,13 +188,28 @@ def _detect_markers(aruco, image: np.ndarray, dictionary):
     return aruco.detectMarkers(image, dictionary, parameters=parameters)
 
 
-def _interpolate_charuco(aruco, marker_corners, marker_ids, image: np.ndarray, board) -> tuple[object | None, object | None]:
+def _detect_board_corners(aruco, marker_corners, marker_ids, image: np.ndarray, board):
     if marker_ids is None or len(marker_ids) == 0:
-        return None, None
+        return None, None, marker_corners, marker_ids
+    if hasattr(aruco, "CharucoDetector"):
+        corners, ids, detected_marker_corners, detected_marker_ids = _detect_with_charuco_detector(
+            aruco,
+            image,
+            board,
+            marker_corners,
+            marker_ids,
+        )
+        if ids is not None and len(ids) > 0:
+            return corners, ids, detected_marker_corners, detected_marker_ids
     count, corners, ids = aruco.interpolateCornersCharuco(marker_corners, marker_ids, image, board)
     if int(count) <= 0:
-        return None, None
-    return corners, ids
+        return None, None, marker_corners, marker_ids
+    return corners, ids, marker_corners, marker_ids
+
+
+def _detect_with_charuco_detector(aruco, image: np.ndarray, board, marker_corners, marker_ids):
+    detector = aruco.CharucoDetector(board)
+    return detector.detectBoard(image, markerCorners=marker_corners, markerIds=marker_ids)
 
 
 def _score_detection(detection: CharucoDetection) -> tuple[int, int]:

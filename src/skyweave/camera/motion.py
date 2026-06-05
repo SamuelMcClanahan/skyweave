@@ -9,6 +9,20 @@ from skyweave.camera.opencv_runtime import configure_opencv_runtime
 from skyweave.messages import MotionBlob, MotionPacket, MotionPatch, PacketHeader
 from skyweave.rayweave.patches import encode_rle_u8
 
+PYTHON_MOTION_BACKEND = "python"
+OPENCV_MOTION_BACKEND = "opencv"
+OPENCV_CONTOUR_MOTION_BACKEND = "opencv_contours"
+AUTO_MOTION_BACKEND = "auto"
+MOTION_BACKEND_CHOICES = (
+    AUTO_MOTION_BACKEND,
+    PYTHON_MOTION_BACKEND,
+    OPENCV_MOTION_BACKEND,
+    OPENCV_CONTOUR_MOTION_BACKEND,
+)
+DEFAULT_MOTION_BACKEND = AUTO_MOTION_BACKEND
+DEFAULT_OPTIMIZED_MOTION_BACKEND = AUTO_MOTION_BACKEND
+_OPENCV_AVAILABLE: bool | None = None
+
 
 @dataclass(frozen=True)
 class MotionPacketConfig:
@@ -17,7 +31,7 @@ class MotionPacketConfig:
     max_components: int = 8
     max_patch_side_px: int = 64
     max_motion_pixels: int = 225
-    backend: str = "python"
+    backend: str = DEFAULT_MOTION_BACKEND
 
 
 class FrameDiffMotionPacketBuilder:
@@ -49,15 +63,16 @@ class FrameDiffMotionPacketBuilder:
             patches: list[MotionPatch] = []
         else:
             previous_u8 = _validate_frame(previous, self.image_width, self.image_height)
-            if self.config.backend == "opencv":
+            backend = resolve_motion_backend(self.config.backend)
+            if backend == OPENCV_MOTION_BACKEND:
                 diff, blobs, patches = self._motion_evidence_opencv(previous_u8, current_u8)
-            elif self.config.backend == "opencv_contours":
+            elif backend == OPENCV_CONTOUR_MOTION_BACKEND:
                 diff, blobs, patches = self._motion_evidence_opencv_contours(previous_u8, current_u8)
-            elif self.config.backend == "python":
+            elif backend == PYTHON_MOTION_BACKEND:
                 diff = np.abs(current_u8.astype(np.int16) - previous_u8.astype(np.int16)).astype(np.uint8)
                 blobs, patches = self._motion_evidence(diff)
             else:
-                raise ValueError(f"unsupported motion backend {self.config.backend!r}")
+                raise ValueError(f"unsupported motion backend {backend!r}")
 
         header = PacketHeader(
             source_id=self.source_id,
@@ -129,11 +144,7 @@ class FrameDiffMotionPacketBuilder:
         return blobs, patches
 
     def _motion_evidence_opencv(self, previous: np.ndarray, current: np.ndarray) -> tuple[np.ndarray, list[MotionBlob], list[MotionPatch]]:
-        try:
-            import cv2  # type: ignore[import-not-found]
-        except ImportError as exc:
-            raise RuntimeError("OpenCV backend requires the camera extra: pip install -e '.[camera]'") from exc
-        configure_opencv_runtime(cv2)
+        cv2 = _load_cv2()
 
         diff = cv2.absdiff(current, previous)
         _, mask = cv2.threshold(diff, self.config.threshold - 1, 255, cv2.THRESH_BINARY)
@@ -197,11 +208,7 @@ class FrameDiffMotionPacketBuilder:
         previous: np.ndarray,
         current: np.ndarray,
     ) -> tuple[np.ndarray, list[MotionBlob], list[MotionPatch]]:
-        try:
-            import cv2  # type: ignore[import-not-found]
-        except ImportError as exc:
-            raise RuntimeError("OpenCV backend requires the camera extra: pip install -e '.[camera]'") from exc
-        configure_opencv_runtime(cv2)
+        cv2 = _load_cv2()
 
         diff = cv2.absdiff(current, previous)
         _, mask = cv2.threshold(diff, self.config.threshold - 1, 255, cv2.THRESH_BINARY)
@@ -262,6 +269,36 @@ class FrameDiffMotionPacketBuilder:
                 )
             )
         return diff, blobs, patches
+
+
+def resolve_motion_backend(backend: str) -> str:
+    if backend == AUTO_MOTION_BACKEND:
+        return OPENCV_MOTION_BACKEND if opencv_motion_available() else PYTHON_MOTION_BACKEND
+    if backend in MOTION_BACKEND_CHOICES:
+        return backend
+    raise ValueError(f"unsupported motion backend {backend!r}")
+
+
+def opencv_motion_available() -> bool:
+    global _OPENCV_AVAILABLE
+    if _OPENCV_AVAILABLE is not None:
+        return _OPENCV_AVAILABLE
+    try:
+        _load_cv2()
+    except RuntimeError:
+        _OPENCV_AVAILABLE = False
+    else:
+        _OPENCV_AVAILABLE = True
+    return _OPENCV_AVAILABLE
+
+
+def _load_cv2():
+    try:
+        import cv2  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError("OpenCV backend requires the camera extra: pip install -e '.[camera]'") from exc
+    configure_opencv_runtime(cv2)
+    return cv2
 
 
 def synthetic_motion_frames(width: int, height: int, frames: int, square_size: int) -> list[np.ndarray]:

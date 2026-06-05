@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--height", type=int, default=800)
     parser.add_argument("--fps", type=float, default=100.0)
     parser.add_argument("--fourcc", default="MJPG")
-    parser.add_argument("--motion-backend", default="opencv_contours")
+    parser.add_argument("--motion-backend", default="auto")
     parser.add_argument("--camera-min-fps", type=float, default=90.0)
     parser.add_argument("--voxel-max-p99-ms", type=float, default=16.67)
     parser.add_argument("--output", default=None)

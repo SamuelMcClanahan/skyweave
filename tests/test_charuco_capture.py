@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from skyweave.calibration.charuco import serialize_detection_payload
-from skyweave.cli.charuco_capture import _capture_targets, _load_camera_config, _parse_labels
+from skyweave.calibration.charuco_capture import _capture_targets, _load_camera_config, _parse_labels
 
 
 def test_serialize_detection_payload_converts_numpy_arrays() -> None:

@@ -3,8 +3,9 @@ import pytest
 
 from skyweave.camera.motion import FrameDiffMotionPacketBuilder, MotionPacketConfig, synthetic_motion_frames
 from skyweave.camera.source import ArrayCameraSource, CameraFrame, frame_to_gray
-from skyweave.cli.camera_check import _write_pgm_snapshot, main as camera_check_main
-from skyweave.cli.live_benchmark import _with_stress_evidence
+from skyweave.camera.check_common import _write_pgm_snapshot
+from skyweave.camera.live_benchmark import _with_stress_evidence
+from skyweave.cli.camera_check import main as camera_check_main
 from skyweave.rayweave.patches import decode_rle_u8
 
 

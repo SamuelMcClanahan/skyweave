@@ -16,9 +16,12 @@ export class CameraRenderer {
 
         this.cameraMeshes = new Map();
         this.frustumMeshes = new Map();
+        this.highlightedCameraIds = new Set();
     }
 
-    update(cameras, visibility) {
+    update(cameras, visibility, highlightedCameraIds = []) {
+        this.highlightedCameraIds = new Set(highlightedCameraIds);
+
         // Clear existing meshes
         this.cameraGroup.children.forEach(child => {
             if (child.geometry) child.geometry.dispose();
@@ -39,12 +42,16 @@ export class CameraRenderer {
     createCameraNode(camera, showFrustum) {
         const group = new THREE.Group();
 
+        // Check if this camera should be highlighted
+        const isHighlighted = this.highlightedCameraIds.has(camera.id);
+
         // Camera body. This is a visible glyph, not the physical camera size.
         const cameraGeometry = new THREE.ConeGeometry(CAMERA_BODY_RADIUS_M, CAMERA_BODY_LENGTH_M, 4);
+        const cameraColor = isHighlighted ? 0x00e5ff : 0xffffff;
         const cameraMaterial = new THREE.MeshStandardMaterial({
-            color: 0xffffff,
-            emissive: 0xffffff,
-            emissiveIntensity: 0.2,
+            color: cameraColor,
+            emissive: cameraColor,
+            emissiveIntensity: isHighlighted ? 0.6 : 0.2,
             metalness: 0.3,
             roughness: 0.5
         });
@@ -60,7 +67,7 @@ export class CameraRenderer {
 
         // Create frustum wireframe if enabled
         if (showFrustum) {
-            const frustum = this.createFrustum(camera);
+            const frustum = this.createFrustum(camera, isHighlighted);
             group.add(frustum);
             this.frustumMeshes.set(camera.id, frustum);
         }
@@ -84,7 +91,7 @@ export class CameraRenderer {
             .normalize();
     }
 
-    createFrustum(camera) {
+    createFrustum(camera, isHighlighted = false) {
         // Create wireframe frustum showing camera FOV
         const fovH = camera.fov_h_deg * (Math.PI / 180);
         const fovV = camera.fov_v_deg * (Math.PI / 180);
@@ -116,10 +123,13 @@ export class CameraRenderer {
 
         geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
 
+        const color = isHighlighted ? 0x00e5ff : 0xffffff;
+        const opacity = isHighlighted ? 0.4 : 0.35;
+
         const material = new THREE.LineBasicMaterial({
-            color: 0xffffff,
+            color: color,
             transparent: true,
-            opacity: 0.2,
+            opacity: opacity,
             linewidth: 1
         });
 
@@ -152,5 +162,18 @@ export class CameraRenderer {
         sprite.scale.set(...CAMERA_LABEL_SCALE);
 
         return sprite;
+    }
+
+    raycast(raycaster) {
+        const intersects = raycaster.intersectObjects(Array.from(this.cameraMeshes.values()));
+        if (intersects.length > 0) {
+            // Find the camera ID from the mesh
+            for (const [cameraId, mesh] of this.cameraMeshes.entries()) {
+                if (mesh === intersects[0].object) {
+                    return cameraId;
+                }
+            }
+        }
+        return null;
     }
 }

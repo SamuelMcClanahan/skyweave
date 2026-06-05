@@ -30,3 +30,10 @@ debug_gridtrack/
 .DS_Store
 .idea/
 .vscode/
+
+# Local assistant notes
+.claude/
+FEATURE_STATUS.md
+IMPLEMENTATION_SUMMARY.md
+NEW_FEATURES.md
+VISUALIZER_TESTING.md

@@ -1,4 +1,4 @@
-from skyweave.cli.sim_check import run_sim_check
+from skyweave.sim.check import run_sim_check
 from skyweave.config import SimCheckConfig
 from skyweave.log import JsonlLogger
 from skyweave.recording.recorder import STREAM_FILES, Recorder
@@ -30,4 +30,3 @@ def test_record_and_replay_session(tmp_path) -> None:
     assert replayed.frames == summary.frames
     assert replayed.peak_rmse_m < 0.20
     assert replayed.track_rmse_m < 0.20
-

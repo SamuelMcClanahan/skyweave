@@ -57,9 +57,11 @@ export class VoxelRenderer {
 
             positions.push(x, y, z);
 
-            // Color based on score (blue -> cyan -> white gradient)
+            // Color based on score and support count (multi-camera agreement)
             const normalizedScore = Math.min(1.0, voxel.score / 5.0);
-            const color = this.scoreToColor(normalizedScore);
+            const supportCount = voxel.support_count || 2; // Default to minimum if not present
+            const supportFactor = Math.min(1.5, supportCount / 2.0); // Boost brightness with more cameras
+            const color = this.scoreToColor(normalizedScore, supportFactor);
             colors.push(color.r, color.g, color.b);
 
             // Size based on score
@@ -86,8 +88,9 @@ export class VoxelRenderer {
         return new THREE.Points(geometry, material);
     }
 
-    scoreToColor(normalizedScore) {
+    scoreToColor(normalizedScore, supportFactor = 1.0) {
         // Gradient: dark gray (0) -> light gray (0.5) -> white (1.0)
+        // supportFactor brightens colors when multiple cameras agree
         const color = new THREE.Color();
 
         if (normalizedScore < 0.5) {
@@ -107,6 +110,11 @@ export class VoxelRenderer {
                 t
             );
         }
+
+        // Boost brightness based on camera support
+        color.r = Math.min(1.0, color.r * supportFactor);
+        color.g = Math.min(1.0, color.g * supportFactor);
+        color.b = Math.min(1.0, color.b * supportFactor);
 
         return color;
     }

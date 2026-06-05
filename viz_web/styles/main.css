@@ -7,6 +7,72 @@ body {
     overflow: hidden;
 }
 
+button,
+.btn-primary,
+.btn-secondary,
+.track-item,
+.camera-item,
+.toggle-control,
+.status-value,
+.status-indicator,
+.floating-panel,
+.sidebar,
+#top-bar,
+#bottom-bar {
+    transition:
+        opacity 180ms ease,
+        transform 180ms ease,
+        background-color 160ms ease,
+        border-color 160ms ease,
+        color 160ms ease,
+        box-shadow 160ms ease;
+}
+
+canvas,
+#cesiumContainer,
+#three-canvas {
+    transition: none;
+}
+
+body:not(.ui-ready) #top-bar {
+    opacity: 0;
+    transform: translateY(-10px);
+}
+
+body:not(.ui-ready) #bottom-bar {
+    opacity: 0;
+    transform: translateY(10px);
+}
+
+body:not(.ui-ready) .sidebar {
+    opacity: 0;
+}
+
+body:not(.ui-ready) #left-sidebar {
+    transform: translateX(-14px);
+}
+
+body:not(.ui-ready) #right-sidebar {
+    transform: translateX(14px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    button,
+    .btn-primary,
+    .btn-secondary,
+    .track-item,
+    .camera-item,
+    .toggle-control,
+    .status-value,
+    .status-indicator,
+    .floating-panel,
+    .sidebar,
+    #top-bar,
+    #bottom-bar {
+        transition: none;
+    }
+}
+
 #viz-container {
     position: relative;
     width: 100%;

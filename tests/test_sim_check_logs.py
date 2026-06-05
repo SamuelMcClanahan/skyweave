@@ -1,6 +1,6 @@
 import json
 
-from skyweave.cli.sim_check import run_sim_check
+from skyweave.sim.check import run_sim_check
 from skyweave.config import SimCheckConfig
 from skyweave.log import JsonlLogger
 

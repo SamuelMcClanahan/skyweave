@@ -59,16 +59,71 @@ export class TrackRenderer {
         const isSelected = track.id === selectedTrackId;
         trackMesh.scale.setScalar(isSelected ? 1.5 : 1.0);
 
-        // Update color based on classification
+        // Update color based on classification and confidence
         const color = isSelected ? SELECTED_TRACK_COLOR : this.getTrackColor(track);
         trackMesh.material.color.setHex(color);
         trackMesh.material.emissive.setHex(color);
-        trackMesh.material.emissiveIntensity = isSelected ? 0.9 : 0.3;
 
+        // Emissive intensity based on confidence and status
+        let emissiveIntensity = 0.3;
+        if (isSelected) {
+            emissiveIntensity = 0.9;
+        } else if (track.status === 'active') {
+            const supportCount = (track.visible_camera_ids || []).length;
+            // More cameras = brighter
+            emissiveIntensity = 0.3 + (supportCount / 10.0) * 0.4; // 0.3 to 0.7
+        } else if (track.status === 'coasting') {
+            emissiveIntensity = 0.15;
+        }
+        trackMesh.material.emissiveIntensity = emissiveIntensity;
+
+        // Update confidence halo
         if (this.selectionHalos.has(track.id)) {
             const halo = this.selectionHalos.get(track.id);
             halo.position.copy(position);
-            halo.visible = isSelected;
+
+            // Show halo based on selection or confidence
+            if (isSelected) {
+                halo.visible = true;
+                halo.material.color.setHex(SELECTED_TRACK_COLOR);
+                halo.scale.setScalar(1.0);
+            } else {
+                // Show confidence halo for all tracks
+                halo.visible = visibility.tracks;
+                const supportCount = (track.visible_camera_ids || []).length;
+                let haloColor, haloScale, haloOpacity;
+
+                if (track.status === 'active' && supportCount >= 4) {
+                    // Strong confidence: tight, green-tinted
+                    haloColor = 0x00ff88;
+                    haloScale = 1.0;
+                    haloOpacity = 0.3;
+                } else if (track.status === 'active' && supportCount >= 3) {
+                    // Moderate confidence: medium, cyan
+                    haloColor = 0x00ccff;
+                    haloScale = 1.2;
+                    haloOpacity = 0.25;
+                } else if (track.status === 'active') {
+                    // Weak confidence: yellow
+                    haloColor = 0xffcc00;
+                    haloScale = 1.4;
+                    haloOpacity = 0.2;
+                } else if (track.status === 'coasting') {
+                    // Coasting: wide, red warning
+                    haloColor = 0xff4400;
+                    haloScale = 1.8;
+                    haloOpacity = 0.15;
+                } else {
+                    // Candidate: pulsing blue
+                    haloColor = 0x4488ff;
+                    haloScale = 1.3;
+                    haloOpacity = 0.2;
+                }
+
+                halo.material.color.setHex(haloColor);
+                halo.material.opacity = haloOpacity;
+                halo.scale.setScalar(haloScale);
+            }
         }
 
         // Update trail

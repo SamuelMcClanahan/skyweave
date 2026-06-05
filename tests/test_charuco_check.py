@@ -1,8 +1,23 @@
 from __future__ import annotations
 
-from skyweave.calibration.charuco import CharucoBoardSpec, dictionary_candidates
+from skyweave.calibration.charuco import (
+    DEFAULT_CHARUCO_DICTIONARY,
+    DEFAULT_CHARUCO_MARKER_MM,
+    DEFAULT_CHARUCO_SQUARES_X,
+    DEFAULT_CHARUCO_SQUARES_Y,
+    DEFAULT_CHARUCO_SQUARE_MM,
+    CharucoBoardSpec,
+    dictionary_candidates,
+)
 from skyweave.cli.charuco_check import DetectionStats, _percentile
-from skyweave.cli.charuco_live import LiveState, _display_host, _fps_from_times, _html_page, _parse_devices
+from skyweave.cli.charuco_live import (
+    LiveState,
+    _display_host,
+    _fps_from_times,
+    _html_page,
+    _parse_devices,
+    _start_status_logger,
+)
 
 
 def test_dictionary_candidates_expand_calib_io_family_names() -> None:
@@ -36,6 +51,14 @@ def test_charuco_board_spec_stores_metric_lengths() -> None:
     assert spec.marker_length_m == 0.018
 
 
+def test_default_charuco_board_spec_matches_measured_print() -> None:
+    assert DEFAULT_CHARUCO_SQUARES_X == 8
+    assert DEFAULT_CHARUCO_SQUARES_Y == 6
+    assert DEFAULT_CHARUCO_SQUARE_MM == 30.0
+    assert DEFAULT_CHARUCO_MARKER_MM == 21.6
+    assert DEFAULT_CHARUCO_DICTIONARY == "DICT_4X4"
+
+
 def test_detection_stats_track_best_frame_and_rate() -> None:
     stats = DetectionStats()
 
@@ -53,7 +76,7 @@ def test_detection_stats_track_best_frame_and_rate() -> None:
     assert _percentile(stats.latencies_ms, 50.0) == 2.0
 
 
-def test_charuco_live_helpers_are_stable() -> None:
+def test_charuco_live_helpers_are_stable(tmp_path) -> None:
     state = LiveState(devices=["/dev/video0", "/dev/video2"])
 
     assert _display_host("0.0.0.0") == "10.42.0.111"
@@ -70,3 +93,13 @@ def test_charuco_live_helpers_are_stable() -> None:
     assert not state.request_camera(3)
     assert state.snapshot()["requested_index"] == 1
     assert _parse_devices(None, "/dev/video0,/dev/video2") == ["/dev/video0", "/dev/video2"]
+
+    with state.condition:
+        state.running = False
+        state.condition.notify_all()
+    log_path = tmp_path / "charuco_live.jsonl"
+    thread = _start_status_logger(state, str(log_path), 0.001)
+    assert thread is not None
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert '"running": false' in log_path.read_text(encoding="utf-8")

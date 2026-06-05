@@ -186,15 +186,20 @@ the requested file size. A monitor or tablet can smoke-test ChArUco detection,
 but it is not a substitute for camera calibration because screen flatness,
 scaling, glare, and pixel geometry make the physical dimensions unreliable.
 
-For the measured MacBook-screen smoke target currently used in the lab:
+For the measured printed target currently used in the lab, the label is `6x8`
+rows by columns. OpenCV expects columns by rows, so the CLI default is
+`--squares-x 8 --squares-y 6`, with 30.0 mm measured checker width, 21.6 mm
+measured marker width, and `DICT_4X4`. The values are shown explicitly below
+to make calibration logs self-documenting:
 
 ```bash
-.venv/bin/skyweave-charuco-check --devices /dev/video0,/dev/video2,/dev/video4 --frames 120 --warmup-frames 10 --width 1280 --height 800 --fps 30 --fourcc MJPG --squares-x 10 --squares-y 7 --square-mm 24 --marker-mm 18 --dictionary DICT_4X4 --snapshot-dir data/charuco_snapshots --jsonl data/logs/charuco_laptop_check.jsonl
+.venv/bin/skyweave-charuco-check --devices /dev/video0,/dev/video2,/dev/video4 --frames 120 --warmup-frames 10 --width 1280 --height 800 --fps 30 --fourcc MJPG --squares-x 8 --squares-y 6 --square-mm 30 --marker-mm 21.6 --dictionary DICT_4X4 --snapshot-dir data/charuco_snapshots --jsonl data/logs/charuco_check.jsonl
 ```
 
 The command expands `DICT_4X4` across the OpenCV 4x4 dictionary families and
 uses the best marker/corner count. This is only a detection smoke and rough
-calibration trial; printed rigid-board calibration should replace it.
+calibration trial if using a screen; final calibration should use the printed
+rigid board.
 
 Map current `/dev/videoN` nodes to stable USB paths and physical labels:
 
@@ -210,7 +215,7 @@ after replugging.
 Capture structured ChArUco observations once the board is visible:
 
 ```bash
-.venv/bin/skyweave-charuco-capture --camera-config configs/cameras.local.yaml --frames 180 --sample-every 5 --width 1280 --height 800 --fps 15 --fourcc MJPG --squares-x 10 --squares-y 7 --square-mm 24 --marker-mm 18 --dictionary DICT_4X4_50 --min-corners 24 --save-images
+.venv/bin/skyweave-charuco-capture --camera-config configs/cameras.local.yaml --frames 180 --sample-every 5 --width 1280 --height 800 --fps 15 --fourcc MJPG --squares-x 8 --squares-y 6 --square-mm 30 --marker-mm 21.6 --dictionary DICT_4X4 --min-corners 24 --save-images
 ```
 
 This writes `manifest.yaml`, `observations.jsonl`, and optional frame snapshots
@@ -220,13 +225,14 @@ the printed rigid board should be used for final calibration.
 For easier aiming, run the lightweight live web viewer on the Rubik:
 
 ```bash
-.venv/bin/python -m skyweave.cli.charuco_live --devices /dev/video0,/dev/video2,/dev/video4 --width 1280 --height 800 --fps 15 --fourcc MJPG --squares-x 10 --squares-y 7 --square-mm 24 --marker-mm 18 --dictionary DICT_4X4 --display-scale 0.5 --detect-every 2 --host 0.0.0.0 --port 8090
+.venv/bin/python -m skyweave.cli.charuco_live --devices /dev/video0,/dev/video2,/dev/video4 --width 1280 --height 800 --fps 15 --fourcc MJPG --squares-x 8 --squares-y 6 --square-mm 30 --marker-mm 21.6 --dictionary DICT_4X4 --display-scale 0.5 --detect-every 2 --host 0.0.0.0 --port 8090 --jsonl data/logs/charuco_live_status.jsonl
 ```
 
 Then open `http://10.42.0.111:8090/` from the laptop. It streams an annotated
 JPEG view with marker/corner counts, best dictionary, detection rate, FPS, and
 latency. Camera buttons at the top switch the active device; failed/disconnected
-cameras are marked in red without stopping the viewer.
+cameras are marked in red without stopping the viewer. The JSONL log records
+status snapshots for later review.
 
 For the first Rubik Pi 3 target sweep, use
 `docs/rubik-pi-setup.md`.

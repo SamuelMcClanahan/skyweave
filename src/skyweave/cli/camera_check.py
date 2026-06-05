@@ -3,15 +3,9 @@ from __future__ import annotations
 import argparse
 import sys
 
-from skyweave.camera.check_common import (
-    MotionCameraState,
-    _open_jsonl,
-    _percentile,
-    _write_pgm_snapshot,
-)
-from skyweave.camera.check_parallel import _process_motion_source
+from skyweave.camera.check_common import _open_jsonl
 from skyweave.camera.check_runtime import _run_live, _run_synthetic
-from skyweave.camera.motion import MotionPacketConfig
+from skyweave.camera.motion import DEFAULT_MOTION_BACKEND, MOTION_BACKEND_CHOICES, MotionPacketConfig
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,8 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--parallel-cameras", action="store_true", help="Process live cameras concurrently.")
     parser.add_argument(
         "--motion-backend",
-        choices=("python", "opencv", "opencv_contours"),
-        default="python",
+        choices=MOTION_BACKEND_CHOICES,
+        default=DEFAULT_MOTION_BACKEND,
         help="Motion packet backend for frame diff and connected components.",
     )
     parser.add_argument(

@@ -6,6 +6,8 @@ import { TrackRenderer } from './tracks.js';
 import { VoxelRenderer } from './voxels.js';
 import { RayRenderer } from './rays.js';
 import { GridRenderer } from './grid.js';
+import { FovCoverageRenderer } from './fov-coverage.js';
+import { TooltipManager } from '../ui/tooltip-manager.js';
 
 const OSM_TILE_URL = 'https://tile.openstreetmap.org/';
 const OSM_CREDIT = 'Map data (c) OpenStreetMap contributors';
@@ -42,10 +44,14 @@ export class SceneManager {
         this.voxelRenderer = null;
         this.rayRenderer = null;
         this.gridRenderer = null;
+        this.fovCoverageRenderer = null;
 
         // Raycaster for mouse interaction
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
+
+        // Tooltip manager
+        this.tooltipManager = null;
 
         this.canvas = null;
         this.lastAutoFitMs = 0;
@@ -53,6 +59,7 @@ export class SceneManager {
         this.pointerDown = null;
         this.pointerDragged = false;
         this.lastDragEndMs = 0;
+        this.hoveredCameraId = null;
     }
 
     async init() {
@@ -70,6 +77,8 @@ export class SceneManager {
         this.voxelRenderer = new VoxelRenderer(this.scene);
         this.rayRenderer = new RayRenderer(this.scene);
         this.gridRenderer = new GridRenderer(this.scene);
+        this.fovCoverageRenderer = new FovCoverageRenderer(this.scene);
+        this.tooltipManager = new TooltipManager(this.state);
         this.applySettings(this.state.settings, true);
 
         // Setup event listeners
@@ -405,6 +414,41 @@ export class SceneManager {
         const rect = this.getInteractionCanvas().getBoundingClientRect();
         this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+        // Raycast for hover tooltips
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+
+        // Check for track hover
+        let hoveredObject = null;
+        if (this.trackRenderer) {
+            const trackId = this.trackRenderer.raycast(this.raycaster);
+            if (trackId !== null) {
+                hoveredObject = { trackId };
+            }
+        }
+
+        // Check for camera hover (if not already hovering track)
+        let newHoveredCameraId = null;
+        if (!hoveredObject && this.cameraRenderer) {
+            const cameraId = this.cameraRenderer.raycast(this.raycaster);
+            if (cameraId !== null) {
+                hoveredObject = { cameraId };
+                newHoveredCameraId = cameraId;
+            }
+        }
+
+        // Update FOV coverage if hovered camera changed
+        if (newHoveredCameraId !== this.hoveredCameraId) {
+            this.hoveredCameraId = newHoveredCameraId;
+            if (this.fovCoverageRenderer && this.state.visibility.frustums) {
+                this.fovCoverageRenderer.update(this.state.cameras, this.state.visibility, this.hoveredCameraId);
+            }
+        }
+
+        // Update tooltip
+        if (this.tooltipManager) {
+            this.tooltipManager.update(hoveredObject, event.clientX, event.clientY);
+        }
     }
 
     onStateChange(event, state) {
@@ -415,14 +459,18 @@ export class SceneManager {
                     this.trackRenderer.update(state.tracks, state.visibility, state.selectedTrackId);
                 }
                 if (this.rayRenderer && state.visibility.rays !== 'none') {
-                    this.rayRenderer.update(state.tracks, state.cameras, state.visibility.rays);
+                    this.rayRenderer.update(state.tracks, state.cameras, state.visibility.rays, state.selectedTrackId);
                 }
                 this.updateCameraFollow();
                 break;
 
             case 'cameras':
                 if (this.cameraRenderer) {
-                    this.cameraRenderer.update(state.cameras, state.visibility);
+                    const highlightedIds = this.getHighlightedCameraIds(state);
+                    this.cameraRenderer.update(state.cameras, state.visibility, highlightedIds);
+                }
+                if (this.fovCoverageRenderer) {
+                    this.fovCoverageRenderer.update(state.cameras, state.visibility, this.hoveredCameraId);
                 }
                 break;
 
@@ -435,7 +483,11 @@ export class SceneManager {
             case 'visibility':
                 // Update all renderers with new visibility settings
                 if (this.cameraRenderer) {
-                    this.cameraRenderer.update(state.cameras, state.visibility);
+                    const highlightedIds = this.getHighlightedCameraIds(state);
+                    this.cameraRenderer.update(state.cameras, state.visibility, highlightedIds);
+                }
+                if (this.fovCoverageRenderer) {
+                    this.fovCoverageRenderer.update(state.cameras, state.visibility, this.hoveredCameraId);
                 }
                 if (this.trackRenderer) {
                     this.trackRenderer.update(state.tracks, state.visibility, state.selectedTrackId);
@@ -444,7 +496,7 @@ export class SceneManager {
                     this.voxelRenderer.update(state.weavefieldHistory, state.visibility);
                 }
                 if (this.rayRenderer) {
-                    this.rayRenderer.update(state.tracks, state.cameras, state.visibility.rays);
+                    this.rayRenderer.update(state.tracks, state.cameras, state.visibility.rays, state.selectedTrackId);
                 }
                 if (this.gridRenderer) {
                     this.gridRenderer.setVisible(state.visibility.grid);
@@ -454,6 +506,13 @@ export class SceneManager {
             case 'selection':
                 if (this.trackRenderer) {
                     this.trackRenderer.update(state.tracks, state.visibility, state.selectedTrackId);
+                }
+                if (this.cameraRenderer) {
+                    const highlightedIds = this.getHighlightedCameraIds(state);
+                    this.cameraRenderer.update(state.cameras, state.visibility, highlightedIds);
+                }
+                if (this.rayRenderer && state.visibility.rays !== 'none') {
+                    this.rayRenderer.update(state.tracks, state.cameras, state.visibility.rays, state.selectedTrackId);
                 }
                 break;
 
@@ -607,6 +666,18 @@ export class SceneManager {
         const ecefPoint = new Cesium.Cartesian3();
         Cesium.Matrix4.multiplyByPoint(this.enuTransform, localCartesian, ecefPoint);
         return ecefPoint;
+    }
+
+    getHighlightedCameraIds(state) {
+        // Get camera IDs to highlight based on selected track
+        if (state.selectedTrackId === null) {
+            return [];
+        }
+        const selectedTrack = state.tracks.get(state.selectedTrackId);
+        if (!selectedTrack) {
+            return [];
+        }
+        return selectedTrack.visible_camera_ids || [];
     }
 
     render() {

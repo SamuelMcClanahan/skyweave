@@ -16,6 +16,10 @@ export class UIManager {
 
         // Subscribe to state changes
         this.state.subscribe(this.onStateChange.bind(this));
+
+        requestAnimationFrame(() => {
+            document.body.classList.add('ui-ready');
+        });
     }
 
     cacheElements() {
@@ -280,12 +284,22 @@ export class UIManager {
         const statusClass = camera.online ? 'online' : 'offline';
         const statusText = camera.online ? 'Online' : 'Offline';
 
+        // Format FPS and latency if available
+        const fpsText = camera.fps_actual ? `${camera.fps_actual.toFixed(1)} FPS` : '';
+        const latencyText = camera.latency_ms ? `${Math.round(camera.latency_ms)}ms` : '';
+        const motionText = camera.motion_pixel_count ? `${(camera.motion_pixel_count / 1000).toFixed(1)}k px` : '';
+
+        const statsLine = [fpsText, latencyText, motionText].filter(s => s).join(' | ');
+
         item.innerHTML = `
-            <span class="camera-name">Camera ${camera.id}</span>
-            <div class="camera-status">
-                <span class="status-indicator ${statusClass}"></span>
-                <span>${statusText}</span>
+            <div class="camera-header">
+                <span class="camera-name">Camera ${camera.id}</span>
+                <div class="camera-status">
+                    <span class="status-indicator ${statusClass}"></span>
+                    <span>${statusText}</span>
+                </div>
             </div>
+            ${statsLine ? `<div class="camera-stats">${statsLine}</div>` : ''}
         `;
 
         return item;
@@ -326,11 +340,24 @@ export class UIManager {
     }
 
     showTrackDetailPanel() {
-        this.elements.trackDetailPanel.style.display = 'block';
+        const panel = this.elements.trackDetailPanel;
+        if (panel.classList.contains('visible')) {
+            return;
+        }
+        panel.style.display = 'block';
+        requestAnimationFrame(() => {
+            panel.classList.add('visible');
+        });
     }
 
     hideTrackDetailPanel() {
-        this.elements.trackDetailPanel.style.display = 'none';
+        const panel = this.elements.trackDetailPanel;
+        panel.classList.remove('visible');
+        window.setTimeout(() => {
+            if (!panel.classList.contains('visible')) {
+                panel.style.display = 'none';
+            }
+        }, 180);
     }
 
     updateTrackDetailPanel() {
@@ -374,9 +401,25 @@ export class UIManager {
         document.getElementById('detail-age').textContent = `${age.toFixed(1)} s`;
         document.getElementById('detail-updates').textContent = track.update_count;
 
+        // Camera support
         const cameraIds = track.visible_camera_ids || [];
-        document.getElementById('detail-cameras').textContent = cameraIds.length > 0
-            ? cameraIds.map(id => `CAM ${id}`).join(', ')
+        const totalCameras = this.state.cameras.size;
+        const supportCount = cameraIds.length;
+
+        // Determine support quality
+        let supportQuality = 'None';
+        if (track.status === 'coasting') {
+            supportQuality = 'Coasting';
+        } else if (supportCount >= 4) {
+            supportQuality = 'Strong';
+        } else if (supportCount === 3) {
+            supportQuality = 'Moderate';
+        } else if (supportCount >= 2) {
+            supportQuality = 'Weak';
+        }
+
+        document.getElementById('detail-cameras').textContent = supportCount > 0
+            ? `${supportCount}/${totalCameras} cameras (${supportQuality}) - ${cameraIds.map(id => `CAM ${id}`).join(', ')}`
             : 'None';
     }
 

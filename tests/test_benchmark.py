@@ -1,6 +1,6 @@
 import math
 
-from skyweave.cli.benchmark import STAGES, run_benchmark
+from skyweave.sim.benchmark import STAGES, run_benchmark
 
 
 def test_benchmark_collects_stage_timings() -> None:

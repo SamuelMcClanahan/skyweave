@@ -320,7 +320,7 @@ html, body {
     position: absolute;
     top: 20px;
     left: 50%;
-    transform: translateX(-50%);
+    transform: translateX(-50%) translateY(-8px) scale(0.98);
     width: 400px;
     max-width: 90%;
     background: var(--glass-bg);
@@ -329,18 +329,14 @@ html, body {
     border-radius: 2px;
     box-shadow: var(--shadow-deep);
     z-index: 100;
-    animation: slideDown 0.3s ease;
+    opacity: 0;
+    pointer-events: none;
 }
 
-@keyframes slideDown {
-    from {
-        opacity: 0;
-        transform: translateX(-50%) translateY(-20px);
-    }
-    to {
-        opacity: 1;
-        transform: translateX(-50%) translateY(0);
-    }
+.floating-panel.visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateX(-50%) translateY(0) scale(1);
 }
 
 .panel-header {

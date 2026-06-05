@@ -42,6 +42,7 @@ skyweave-charuco-check = "skyweave.cli.charuco_check:main"
 skyweave-charuco-live = "skyweave.cli.charuco_live:main"
 skyweave-camera-inventory = "skyweave.cli.camera_inventory:main"
 skyweave-charuco-capture = "skyweave.cli.charuco_capture:main"
+skyweave-charuco-intrinsics = "skyweave.cli.charuco_intrinsics:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

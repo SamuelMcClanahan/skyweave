@@ -41,6 +41,15 @@ JSONL files contain one complete JSON object per line.
 `VizCamera.rotation_quat` is `[x, y, z, w]` and represents the camera-to-world
 rotation from `T_world_cam`.
 
+### Camera Operational Fields (Optional)
+
+Live camera streams may include operational health metrics:
+
+- `fps_actual`: actual measured frame rate (float)
+- `latency_ms`: processing latency in milliseconds (float)
+- `dropped_frames`: count of dropped frames (int)
+- `motion_pixel_count`: number of motion pixels detected (int)
+
 ## Frame Stream
 
 Each line in `frames.jsonl` is a `VizFrame`:
@@ -66,6 +75,12 @@ Each `WeavefieldVolume.voxels` entry is:
 - `iy`
 - `iz`
 - `score`
+- `support_count` (optional): number of cameras contributing to this voxel
+
+The `peaks` field contains the highest-scoring voxels:
+
+- `position`: [x, y, z] world coordinates
+- `score`: voxel score
 
 The visualizer converts voxel indices to world centers with:
 

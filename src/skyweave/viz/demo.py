@@ -19,6 +19,21 @@ logger = logging.getLogger(__name__)
 CAMERA_TARGET = (0.0, 0.0, 250.0)
 MIN_SUPPORTING_CAMERAS = 2
 MAX_CAMERA_RANGE_M = 1400.0
+DEMO_FPS = 30.0
+GRID_ORIGIN = (-3000.0, -20000.0, 0.0)
+GRID_DIMS = (1200, 2200, 250)
+VOXEL_SIZE_M = 10.0
+RAY_EVIDENCE_RADIUS_M = 16.0
+RAY_EVIDENCE_WINDOW_XY_M = 110.0
+RAY_EVIDENCE_WINDOW_Z_M = 80.0
+SCENARIOS = ("orbit-drone", "erratic-drone-solo", "airport-mixed", "high-altitude-plane")
+SFO_BAY_CAMERA_TARGETS = [
+    (6100.0, -17600.0, 1500.0),
+    (6500.0, -16800.0, 1550.0),
+    (6800.0, -16000.0, 1580.0),
+    (6500.0, -15200.0, 1550.0),
+    (6100.0, -14400.0, 1500.0),
+]
 CAMERA_ARRAYS: dict[str, list[tuple[float, float, float]]] = {
     "roof-triangle": [
         (0.0, -520.0, 45.0),
@@ -49,7 +64,49 @@ CAMERA_ARRAYS: dict[str, list[tuple[float, float, float]]] = {
         (260.0, 720.0, 36.0),
         (760.0, 360.0, 42.0),
     ],
+    "sfo-bay-10": [
+        # Original bay cameras
+        (1800.0, -18450.0, 12.0),
+        (2350.0, -17400.0, 16.0),
+        (2950.0, -16250.0, 18.0),
+        (3500.0, -15150.0, 16.0),
+        (4050.0, -14100.0, 12.0),
+        # Downtown cameras for slow drone
+        (-400.0, -500.0, 25.0),
+        (400.0, -500.0, 25.0),
+        (0.0, 500.0, 30.0),
+        (-650.0, 950.0, 38.0),
+        (650.0, 950.0, 38.0),
+    ],
 }
+CAMERA_ARRAY_TARGETS = {
+    "sfo-bay-10": [
+        # Bay camera targets (original 5)
+        (6100.0, -17600.0, 1500.0),
+        (6500.0, -16800.0, 1550.0),
+        (6800.0, -16000.0, 1580.0),
+        (6500.0, -15200.0, 1550.0),
+        (6100.0, -14400.0, 1500.0),
+        # Downtown camera targets for slow drone support
+        (0.0, 0.0, 180.0),  # CAM 5
+        (0.0, 0.0, 180.0),  # CAM 6
+        (0.0, 0.0, 180.0),  # CAM 7
+        (0.0, 0.0, 180.0),  # CAM 8
+        (0.0, 0.0, 180.0),  # CAM 9
+    ],
+}
+CAMERA_ARRAY_FOVS = {
+    "sfo-bay-10": (56.0, 38.0),
+}
+CAMERA_ARRAY_RANGES = {
+    "sfo-bay-10": 7200.0,
+}
+
+
+def default_camera_array_for_scenario(scenario: str) -> str:
+    if scenario in ("airport-mixed", "erratic-drone-solo", "high-altitude-plane"):
+        return "sfo-bay-10"
+    return "perimeter-6"
 
 
 def look_at_quat(
@@ -110,7 +167,7 @@ def visible_camera_ids(cameras: list[dict], position: list[float]) -> list[int]:
         dy = position[1] - camera["position"][1]
         dz = position[2] - camera["position"][2]
         distance = math.sqrt(dx * dx + dy * dy + dz * dz)
-        if distance > MAX_CAMERA_RANGE_M:
+        if distance > camera.get("max_range_m", MAX_CAMERA_RANGE_M):
             continue
 
         local_x, local_y, local_z = world_to_camera_vector((dx, dy, dz), camera["rotation_quat"])
@@ -127,19 +184,34 @@ def visible_camera_ids(cameras: list[dict], position: list[float]) -> list[int]:
 
 def create_demo_cameras(array_name: str) -> list[dict]:
     """Create a realistic demo camera array over the local ENU scene."""
+    import random
     positions = CAMERA_ARRAYS[array_name]
+    fov_h_deg, fov_v_deg = CAMERA_ARRAY_FOVS.get(array_name, (72.0, 52.0))
+    max_range_m = CAMERA_ARRAY_RANGES.get(array_name, MAX_CAMERA_RANGE_M)
     return [
         {
             "id": camera_id,
             "position": [float(x), float(y), float(z)],
-            "rotation_quat": look_at_quat((x, y, z)),
-            "fov_h_deg": 72.0,
-            "fov_v_deg": 52.0,
+            "rotation_quat": look_at_quat((x, y, z), target=camera_target(array_name, camera_id)),
+            "fov_h_deg": fov_h_deg,
+            "fov_v_deg": fov_v_deg,
+            "max_range_m": max_range_m,
             "fps": 100.0,
             "online": True,
+            "fps_actual": 100.0 * (0.97 + random.random() * 0.05),
+            "latency_ms": 20.0 + random.random() * 15.0,
+            "dropped_frames": 0,
+            "motion_pixel_count": 0,
         }
         for camera_id, (x, y, z) in enumerate(positions)
     ]
+
+
+def camera_target(array_name: str, camera_id: int) -> tuple[float, float, float]:
+    target = CAMERA_ARRAY_TARGETS.get(array_name, CAMERA_TARGET)
+    if isinstance(target, list):
+        return target[min(camera_id, len(target) - 1)]
+    return target
 
 
 def create_demo_track(
@@ -149,43 +221,133 @@ def create_demo_track(
     supporting_camera_ids: list[int] | None = None,
 ) -> dict:
     """Create a demo track flying over downtown SF."""
+    return build_track_payload(
+        track_id=track_id,
+        frame=frame,
+        total_frames=total_frames,
+        position_fn=orbit_drone_position,
+        classification="drone",
+        supporting_camera_ids=supporting_camera_ids or [],
+    )
+
+
+def create_erratic_drone_track(
+    track_id: int,
+    frame: int,
+    total_frames: int,
+    supporting_camera_ids: list[int] | None = None,
+) -> dict:
+    """Create a slow, erratic small-drone track."""
+    return build_track_payload(
+        track_id=track_id,
+        frame=frame,
+        total_frames=total_frames,
+        position_fn=erratic_drone_position,
+        classification="drone",
+        supporting_camera_ids=supporting_camera_ids or [],
+        covariance_scale=0.18,
+    )
+
+
+def create_plane_track(
+    track_id: int,
+    frame: int,
+    total_frames: int,
+    supporting_camera_ids: list[int] | None = None,
+) -> dict:
+    """Create a high-altitude aircraft track crossing the array."""
+    return build_track_payload(
+        track_id=track_id,
+        frame=frame,
+        total_frames=total_frames,
+        position_fn=plane_position,
+        classification="plane",
+        supporting_camera_ids=supporting_camera_ids or [],
+        covariance_scale=0.45,
+    )
+
+
+def create_slow_downtown_drone_track(
+    track_id: int,
+    frame: int,
+    total_frames: int,
+    supporting_camera_ids: list[int] | None = None,
+) -> dict:
+    """Create a slow downtown drone track with small radius orbit."""
+    return build_track_payload(
+        track_id=track_id,
+        frame=frame,
+        total_frames=total_frames,
+        position_fn=slow_downtown_drone_position,
+        classification="drone",
+        supporting_camera_ids=supporting_camera_ids or [],
+        covariance_scale=0.12,
+    )
+
+
+def orbit_drone_position(frame: int, total_frames: int) -> tuple[float, float, float]:
     t = frame / max(total_frames - 1, 1)
-
-    # Drone circling over downtown SF at ~300m altitude
     radius = 600.0
-    angle = t * 2 * math.pi
+    angle = t * 2.0 * math.pi
+    return (
+        radius * math.cos(angle),
+        radius * math.sin(angle),
+        300.0 + 50.0 * math.sin(t * 4.0 * math.pi),
+    )
 
-    x = radius * math.cos(angle)
-    y = radius * math.sin(angle)
-    z = 300.0 + 50.0 * math.sin(t * 4 * math.pi)  # Slight altitude variation
 
-    # Velocity (tangent to circle)
-    speed = 25.0  # 25 m/s
-    vx = -speed * math.sin(angle)
-    vy = speed * math.cos(angle)
-    vz = 50.0 * 4 * math.pi * math.cos(t * 4 * math.pi) / total_frames * 30
+def erratic_drone_position(frame: int, total_frames: int) -> tuple[float, float, float]:
+    phase = frame / max(total_frames - 1, 1)
+    return (
+        5200.0 + 250.0 * phase + 8.0 * math.sin(phase * 5.0 * math.pi),
+        -16600.0 + 95.0 * math.sin(phase * 2.0 * math.pi + 0.7) + 8.0 * math.sin(phase * 9.0 * math.pi),
+        115.0 + 8.0 * math.sin(phase * 4.0 * math.pi) + 3.0 * math.sin(phase * 13.0 * math.pi),
+    )
 
-    # Build trail from previous positions
-    trail = []
-    for i in range(max(0, frame - 60), frame + 1):
-        t_trail = i / max(total_frames - 1, 1)
-        angle_trail = t_trail * 2 * math.pi
-        x_trail = radius * math.cos(angle_trail)
-        y_trail = radius * math.sin(angle_trail)
-        z_trail = 300.0 + 50.0 * math.sin(t_trail * 4 * math.pi)
-        ts_trail = int(i * (1.0 / 30) * 1_000_000_000)
-        trail.append([x_trail, y_trail, z_trail, ts_trail])
 
-    supporting_camera_ids = supporting_camera_ids or []
+def plane_position(frame: int, total_frames: int) -> tuple[float, float, float]:
+    phase = frame / max(total_frames - 1, 1)
+    return (
+        5700.0 + 2400.0 * phase,
+        -18600.0 + 5200.0 * phase + 180.0 * math.sin(phase * math.pi),
+        1650.0 + 120.0 * math.sin(phase * math.pi),
+    )
+
+
+def slow_downtown_drone_position(frame: int, total_frames: int) -> tuple[float, float, float]:
+    """Slow small-radius drone orbiting downtown SF area (near origin)."""
+    phase = frame / max(total_frames - 1, 1)
+    # Small orbit radius (200m), slow speed (15 m/s ~= 54 km/h)
+    # Period: 2π * 200 / 15 ≈ 84 seconds at 30 FPS = 2520 frames
+    angle = phase * 2.0 * math.pi * (total_frames / 2520.0)
+    radius = 200.0
+    return (
+        radius * math.cos(angle),
+        radius * math.sin(angle),
+        180.0 + 15.0 * math.sin(phase * 3.0 * math.pi),  # Gentle altitude variation
+    )
+
+
+def build_track_payload(
+    track_id: int,
+    frame: int,
+    total_frames: int,
+    position_fn,
+    classification: str,
+    supporting_camera_ids: list[int],
+    covariance_scale: float = 0.1,
+) -> dict:
+    x, y, z = position_fn(frame, total_frames)
+    vx, vy, vz = estimate_velocity(position_fn, frame, total_frames)
+    trail = build_trail(position_fn, frame, total_frames)
     has_support = len(supporting_camera_ids) >= MIN_SUPPORTING_CAMERAS
     status = "active" if frame > 5 and has_support else "candidate" if frame <= 5 else "coasting"
-    classification = "drone" if track_id == 1 else "plane" if track_id == 2 else None
-    classification_confidence = 0.85 if classification and has_support else 0.45 if classification else 0.0
+    classification_confidence = 0.85 if has_support else 0.45
 
     return {
         "id": track_id,
         "state": [x, y, z, vx, vy, vz],
-        "covariance": [[0.1] * 6 for _ in range(6)],
+        "covariance": [[covariance_scale] * 6 for _ in range(6)],
         "status": status,
         "classification": classification,
         "classification_confidence": classification_confidence,
@@ -198,71 +360,99 @@ def create_demo_track(
     }
 
 
-def create_demo_voxels(frame: int, track_position: list[float]) -> list[dict]:
-    """Create demo voxels around the track position and scattered in the volume."""
+def estimate_velocity(position_fn, frame: int, total_frames: int) -> tuple[float, float, float]:
+    prev_frame = max(0, frame - 1)
+    next_frame = min(total_frames - 1, frame + 1)
+    if prev_frame == next_frame:
+        return (0.0, 0.0, 0.0)
+    prev_pos = position_fn(prev_frame, total_frames)
+    next_pos = position_fn(next_frame, total_frames)
+    dt_s = (next_frame - prev_frame) / DEMO_FPS
+    return (
+        (next_pos[0] - prev_pos[0]) / dt_s,
+        (next_pos[1] - prev_pos[1]) / dt_s,
+        (next_pos[2] - prev_pos[2]) / dt_s,
+    )
+
+
+def build_trail(position_fn, frame: int, total_frames: int) -> list[list[float]]:
+    trail = []
+    for i in range(max(0, frame - 60), frame + 1):
+        x, y, z = position_fn(i, total_frames)
+        ts_trail = int(i * (1.0 / DEMO_FPS) * 1_000_000_000)
+        trail.append([x, y, z, ts_trail])
+    return trail
+
+
+def create_demo_voxels(
+    frame: int,
+    cameras: list[dict],
+    track_position: list[float],
+    supporting_camera_ids: list[int],
+) -> list[dict]:
+    """Create fused demo voxels from intersecting camera line-of-sight evidence."""
+    if len(supporting_camera_ids) < MIN_SUPPORTING_CAMERAS:
+        return []
+
+    camera_by_id = {camera["id"]: camera for camera in cameras}
+    supporting_cameras = [camera_by_id[camera_id] for camera_id in supporting_camera_ids if camera_id in camera_by_id]
+    if len(supporting_cameras) < MIN_SUPPORTING_CAMERAS:
+        return []
+
+    center_ix, center_iy, center_iz = world_to_voxel(track_position)
+    xy_radius_voxels = int(math.ceil(RAY_EVIDENCE_WINDOW_XY_M / VOXEL_SIZE_M))
+    z_radius_voxels = int(math.ceil(RAY_EVIDENCE_WINDOW_Z_M / VOXEL_SIZE_M))
+
     voxels = []
+    for ix in range(center_ix - xy_radius_voxels, center_ix + xy_radius_voxels + 1):
+        for iy in range(center_iy - xy_radius_voxels, center_iy + xy_radius_voxels + 1):
+            for iz in range(center_iz - z_radius_voxels, center_iz + z_radius_voxels + 1):
+                if not voxel_in_bounds(ix, iy, iz):
+                    continue
 
-    grid_origin = [-1000.0, -1000.0, 0.0]
-    voxel_size = 10.0  # 10m voxels for this scale
+                center = voxel_center(ix, iy, iz)
+                score = 0.0
+                camera_hits = 0
+                for camera in supporting_cameras:
+                    camera_pos = tuple(camera["position"])
+                    distance = distance_to_line_segment(center, camera_pos, tuple(track_position))
+                    if distance > RAY_EVIDENCE_RADIUS_M:
+                        continue
+                    camera_hits += 1
+                    score += 1.0 + (1.0 - distance / RAY_EVIDENCE_RADIUS_M) * 1.6
 
-    # Convert track position to voxel indices
-    center_ix = int((track_position[0] - grid_origin[0]) / voxel_size)
-    center_iy = int((track_position[1] - grid_origin[1]) / voxel_size)
-    center_iz = int((track_position[2] - grid_origin[2]) / voxel_size)
+                if camera_hits >= MIN_SUPPORTING_CAMERAS:
+                    truth_distance = distance_between(center, tuple(track_position))
+                    focus_bonus = max(0.0, 1.0 - truth_distance / RAY_EVIDENCE_WINDOW_XY_M)
+                    voxels.append(
+                        {
+                            "ix": ix,
+                            "iy": iy,
+                            "iz": iz,
+                            "score": score + focus_bonus,
+                            "support_count": camera_hits,
+                        }
+                    )
 
-    # Strong cluster around the track (detection evidence)
-    for dx in range(-3, 4):
-        for dy in range(-3, 4):
-            for dz in range(-2, 3):
-                ix = center_ix + dx
-                iy = center_iy + dy
-                iz = center_iz + dz
-
-                # Score falls off with distance from center
-                distance = math.sqrt(dx**2 + dy**2 + dz**2)
-                score = max(0.0, 6.0 - distance * 0.8)
-
-                if score > 0.5:
-                    voxels.append({
-                        "ix": ix,
-                        "iy": iy,
-                        "iz": iz,
-                        "score": score,
-                    })
-
-    # Add some scattered voxels (ambient detections, noise)
-    import random
-    random.seed(frame)
-    for _ in range(50):
-        # Random position in a large volume
-        ix = center_ix + random.randint(-20, 20)
-        iy = center_iy + random.randint(-20, 20)
-        iz = random.randint(10, 50)  # 100m to 500m altitude
-
-        score = random.uniform(0.5, 2.0)
-        voxels.append({
-            "ix": ix,
-            "iy": iy,
-            "iz": iz,
-            "score": score,
-        })
-
-    return voxels
+    return sorted(voxels, key=lambda item: item["score"], reverse=True)[:400]
 
 
-def create_demo_weavefield(frame: int, track_position: list[float], supporting_camera_ids: list[int]) -> dict:
+def create_demo_weavefield(
+    frame: int,
+    cameras: list[dict],
+    track_position: list[float],
+    supporting_camera_ids: list[int],
+) -> dict:
     """Create a demo weavefield volume over SF."""
-    voxels = []
-    if len(supporting_camera_ids) >= MIN_SUPPORTING_CAMERAS:
-        voxels = create_demo_voxels(frame, track_position)
+    voxels = create_demo_voxels(frame, cameras, track_position, supporting_camera_ids)
 
     return {
         "ts_ns": int(time.time() * 1_000_000_000),
         "grid": {
             "frame_id": "world",
-            "origin": [-1000.0, -1000.0, 0.0],
-            "voxel_size_m": 10.0,  # 10m voxels
-            "dims": [200, 200, 100],  # 2km x 2km x 1km volume
+            "origin": list(GRID_ORIGIN),
+            "voxel_size_m": VOXEL_SIZE_M,
+            "dims": list(GRID_DIMS),
         },
         "voxels": voxels,
         "peaks": [],
@@ -271,25 +461,127 @@ def create_demo_weavefield(frame: int, track_position: list[float], supporting_c
     }
 
 
-async def stream_demo_data(server: VizServer, camera_array: str) -> None:
+def create_combined_weavefield(frame: int, cameras: list[dict], tracks: list[dict]) -> dict:
+    """Create one demo weavefield containing evidence for all supported tracks."""
+    voxels = []
+    source_packet_ids: set[str] = set()
+    for track in tracks:
+        supporting_ids = track.get("visible_camera_ids", [])
+        track_voxels = create_demo_voxels(frame, cameras, track["state"][:3], supporting_ids)
+        voxels.extend(track_voxels)
+        source_packet_ids.update(f"cam{camera_id}" for camera_id in supporting_ids)
+
+    sorted_voxels = sorted(voxels, key=lambda item: item["score"], reverse=True)[:800]
+
+    # Extract peaks (top 5 highest-score voxels)
+    peaks = []
+    for voxel in sorted_voxels[:5]:
+        x = GRID_ORIGIN[0] + (voxel["ix"] + 0.5) * VOXEL_SIZE_M
+        y = GRID_ORIGIN[1] + (voxel["iy"] + 0.5) * VOXEL_SIZE_M
+        z = GRID_ORIGIN[2] + (voxel["iz"] + 0.5) * VOXEL_SIZE_M
+        peaks.append({"position": [x, y, z], "score": voxel["score"]})
+
+    return {
+        "ts_ns": int(time.time() * 1_000_000_000),
+        "grid": {
+            "frame_id": "world",
+            "origin": list(GRID_ORIGIN),
+            "voxel_size_m": VOXEL_SIZE_M,
+            "dims": list(GRID_DIMS),
+        },
+        "voxels": sorted_voxels,
+        "peaks": peaks,
+        "decay_s": 1.0,
+        "source_packet_ids": sorted(source_packet_ids),
+    }
+
+
+def create_scenario_tracks(scenario: str, frame: int, total_frames: int, cameras: list[dict]) -> list[dict]:
+    if scenario == "orbit-drone":
+        return [create_supported_track(create_demo_track, 1, frame, total_frames, cameras)]
+    if scenario == "erratic-drone-solo":
+        return [create_supported_track(create_erratic_drone_track, 1, frame, total_frames, cameras)]
+    if scenario == "high-altitude-plane":
+        return [create_supported_track(create_plane_track, 1, frame, total_frames, cameras)]
+    if scenario == "airport-mixed":
+        return [
+            create_supported_track(create_erratic_drone_track, 1, frame, total_frames, cameras),
+            create_supported_track(create_plane_track, 2, frame, total_frames, cameras),
+            create_supported_track(create_slow_downtown_drone_track, 3, frame, total_frames, cameras),
+        ]
+    raise ValueError(f"unknown demo scenario: {scenario}")
+
+
+def create_supported_track(track_fn, track_id: int, frame: int, total_frames: int, cameras: list[dict]) -> dict:
+    provisional = track_fn(track_id, frame, total_frames)
+    supporting_ids = visible_camera_ids(cameras, provisional["state"][:3])
+    return track_fn(track_id, frame, total_frames, supporting_ids)
+
+
+def world_to_voxel(position: list[float] | tuple[float, float, float]) -> tuple[int, int, int]:
+    return (
+        int((position[0] - GRID_ORIGIN[0]) / VOXEL_SIZE_M),
+        int((position[1] - GRID_ORIGIN[1]) / VOXEL_SIZE_M),
+        int((position[2] - GRID_ORIGIN[2]) / VOXEL_SIZE_M),
+    )
+
+
+def voxel_in_bounds(ix: int, iy: int, iz: int) -> bool:
+    return 0 <= ix < GRID_DIMS[0] and 0 <= iy < GRID_DIMS[1] and 0 <= iz < GRID_DIMS[2]
+
+
+def voxel_center(ix: int, iy: int, iz: int) -> tuple[float, float, float]:
+    return (
+        GRID_ORIGIN[0] + (ix + 0.5) * VOXEL_SIZE_M,
+        GRID_ORIGIN[1] + (iy + 0.5) * VOXEL_SIZE_M,
+        GRID_ORIGIN[2] + (iz + 0.5) * VOXEL_SIZE_M,
+    )
+
+
+def distance_to_line_segment(
+    point: tuple[float, float, float],
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+) -> float:
+    sx, sy, sz = start
+    ex, ey, ez = end
+    px, py, pz = point
+    vx, vy, vz = ex - sx, ey - sy, ez - sz
+    wx, wy, wz = px - sx, py - sy, pz - sz
+    segment_len_sq = vx * vx + vy * vy + vz * vz
+    if segment_len_sq <= 0.0:
+        return distance_between(point, start)
+    t = max(0.0, min(1.0, (wx * vx + wy * vy + wz * vz) / segment_len_sq))
+    closest = (sx + t * vx, sy + t * vy, sz + t * vz)
+    return distance_between(point, closest)
+
+
+def distance_between(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    dx = a[0] - b[0]
+    dy = a[1] - b[1]
+    dz = a[2] - b[2]
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+
+async def stream_demo_data(server: VizServer, camera_array: str, scenario: str) -> None:
     """Stream demo data to the visualizer."""
     logger.info("Starting demo data stream...")
 
     cameras = create_demo_cameras(camera_array)
     frame = 0
-    total_frames = 600  # 20 seconds for full circle at 30fps
+    total_frames = 1200
 
     while True:
-        provisional_track = create_demo_track(1, frame, total_frames)
-        supporting_ids = visible_camera_ids(cameras, provisional_track["state"][:3])
+        tracks = create_scenario_tracks(scenario, frame, total_frames, cameras)
+        weavefield = create_combined_weavefield(frame, cameras, tracks)
 
-        # Create track(s)
-        track1 = create_demo_track(1, frame, total_frames, supporting_ids)
-        tracks = [track1]
-
-        # Create weavefield with voxels around the track
-        track_pos = track1["state"][:3]
-        weavefield = create_demo_weavefield(frame, track_pos, supporting_ids)
+        # Collect supporting camera IDs safely
+        supporting_ids_set = set()
+        for track in tracks:
+            visible_ids = track.get("visible_camera_ids", [])
+            if visible_ids:
+                supporting_ids_set.update(visible_ids)
+        supporting_ids = sorted(supporting_ids_set)
 
         # Keep last 30 frames of weavefield history
         weavefield_history = [weavefield]
@@ -301,7 +593,7 @@ async def stream_demo_data(server: VizServer, camera_array: str) -> None:
             weavefield_history=weavefield_history,
             measurements=[],
             stats={
-                "fps": 30.0,
+                "fps": DEMO_FPS,
                 "latency_p50_ms": 25.0,
                 "n_tracks": len(tracks),
                 "n_voxels": len(weavefield["voxels"]),
@@ -317,7 +609,7 @@ async def stream_demo_data(server: VizServer, camera_array: str) -> None:
         frame = (frame + 1) % total_frames
 
         # Sleep to maintain ~30fps
-        await asyncio.sleep(1.0 / 30)
+        await asyncio.sleep(1.0 / DEMO_FPS)
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -343,16 +635,16 @@ async def main(args: argparse.Namespace) -> None:
     logger.info("  Open http://localhost:%s in your browser", args.port)
     logger.info("")
     logger.info("  The visualizer will show:")
+    logger.info("    - %s scenario", args.scenario)
     logger.info("    - %s camera array: %d cameras", args.camera_array, len(CAMERA_ARRAYS[args.camera_array]))
-    logger.info("    - 1 drone circling at 300m altitude")
-    logger.info("    - Voxel cloud showing detection evidence")
-    logger.info("    - 2km x 2km surveillance volume")
+    logger.info("    - ray-intersection voxel evidence")
+    logger.info("    - 12km x 22km x 2.5km surveillance volume")
     logger.info("")
     logger.info("=" * 60)
     logger.info("")
 
     # Start streaming demo data
-    await stream_demo_data(server, args.camera_array)
+    await stream_demo_data(server, args.camera_array, args.scenario)
 
 
 def parse_args() -> argparse.Namespace:
@@ -360,9 +652,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="0.0.0.0", help="Host interface to bind.")
     parser.add_argument("--port", type=int, default=8080, help="HTTP/WebSocket port.")
     parser.add_argument(
+        "--scenario",
+        choices=SCENARIOS,
+        default="orbit-drone",
+        help="Synthetic movement scenario to stream.",
+    )
+    parser.add_argument(
         "--camera-array",
         choices=sorted(CAMERA_ARRAYS),
-        default="perimeter-6",
+        default=None,
         help="Synthetic camera layout to stream.",
     )
     parser.add_argument("--list-camera-arrays", action="store_true", help="Print available camera arrays and exit.")
@@ -371,6 +669,8 @@ def parse_args() -> argparse.Namespace:
 
 def run() -> None:
     args = parse_args()
+    if args.camera_array is None:
+        args.camera_array = default_camera_array_for_scenario(args.scenario)
     if args.list_camera_arrays:
         for name, positions in sorted(CAMERA_ARRAYS.items()):
             print(f"{name}: {len(positions)} cameras")

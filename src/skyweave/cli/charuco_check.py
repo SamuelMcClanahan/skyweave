@@ -6,7 +6,16 @@ import sys
 import time
 from pathlib import Path
 
-from skyweave.calibration.charuco import CharucoBoardSpec, detect_charuco, write_annotated_detection
+from skyweave.calibration.charuco import (
+    DEFAULT_CHARUCO_DICTIONARY,
+    DEFAULT_CHARUCO_MARKER_MM,
+    DEFAULT_CHARUCO_SQUARES_X,
+    DEFAULT_CHARUCO_SQUARES_Y,
+    DEFAULT_CHARUCO_SQUARE_MM,
+    CharucoBoardSpec,
+    detect_charuco,
+    write_annotated_detection,
+)
 from skyweave.camera.source import CameraOpenError, OpenCVCameraSource
 
 
@@ -20,11 +29,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--height", type=int, default=800)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--fourcc", default="MJPG")
-    parser.add_argument("--squares-x", type=int, default=10)
-    parser.add_argument("--squares-y", type=int, default=7)
-    parser.add_argument("--square-mm", type=float, required=True)
-    parser.add_argument("--marker-mm", type=float, required=True)
-    parser.add_argument("--dictionary", default="DICT_4X4")
+    parser.add_argument("--squares-x", type=int, default=DEFAULT_CHARUCO_SQUARES_X)
+    parser.add_argument("--squares-y", type=int, default=DEFAULT_CHARUCO_SQUARES_Y)
+    parser.add_argument("--square-mm", type=float, default=DEFAULT_CHARUCO_SQUARE_MM)
+    parser.add_argument("--marker-mm", type=float, default=DEFAULT_CHARUCO_MARKER_MM)
+    parser.add_argument("--dictionary", default=DEFAULT_CHARUCO_DICTIONARY)
     parser.add_argument("--min-corners", type=int, default=12)
     parser.add_argument("--console-every", type=int, default=10)
     parser.add_argument("--snapshot-dir", default=None, help="Optional directory for annotated detection snapshots.")

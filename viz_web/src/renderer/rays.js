@@ -11,7 +11,7 @@ export class RayRenderer {
         this.rayLines = [];
     }
 
-    update(tracks, cameras, rayMode) {
+    update(tracks, cameras, rayMode, selectedTrackId = null) {
         // Clear existing rays
         this.rayLines.forEach(line => {
             this.rayGroup.remove(line);
@@ -24,9 +24,18 @@ export class RayRenderer {
             return;
         }
 
+        // If a track is selected, only show its rays
+        if (selectedTrackId !== null) {
+            const selectedTrack = tracks.get(selectedTrackId);
+            if (selectedTrack) {
+                this.createTrackRays(selectedTrack, cameras);
+            }
+            return;
+        }
+
         // Create rays based on mode
         if (rayMode === 'all') {
-            this.createAllRays(tracks, cameras);
+            this.createAllSupportingRays(tracks, cameras);
         } else if (rayMode.startsWith('camera_')) {
             const cameraId = parseInt(rayMode.split('_')[1]);
             const camera = cameras.get(cameraId);
@@ -36,20 +45,35 @@ export class RayRenderer {
         }
     }
 
-    createAllRays(tracks, cameras) {
-        const cameraArray = Array.from(cameras.values());
-
+    createAllSupportingRays(tracks, cameras) {
+        // Only draw rays from cameras that are actually supporting tracks
         tracks.forEach(track => {
-            const trackPos = new THREE.Vector3(track.state[0], track.state[1], track.state[2]);
+            this.createTrackRays(track, cameras);
+        });
+    }
 
-            cameraArray.forEach((camera, index) => {
-                const cameraPos = new THREE.Vector3(camera.position[0], camera.position[1], camera.position[2]);
+    createTrackRays(track, cameras) {
+        const trackPos = new THREE.Vector3(track.state[0], track.state[1], track.state[2]);
+        const supportingCameraIds = track.visible_camera_ids || [];
 
-                // Create ray line
-                const line = this.createRayLine(cameraPos, trackPos, index);
-                this.rayLines.push(line);
-                this.rayGroup.add(line);
-            });
+        supportingCameraIds.forEach(cameraId => {
+            const camera = cameras.get(cameraId);
+            if (!camera) return;
+
+            const cameraPos = new THREE.Vector3(camera.position[0], camera.position[1], camera.position[2]);
+
+            // Calculate brightness based on support count
+            const supportCount = supportingCameraIds.length;
+            let opacity = 0.3; // Minimum support (2 cameras)
+            if (supportCount >= 4) {
+                opacity = 0.7; // Strong support
+            } else if (supportCount === 3) {
+                opacity = 0.5; // Medium support
+            }
+
+            const line = this.createRayLine(cameraPos, trackPos, cameraId, opacity);
+            this.rayLines.push(line);
+            this.rayGroup.add(line);
         });
     }
 
@@ -66,7 +90,7 @@ export class RayRenderer {
         });
     }
 
-    createRayLine(start, end, cameraIndex) {
+    createRayLine(start, end, cameraIndex, opacity = 0.25) {
         const points = [start, end];
         const geometry = new THREE.BufferGeometry().setFromPoints(points);
 
@@ -77,8 +101,8 @@ export class RayRenderer {
         const material = new THREE.LineBasicMaterial({
             color: color,
             transparent: true,
-            opacity: 0.25,
-            linewidth: 1
+            opacity: opacity,
+            linewidth: 2
         });
 
         return new THREE.Line(geometry, material);
