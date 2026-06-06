@@ -17,11 +17,11 @@ from skyweave.calibration.charuco import (
 )
 from skyweave.calibration.charuco_live_capture import _capture_loop
 from skyweave.calibration.charuco_live_server import _display_host, _html_page, _make_handler
-from skyweave.calibration.charuco_live_state import LiveState, _fps_from_times
+from skyweave.calibration.charuco_live_state import LiveCameraSettings, LiveState, LiveTuningSettings, _fps_from_times
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Serve a live ChArUco detection web viewer.")
+    parser = argparse.ArgumentParser(description="Serve a live ChArUco detection and tuning dashboard.")
     parser.add_argument("--device", default=None)
     parser.add_argument("--devices", default=None, help="Comma-separated camera devices.")
     parser.add_argument("--host", default="0.0.0.0")
@@ -60,7 +60,23 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--log-every-s must be positive")
 
     devices = _parse_devices(args.device, args.devices)
-    state = LiveState(devices=devices)
+    state = LiveState(
+        devices=devices,
+        tuning=LiveTuningSettings(
+            camera=LiveCameraSettings(
+                width=args.width,
+                height=args.height,
+                fps=args.fps,
+                fourcc=args.fourcc,
+                warmup_frames=args.warmup_frames,
+                jpeg_quality=args.jpeg_quality,
+                display_scale=args.display_scale,
+                detect_every=args.detect_every,
+                min_lock_corners=args.min_lock_corners,
+                reopen_after_failures=args.reopen_after_failures,
+            )
+        ),
+    )
     spec = CharucoBoardSpec(
         squares_x=args.squares_x,
         squares_y=args.squares_y,

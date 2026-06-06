@@ -1,5 +1,6 @@
 // Scene manager: Cesium earth context plus a transparent Three.js overlay.
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 import { CameraRenderer } from './cameras.js';
 import { TrackRenderer } from './tracks.js';
@@ -45,6 +46,11 @@ export class SceneManager {
         this.rayRenderer = null;
         this.gridRenderer = null;
         this.fovCoverageRenderer = null;
+        this.roomGroup = null;
+        this.roomMesh = null;
+        this.roomFallback = null;
+        this.roomLoader = new GLTFLoader();
+        this.loadedRoomUrl = '';
 
         // Raycaster for mouse interaction
         this.raycaster = new THREE.Raycaster();
@@ -78,8 +84,12 @@ export class SceneManager {
         this.rayRenderer = new RayRenderer(this.scene);
         this.gridRenderer = new GridRenderer(this.scene);
         this.fovCoverageRenderer = new FovCoverageRenderer(this.scene);
+        this.roomGroup = new THREE.Group();
+        this.roomGroup.name = 'Room Scan';
+        this.scene.add(this.roomGroup);
         this.tooltipManager = new TooltipManager(this.state);
         this.applySettings(this.state.settings, true);
+        this.applyRoomSettings(this.state.room, true);
 
         // Setup event listeners
         this.setupEventListeners();
@@ -520,6 +530,10 @@ export class SceneManager {
                 this.applySettings(state.settings);
                 break;
 
+            case 'room':
+                this.applyRoomSettings(state.room);
+                break;
+
             case 'follow':
                 this.updateCameraFollow();
                 break;
@@ -534,6 +548,104 @@ export class SceneManager {
             this.lastAppliedScaleValue = settings.scaleValue;
             this.applyViewScale(settings.scaleValue);
         }
+    }
+
+    applyRoomSettings(room, force = false) {
+        if (!this.roomGroup) {
+            return;
+        }
+
+        const meshUrl = room?.mesh_url || '';
+        if (force || meshUrl !== this.loadedRoomUrl) {
+            this.loadRoomMesh(meshUrl);
+        }
+        this.roomGroup.visible = Boolean(room?.visible || room?.fallback_visible);
+        this.roomGroup.position.set(...(room?.translation_m || [0, 0, 0]));
+        const rotation = room?.rotation_deg || [0, 0, 0];
+        this.roomGroup.rotation.set(
+            THREE.MathUtils.degToRad(rotation[0] || 0),
+            THREE.MathUtils.degToRad(rotation[1] || 0),
+            THREE.MathUtils.degToRad(rotation[2] || 0)
+        );
+        const scale = Number(room?.scale || 1);
+        this.roomGroup.scale.setScalar(scale);
+        if (this.roomMesh) {
+            this.roomMesh.visible = Boolean(room?.visible && meshUrl);
+            this.applyRoomOpacity(this.roomMesh, Number(room?.opacity ?? 0.42));
+        }
+        this.updateFallbackRoom(room);
+    }
+
+    loadRoomMesh(meshUrl) {
+        this.loadedRoomUrl = meshUrl || '';
+        if (this.roomMesh) {
+            this.roomGroup.remove(this.roomMesh);
+            this.disposeObject(this.roomMesh);
+            this.roomMesh = null;
+        }
+        if (!meshUrl) {
+            return;
+        }
+        this.roomLoader.load(
+            meshUrl,
+            gltf => {
+                if (meshUrl !== this.loadedRoomUrl) {
+                    return;
+                }
+                this.roomMesh = gltf.scene;
+                this.roomMesh.name = 'Room Mesh';
+                this.applyRoomOpacity(this.roomMesh, Number(this.state.room?.opacity ?? 0.42));
+                this.roomGroup.add(this.roomMesh);
+                this.applyRoomSettings(this.state.room, false);
+            },
+            undefined,
+            error => {
+                console.warn('Room mesh failed to load', meshUrl, error);
+            }
+        );
+    }
+
+    updateFallbackRoom(room) {
+        const size = room?.fallback_size_m || [4, 4, 2.6];
+        const key = size.join(',');
+        if (!this.roomFallback || this.roomFallback.userData.sizeKey !== key) {
+            if (this.roomFallback) {
+                this.roomGroup.remove(this.roomFallback);
+                this.disposeObject(this.roomFallback);
+            }
+            const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
+            const edges = new THREE.EdgesGeometry(geometry);
+            const material = new THREE.LineBasicMaterial({ color: 0x79c6ff, transparent: true, opacity: 0.32 });
+            this.roomFallback = new THREE.LineSegments(edges, material);
+            this.roomFallback.name = 'Measured Room Fallback';
+            this.roomFallback.position.z = size[2] / 2;
+            this.roomFallback.userData.sizeKey = key;
+            this.roomGroup.add(this.roomFallback);
+        }
+        this.roomFallback.visible = Boolean(room?.fallback_visible);
+    }
+
+    applyRoomOpacity(object, opacity) {
+        object.traverse(child => {
+            if (!child.material) {
+                return;
+            }
+            const materials = Array.isArray(child.material) ? child.material : [child.material];
+            materials.forEach(material => {
+                material.transparent = opacity < 1.0;
+                material.opacity = opacity;
+                material.depthWrite = opacity >= 0.95;
+                material.needsUpdate = true;
+            });
+        });
+    }
+
+    disposeObject(object) {
+        object.traverse(child => {
+            child.geometry?.dispose?.();
+            const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
+            materials.forEach(material => material.dispose?.());
+        });
     }
 
     applyViewScale(scaleValue) {

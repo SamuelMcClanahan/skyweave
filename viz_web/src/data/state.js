@@ -5,6 +5,17 @@ export class VizState {
         this.measurements = [];
         this.weavefieldHistory = [];
         this.stats = {};
+        this.room = {
+            mesh_url: '',
+            visible: true,
+            opacity: 0.42,
+            scale: 1.0,
+            translation_m: [0, 0, 0],
+            rotation_deg: [0, 0, 0],
+            fallback_visible: true,
+            fallback_size_m: [4, 4, 2.6],
+            revision: 0
+        };
         this.selectedTrackId = null;
         this.followingTrackId = null;
         this.visibility = {
@@ -61,6 +72,11 @@ export class VizState {
     updateStats(stats) {
         this.stats = { ...this.stats, ...(stats || {}) };
         this.notify('stats');
+    }
+
+    updateRoom(room) {
+        this.room = { ...this.room, ...(room || {}) };
+        this.notify('room');
     }
 
     setVisibility(key, value) {

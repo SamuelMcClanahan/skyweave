@@ -206,6 +206,29 @@ This writes `manifest.yaml`, `observations.jsonl`, and optional frame snapshots
 under `data/calibration/`. Laptop-screen captures are useful for smoke testing;
 the printed rigid board should be used for final calibration.
 
+Solve per-camera intrinsics from a capture directory:
+
+```bash
+.venv/bin/skyweave-charuco-intrinsics data/calibration/<intrinsic-capture-dir> --output configs/intrinsics_cam1.yaml
+```
+
+For the fixed-layout real-camera test, keep the printed ChArUco board completely
+still and capture all cameras into one directory. Then solve each camera pose in
+the shared board world frame while holding the already-solved intrinsics fixed:
+
+```bash
+.venv/bin/skyweave-charuco-capture --camera-config configs/cameras.local.yaml --output-dir data/calibration/fixed_board_extrinsics --frames 120 --sample-every 4 --target-accepted 30 --width 1280 --height 800 --fps 15 --fourcc MJPG --squares-x 8 --squares-y 6 --square-mm 30 --marker-mm 21.6 --dictionary DICT_4X4 --min-corners 24 --save-images
+.venv/bin/skyweave-charuco-extrinsics data/calibration/fixed_board_extrinsics --intrinsics configs/intrinsics_cam1.yaml --intrinsics configs/intrinsics_cam2.yaml --intrinsics configs/intrinsics_cam3.yaml --output configs/extrinsics.yaml
+```
+
+The extrinsic solver uses OpenCV's ChArUco board point matching and PnP pose
+solve, then converts OpenCV's board-to-camera pose into Skyweave's stored
+`T_world_cam`. `configs/extrinsics.yaml` stores `T_world_cam` for the software
+camera IDs from the capture manifest. With labels `cam1,cam2,cam3`, software
+`camera_id=0` corresponds to physical `cam1`, `camera_id=1` to `cam2`, and so
+on. This first solver assumes every accepted observation sees the same unmoved
+board pose; use a later bundle-adjustment solve for moving-board captures.
+
 For easier aiming, run the lightweight live web viewer on the Rubik:
 
 ```bash
@@ -217,6 +240,24 @@ JPEG view with marker/corner counts, best dictionary, detection rate, FPS, and
 latency. Camera buttons at the top switch the active device; failed/disconnected
 cameras are marked in red without stopping the viewer. The JSONL log records
 status snapshots for later review.
+
+Run the combined operator dashboard plus existing visualizer for live testing:
+
+```bash
+.venv/bin/python -m skyweave.cli.operator --config configs/sim_mvp_ov9281_100hz_numba.yaml --extrinsics configs/extrinsics.yaml --devices /dev/video4,/dev/video2,/dev/video0 --labels cam1,cam2,cam3 --width 1280 --height 800 --fps 100 --fourcc MJPG --squares-x 8 --squares-y 6 --square-mm 30 --marker-mm 21.6 --dictionary DICT_4X4 --mode auto --host 0.0.0.0 --port 8088
+```
+
+Open `/operator` for the split control surface and `/viz/` for the standalone
+visualizer. The operator panel controls runtime camera settings, motion packet
+filters, Kalman gains, real/stress/auto mode, and YAML profiles under
+`data/profiles/`. The visualizer pane is the existing `viz_web` app consuming the
+same `/ws` `VizFrame` stream.
+
+Room scans belong to the visualizer side. Export a phone scan as GLB/GLTF, place
+it under `data/room/`, and pass it with `--room-mesh data/room/<scan>.glb`. The
+operator stream sends room mesh transform and opacity metadata to `viz_web`; the
+measured-room wireframe remains available as a fallback while the scan is being
+aligned to the shared ChArUco/world frame.
 
 For the first Rubik Pi 3 target sweep, use
 `docs/rubik-pi-setup.md`.

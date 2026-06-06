@@ -68,6 +68,9 @@ class SkyweaveViz {
         if (data.stats) {
             this.state.updateStats(data.stats);
         }
+        if (data.room) {
+            this.state.updateRoom(data.room);
+        }
 
         // Update UI
         this.uiManager.update();

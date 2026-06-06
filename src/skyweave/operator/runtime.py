@@ -1,0 +1,479 @@
+from __future__ import annotations
+
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any
+
+from skyweave.calibration.charuco import CharucoBoardSpec, detect_charuco, draw_annotated_detection
+from skyweave.calibration.charuco_live_capture import _resize_gray, _sharpness_score
+from skyweave.calibration.charuco_live_state import (
+    LiveTrackTelemetry,
+    _fps_from_times,
+    _is_running,
+    _record_read_failure,
+    _requested_index,
+    _select_camera,
+)
+from skyweave.camera.check_common import MotionCameraState, _read_live_frames
+from skyweave.camera.live_benchmark import DEFAULT_LIVE_BENCHMARK_CONFIG, _with_stress_frame
+from skyweave.camera.motion import FrameDiffMotionPacketBuilder
+from skyweave.camera.source import CameraOpenError, OpenCVCameraSource
+from skyweave.config import SimCheckConfig, load_config
+from skyweave.fusion.aligner import TimeAligner
+from skyweave.fusion.kalman import TrackManager
+from skyweave.messages import Measurement3D, MotionPacket, Track, WeavefieldVolume
+from skyweave.operator.calibration import load_extrinsic_camera_calibs, scale_camera_calibs
+from skyweave.operator.state import OperatorState, PipelineStatus
+from skyweave.operator.viz import track_telemetry, viz_camera
+from skyweave.rayweave.grid import VoxelGrid
+from skyweave.rayweave.peaks import PeakExtractor
+from skyweave.rayweave.scorer import RayweaveScorer
+from skyweave.sim.generator import SyntheticFrame, SyntheticPacketGenerator
+from skyweave.sim.scene import build_scene
+from skyweave.timestamps import monotonic_ns
+
+
+@dataclass(frozen=True)
+class OperatorRuntimeOptions:
+    config_path: str = DEFAULT_LIVE_BENCHMARK_CONFIG
+    extrinsics_path: str = "configs/extrinsics.yaml"
+    target_hz: float = 30.0
+
+
+@dataclass
+class _Pipeline:
+    config: SimCheckConfig
+    motion_states: dict[int, MotionCameraState]
+    grid: VoxelGrid
+    aligner: TimeAligner
+    scorer: RayweaveScorer
+    peak_extractor: PeakExtractor
+    tracks: TrackManager
+    cameras: dict[int, Any]
+    viz_cameras: list[dict[str, Any]]
+    stress_frames: list[SyntheticFrame]
+    effective_mode: str
+    reason: str
+
+
+class OperatorRuntime:
+    def __init__(
+        self,
+        state: OperatorState,
+        board: CharucoBoardSpec,
+        options: OperatorRuntimeOptions | None = None,
+    ) -> None:
+        self.state = state
+        self.board = board
+        self.options = options or OperatorRuntimeOptions(
+            config_path=state.config_path,
+            extrinsics_path=state.extrinsics_path,
+        )
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="skyweave-operator-runtime", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self.state.stop()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        try:
+            import cv2  # type: ignore[import-not-found]
+        except ImportError:
+            self.state.set_runtime_status("failed", "OpenCV is required. Install with: python -m pip install -e '.[camera,viz]'")
+            self.state.stop()
+            return
+
+        sources: list[OpenCVCameraSource] = []
+        pipeline: _Pipeline | None = None
+        settings_revision = -1
+        tracking_revision = -1
+        camera_signature: tuple[int, int, float, str, int] | None = None
+        frame_times: dict[int, list[float]] = {idx: [] for idx in range(len(self.state.devices))}
+        active_specs = [self.board for _ in self.state.devices]
+        cached_detections = [("none", 0, 0) for _ in self.state.devices]
+        frame_seq = 0
+
+        try:
+            while _is_running(self.state.live):
+                settings, revision = self.state.live.settings_snapshot()
+                _requested_mode, next_tracking_revision = self.state.tracking_snapshot()
+                next_signature = settings.camera.capture_signature()
+                if revision != settings_revision or next_tracking_revision != tracking_revision:
+                    settings_revision = revision
+                    tracking_revision = next_tracking_revision
+                    pipeline = self._build_pipeline(settings)
+                    frame_times = {idx: [] for idx in range(len(self.state.devices))}
+
+                if not sources or camera_signature != next_signature:
+                    for source in sources:
+                        source.close()
+                    sources = self._open_sources(settings.camera)
+                    camera_signature = next_signature if sources else None
+                    for item in (pipeline.motion_states.values() if pipeline else []):
+                        item.builder = None
+                        item.previous_frame = None
+
+                if not sources:
+                    time.sleep(0.5)
+                    continue
+
+                loop_start = time.perf_counter()
+                self._apply_camera_selection()
+                read_start = time.perf_counter()
+                reads = _read_live_frames(sources)
+                camera_read_ms = _elapsed_ms(read_start)
+                motion_start = time.perf_counter()
+                packets = self._motion_packets(reads, pipeline, settings)
+                motion_ms = _elapsed_ms(motion_start)
+                preview_start = time.perf_counter()
+                self._update_camera_preview(
+                    cv2,
+                    reads,
+                    packets,
+                    settings,
+                    active_specs,
+                    cached_detections,
+                    frame_times,
+                )
+                preview_ms = _elapsed_ms(preview_start)
+                self._run_fusion_frame(
+                    pipeline,
+                    packets,
+                    frame_seq,
+                    loop_start,
+                    {
+                        "camera_read_ms": camera_read_ms,
+                        "motion_ms": motion_ms,
+                        "preview_ms": preview_ms,
+                    },
+                )
+                frame_seq += 1
+
+                elapsed = time.perf_counter() - loop_start
+                target = 1.0 / self.options.target_hz if self.options.target_hz > 0.0 else 0.0
+                if target > elapsed:
+                    time.sleep(target - elapsed)
+        except Exception as exc:
+            self.state.set_runtime_status("failed", str(exc))
+            self.state.live.update_error(str(exc))
+        finally:
+            for source in sources:
+                source.close()
+            self.state.set_runtime_status("stopped" if self.state.runtime_error is None else "failed", self.state.runtime_error)
+
+    def _apply_camera_selection(self) -> None:
+        requested_index = _requested_index(self.state.live)
+        with self.state.live.lock:
+            selected_index = self.state.live.selected_index
+            camera_count = len(self.state.live.cameras)
+        if 0 <= requested_index < camera_count and requested_index != selected_index:
+            _select_camera(self.state.live, requested_index)
+
+    def _build_pipeline(self, settings) -> _Pipeline:
+        config = load_config(self.state.config_path).model_copy(deep=True)
+        config.simulation.image_width = settings.camera.width
+        config.simulation.image_height = settings.camera.height
+        config.simulation.timestep_hz = settings.camera.fps
+        config.kalman = settings.kalman.to_kalman_config()
+
+        requested_mode = self.state.requested_mode
+        extrinsic_cameras, calibration = load_extrinsic_camera_calibs(self.state.extrinsics_path)
+        self.state.set_calibration(calibration)
+
+        if requested_mode in {"auto", "real"} and extrinsic_cameras:
+            cameras = scale_camera_calibs(extrinsic_cameras, settings.camera.width, settings.camera.height)
+            effective_mode = "real"
+            reason = "loaded calibrated extrinsics"
+            stress_frames: list[SyntheticFrame] = []
+        else:
+            scene = build_scene(config.simulation)
+            cameras = scene.cameras
+            stress_frames = SyntheticPacketGenerator(scene, config.simulation).frames()
+            effective_mode = "stress"
+            if requested_mode == "real":
+                reason = calibration.message
+            elif requested_mode == "auto":
+                reason = f"auto fallback: {calibration.message}"
+            else:
+                reason = "stress mode selected"
+
+        grid = VoxelGrid.from_config(config.rayweave.grid)
+        try:
+            scorer = RayweaveScorer(grid, cameras, config.rayweave.scorer)
+        except ImportError:
+            config.rayweave.scorer.backend = "python_numpy"
+            scorer = RayweaveScorer(grid, cameras, config.rayweave.scorer)
+            reason = f"{reason}; scorer fallback python_numpy"
+
+        pipeline = _Pipeline(
+            config=config,
+            motion_states={idx: MotionCameraState() for idx in range(len(self.state.devices))},
+            grid=grid,
+            aligner=TimeAligner(config.fusion.align_window_ns, config.fusion.min_cameras_per_frame),
+            scorer=scorer,
+            peak_extractor=PeakExtractor(grid, config.rayweave.peaks),
+            tracks=TrackManager(config.kalman),
+            cameras=cameras,
+            viz_cameras=[viz_camera(camera, settings.camera.fps, online=True) for camera in cameras.values()],
+            stress_frames=stress_frames,
+            effective_mode=effective_mode,
+            reason=reason,
+        )
+        self.state.set_pipeline(PipelineStatus(mode=effective_mode, reason=reason))
+        self.state.set_runtime_status("running")
+        return pipeline
+
+    def _open_sources(self, camera_settings) -> list[OpenCVCameraSource]:
+        sources: list[OpenCVCameraSource] = []
+        for camera_id, device in enumerate(self.state.devices):
+            source = OpenCVCameraSource(
+                camera_id=camera_id,
+                device=device,
+                width=camera_settings.width,
+                height=camera_settings.height,
+                fps=camera_settings.fps,
+                fourcc=camera_settings.fourcc,
+            )
+            try:
+                source.open()
+            except CameraOpenError as exc:
+                self.state.live.set_camera_status(camera_id, "failed", str(exc))
+                for opened in sources:
+                    opened.close()
+                self.state.set_runtime_status("camera_failed", str(exc))
+                return []
+            self.state.live.set_camera_status(camera_id, "running")
+            sources.append(source)
+        for _ in range(max(camera_settings.warmup_frames, 0)):
+            for source in sources:
+                source.read()
+        return sources
+
+    def _motion_packets(self, reads, pipeline: _Pipeline | None, settings) -> list[MotionPacket]:
+        if pipeline is None:
+            return []
+        packets = []
+        motion_config = settings.motion.to_motion_config()
+        for read in reads:
+            frame = read.frame
+            state = pipeline.motion_states[read.source.camera_id]
+            if frame is None:
+                _record_read_failure(self.state.live, read.source.camera_id)
+                continue
+            builder = state.builder
+            if (
+                builder is None
+                or builder.image_width != frame.image_width
+                or builder.image_height != frame.image_height
+                or builder.config != motion_config
+            ):
+                builder = FrameDiffMotionPacketBuilder(
+                    read.source.camera_id,
+                    frame.image_width,
+                    frame.image_height,
+                    config=motion_config,
+                    source_id=f"camera{read.source.camera_id}",
+                )
+                state.builder = builder
+                state.previous_frame = None
+            packet = builder.build(state.previous_frame, frame.gray, frame.frame_seq, frame.capture_ts_ns)
+            packet = packet.model_copy(
+                update={"header": packet.header.model_copy(update={"publish_ts_ns": monotonic_ns()})}
+            )
+            state.previous_frame = frame.gray
+            packets.append(packet)
+        if pipeline.effective_mode == "stress" and packets and pipeline.stress_frames:
+            stress_frame = pipeline.stress_frames[packets[0].header.frame_seq % len(pipeline.stress_frames)]
+            return _with_stress_frame(packets, stress_frame)
+        return packets
+
+    def _update_camera_preview(
+        self,
+        cv2,
+        reads,
+        packets: list[MotionPacket],
+        settings,
+        active_specs: list[CharucoBoardSpec],
+        cached_detections: list[tuple[str, int, int]],
+        frame_times: dict[int, list[float]],
+    ) -> None:
+        with self.state.live.lock:
+            selected_index = self.state.live.selected_index
+        packets_by_camera = {packet.camera_id: packet for packet in packets}
+        preview_stride = max(1, int(round(settings.camera.fps / 8.0)))
+        for read in reads:
+            frame = read.frame
+            camera_id = read.source.camera_id
+            if frame is None:
+                continue
+
+            start = time.perf_counter()
+            should_detect = frame.frame_seq % settings.camera.detect_every == 0
+            with self.state.live.lock:
+                previous_sharpness = self.state.live.cameras[camera_id].sharpness
+                needs_first_preview = self.state.live.frame_jpegs[camera_id] is None
+            should_encode_preview = needs_first_preview or frame.frame_seq % preview_stride == 0
+            sharpness = previous_sharpness
+            annotated = None
+            frame_jpeg = None
+
+            if should_detect or should_encode_preview:
+                display_gray = _resize_gray(cv2, frame.gray, settings.camera.display_scale)
+            else:
+                display_gray = None
+
+            if should_encode_preview and display_gray is not None:
+                sharpness = _sharpness_score(cv2, display_gray)
+
+            if should_detect and display_gray is not None:
+                detection, payload = detect_charuco(display_gray, active_specs[camera_id])
+                cached_detections[camera_id] = (detection.dictionary, detection.marker_count, detection.corner_count)
+                if detection.corner_count >= settings.camera.min_lock_corners:
+                    active_specs[camera_id] = CharucoBoardSpec(
+                        squares_x=active_specs[camera_id].squares_x,
+                        squares_y=active_specs[camera_id].squares_y,
+                        square_length_m=active_specs[camera_id].square_length_m,
+                        marker_length_m=active_specs[camera_id].marker_length_m,
+                        dictionary=detection.dictionary,
+                    )
+                if should_encode_preview and camera_id == selected_index:
+                    annotated = draw_annotated_detection(display_gray, payload)
+
+            dictionary, marker_count, corner_count = cached_detections[camera_id]
+            if should_encode_preview and display_gray is not None:
+                if annotated is None:
+                    annotated = cv2.cvtColor(display_gray, cv2.COLOR_GRAY2BGR)
+                packet = packets_by_camera.get(camera_id)
+                if packet is not None:
+                    _draw_motion_blobs(cv2, annotated, packet)
+                ok, encoded = cv2.imencode(
+                    ".jpg",
+                    annotated,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), int(settings.camera.jpeg_quality)],
+                )
+                frame_jpeg = bytes(encoded) if ok else None
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            times = frame_times.setdefault(camera_id, [])
+            times.append(time.perf_counter())
+            if len(times) > 30:
+                times.pop(0)
+            self.state.live.record_camera_frame(
+                camera_index=camera_id,
+                frame_seq=frame.frame_seq,
+                detection_dictionary=dictionary,
+                marker_count=marker_count,
+                corner_count=corner_count,
+                latency_ms=latency_ms,
+                sharpness=sharpness,
+                capture_fps=_fps_from_times(times),
+                frame_jpeg=frame_jpeg,
+            )
+
+    def _run_fusion_frame(
+        self,
+        pipeline: _Pipeline | None,
+        packets: list[MotionPacket],
+        frame_seq: int,
+        loop_start: float,
+        stage_ms: dict[str, float],
+    ) -> None:
+        if pipeline is None:
+            return
+        start = time.perf_counter()
+        aligned = pipeline.aligner.align_frame(packets)
+        alignment_ms = _elapsed_ms(start)
+        volume: WeavefieldVolume | None = None
+        measurements: list[Measurement3D] = []
+        track: Track | None = None
+        scoring_ms = peaks_ms = kalman_ms = 0.0
+        if aligned is None:
+            start = time.perf_counter()
+            track = pipeline.tracks.update(None, monotonic_ns())
+            kalman_ms = _elapsed_ms(start)
+            ts_ns = monotonic_ns()
+        else:
+            ts_ns = aligned.ts_ns
+            start = time.perf_counter()
+            scored = pipeline.scorer.score(aligned)
+            scoring_ms = _elapsed_ms(start)
+            start = time.perf_counter()
+            peaks, measurements = pipeline.peak_extractor.extract(scored)
+            scored.volume.peaks = peaks
+            volume = scored.volume
+            peaks_ms = _elapsed_ms(start)
+            start = time.perf_counter()
+            track = pipeline.tracks.update(measurements[0] if measurements else None, aligned.ts_ns)
+            kalman_ms = _elapsed_ms(start)
+
+        track_payloads = [track.model_dump(mode="json")] if track else []
+        measurement_payloads = [measurement.model_dump(mode="json") for measurement in measurements]
+        volume_payloads = [volume.model_dump(mode="json")] if volume else []
+        total_ms = _elapsed_ms(loop_start)
+        target_ms = 1000.0 / self.options.target_hz if self.options.target_hz > 0.0 else 0.0
+        status = PipelineStatus(
+            mode=pipeline.effective_mode,
+            reason=pipeline.reason,
+            frame_seq=frame_seq,
+            aligned=aligned is not None,
+            packet_count=len(packets),
+            blob_count=sum(len(packet.blobs) for packet in packets),
+            patch_count=sum(len(packet.motion_patches) for packet in packets),
+            measurement_count=len(measurements),
+            track_count=len(track_payloads),
+            camera_read_ms=stage_ms.get("camera_read_ms", 0.0),
+            motion_ms=stage_ms.get("motion_ms", 0.0),
+            preview_ms=stage_ms.get("preview_ms", 0.0),
+            alignment_ms=alignment_ms,
+            scoring_ms=scoring_ms,
+            peaks_ms=peaks_ms,
+            kalman_ms=kalman_ms,
+            total_ms=total_ms,
+            target_sleep_ms=max(0.0, target_ms - total_ms),
+        )
+        self.state.set_pipeline(status)
+        telemetry = track_telemetry(track, measurements[0].ts_ns if measurements else None)
+        self.state.live.update_track(LiveTrackTelemetry(**telemetry))
+        frame = {
+            "frame_seq": frame_seq,
+            "ts_ns": ts_ns,
+            "tracks": track_payloads,
+            "cameras": pipeline.viz_cameras,
+            "measurements": measurement_payloads,
+            "weavefield_history": volume_payloads,
+            "truth_position": None,
+            "stats": {
+                "fps": self.state.live.capture_fps,
+                "latency_ms": total_ms,
+                "n_tracks": len(track_payloads),
+                "n_cameras": len(pipeline.viz_cameras),
+                "n_voxels": len(volume.voxels) if volume else 0,
+                "mode": pipeline.effective_mode,
+                "room_revision": self.state.room.revision,
+            },
+            "room": self.state.room.to_dict(),
+        }
+        self.state.set_viz_frame(frame)
+
+
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000.0
+
+
+def _draw_motion_blobs(cv2, image, packet: MotionPacket) -> None:
+    if not packet.blobs:
+        return
+    sx = image.shape[1] / max(float(packet.image_width), 1.0)
+    sy = image.shape[0] / max(float(packet.image_height), 1.0)
+    for blob in packet.blobs:
+        x0 = int(round(blob.bbox_x * sx))
+        y0 = int(round(blob.bbox_y * sy))
+        x1 = int(round((blob.bbox_x + blob.bbox_w) * sx))
+        y1 = int(round((blob.bbox_y + blob.bbox_h) * sy))
+        cv2.rectangle(image, (x0, y0), (x1, y1), (60, 235, 255), 2)
+        cv2.circle(image, (int(round(blob.cx * sx)), int(round(blob.cy * sy))), 3, (60, 235, 255), -1)
