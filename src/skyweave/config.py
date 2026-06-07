@@ -37,12 +37,25 @@ class SimulationConfig(BaseModel):
     image_width: int = 640
     image_height: int = 480
     focal_length_px: float = 360.0
+    camera_count: int = 3
+    camera_layout: str = "room_perimeter"
+    room_size_m: tuple[float, float, float] = (4.4, 4.4, 2.6)
+    camera_height_m: float = 1.15
+    camera_target_m: tuple[float, float, float] = (0.0, 0.35, 1.25)
+    camera_margin_m: float = 0.20
     patch_size_px: int = 5
     pixel_noise_std_px: float = 0.0
     dropout_probability: float = 0.0
     timestamp_jitter_ms: float = 0.0
     false_positive_probability: float = 0.0
     seed: int = 7
+    render_background_intensity: int = 36
+    render_object_intensity: int = 230
+    render_object_radius_m: float = 0.06
+    render_object_shape: str = "disk"
+    render_noise_std: float = 0.0
+    render_blur_px: int = 0
+    render_trail_alpha: float = 0.0
 
 
 class FusionConfig(BaseModel):

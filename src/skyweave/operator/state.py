@@ -11,7 +11,7 @@ from typing import Any
 
 from skyweave.calibration.charuco_live_state import LiveState, LiveTuningSettings
 
-TRACKING_MODES = ("auto", "real", "stress")
+TRACKING_MODES = ("auto", "real", "stress", "rendered")
 
 
 @dataclass
@@ -57,6 +57,86 @@ class RoomSettings:
         if "fallback_size_m" in payload:
             self.fallback_size_m = _positive_float_triplet(payload["fallback_size_m"], "room.fallback_size_m")
         self.revision += 1
+
+
+@dataclass
+class FusionRuntimeSettings:
+    min_cameras_per_frame: int = 2
+    pixel_noise_px: float = 1.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "min_cameras_per_frame": self.min_cameras_per_frame,
+            "pixel_noise_px": self.pixel_noise_px,
+        }
+
+    def update(self, payload: dict[str, Any]) -> None:
+        if "min_cameras_per_frame" in payload:
+            self.min_cameras_per_frame = _positive_int(payload["min_cameras_per_frame"], "fusion.min_cameras_per_frame")
+        if "pixel_noise_px" in payload:
+            self.pixel_noise_px = _positive_float(payload["pixel_noise_px"], "fusion.pixel_noise_px")
+
+
+@dataclass
+class RayweaveScorerRuntimeSettings:
+    min_supporting_cameras: int = 2
+    top_k_voxels: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"min_supporting_cameras": self.min_supporting_cameras}
+        if self.top_k_voxels is not None:
+            payload["top_k_voxels"] = self.top_k_voxels
+        return payload
+
+    def update(self, payload: dict[str, Any]) -> None:
+        if "min_supporting_cameras" in payload:
+            self.min_supporting_cameras = _positive_int(
+                payload["min_supporting_cameras"],
+                "rayweave.scorer.min_supporting_cameras",
+            )
+        if "top_k_voxels" in payload:
+            self.top_k_voxels = _positive_int(payload["top_k_voxels"], "rayweave.scorer.top_k_voxels")
+
+
+@dataclass
+class RayweavePeakRuntimeSettings:
+    threshold_percentile: float = 99.5
+    max_peaks: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "threshold_percentile": self.threshold_percentile,
+            "max_peaks": self.max_peaks,
+        }
+
+    def update(self, payload: dict[str, Any]) -> None:
+        if "threshold_percentile" in payload:
+            self.threshold_percentile = _bounded_float(
+                payload["threshold_percentile"],
+                "rayweave.peaks.threshold_percentile",
+                0.0,
+                100.0,
+            )
+        if "max_peaks" in payload:
+            self.max_peaks = _positive_int(payload["max_peaks"], "rayweave.peaks.max_peaks")
+
+
+@dataclass
+class RayweaveRuntimeSettings:
+    scorer: RayweaveScorerRuntimeSettings = field(default_factory=RayweaveScorerRuntimeSettings)
+    peaks: RayweavePeakRuntimeSettings = field(default_factory=RayweavePeakRuntimeSettings)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scorer": self.scorer.to_dict(),
+            "peaks": self.peaks.to_dict(),
+        }
+
+    def update(self, payload: dict[str, Any]) -> None:
+        if "scorer" in payload:
+            self.scorer.update(_dict_payload(payload["scorer"], "rayweave.scorer"))
+        if "peaks" in payload:
+            self.peaks.update(_dict_payload(payload["peaks"], "rayweave.peaks"))
 
 
 @dataclass
@@ -166,6 +246,8 @@ class OperatorState:
     calibration: CalibrationStatus = field(init=False)
     pipeline: PipelineStatus = field(default_factory=PipelineStatus)
     room: RoomSettings = field(default_factory=RoomSettings)
+    fusion: FusionRuntimeSettings = field(default_factory=FusionRuntimeSettings)
+    rayweave: RayweaveRuntimeSettings = field(default_factory=RayweaveRuntimeSettings)
     recording: RecordingStatus = field(default_factory=RecordingStatus)
     latest_viz_frame: dict[str, Any] | None = None
     viz_version: int = 0
@@ -182,6 +264,10 @@ class OperatorState:
     def snapshot(self) -> dict[str, Any]:
         live_snapshot = self.live.snapshot()
         with self.lock:
+            settings = _dict_payload(live_snapshot.get("settings", {}), "settings")
+            settings["fusion"] = self.fusion.to_dict()
+            settings["rayweave"] = self.rayweave.to_dict()
+            live_snapshot["settings"] = settings
             cameras = []
             for camera in live_snapshot["cameras"]:
                 item = dict(camera)
@@ -216,6 +302,8 @@ class OperatorState:
     def settings_payload(self) -> dict[str, Any]:
         settings = self.live.settings_snapshot()[0].to_dict()
         with self.lock:
+            settings["fusion"] = self.fusion.to_dict()
+            settings["rayweave"] = self.rayweave.to_dict()
             return {
                 "version": 1,
                 "tracking": {"requested_mode": self.requested_mode},
@@ -230,6 +318,8 @@ class OperatorState:
         for key in ("camera", "motion", "kalman"):
             if key in payload:
                 settings_payload[key] = payload[key]
+        fusion_payload = settings_payload.pop("fusion", None)
+        rayweave_payload = settings_payload.pop("rayweave", None)
         if settings_payload:
             self.live.update_settings(settings_payload)
 
@@ -251,6 +341,16 @@ class OperatorState:
                 self.requested_mode = next_mode
             if "room" in payload:
                 self.room.update(_dict_payload(payload["room"], "room"))
+            if "fusion" in payload:
+                fusion_payload = payload["fusion"]
+            if "rayweave" in payload:
+                rayweave_payload = payload["rayweave"]
+            if fusion_payload is not None:
+                self.fusion.update(_dict_payload(fusion_payload, "fusion"))
+                tracking_changed = True
+            if rayweave_payload is not None:
+                self.rayweave.update(_dict_payload(rayweave_payload, "rayweave"))
+                tracking_changed = True
             if profile_name is not None:
                 self.profile_name = profile_name
             if tracking_changed:
@@ -305,20 +405,32 @@ class OperatorState:
         created = datetime.now(timezone.utc)
         session_id = _recording_session_id(created, name)
         settings = self.live.settings_snapshot()[0].to_dict()
+        live_snapshot = self.live.snapshot()
+        live_cameras = live_snapshot.get("cameras", [])
+        camera_count = len(live_cameras) if isinstance(live_cameras, list) else len(self.devices)
+        live_devices = [
+            str(camera.get("device", f"camera{index}"))
+            for index, camera in enumerate(live_cameras)
+            if isinstance(camera, dict)
+        ]
+        live_labels = [
+            self.labels[index] if index < len(self.labels) else f"cam{index + 1}"
+            for index in range(camera_count)
+        ]
         with self.condition:
             if self.recording.active:
                 raise ValueError("recording is already active")
             session_dir = _unique_dir(self.record_dir, session_id)
             session_id = session_dir.name
             (session_dir / "frames").mkdir(parents=True, exist_ok=False)
-            for index in range(len(self.devices)):
+            for index in range(camera_count):
                 (session_dir / "frames" / f"cam{index + 1}").mkdir()
             manifest = {
                 "schema_version": 1,
                 "created_utc": created.isoformat(),
                 "session_id": session_id,
-                "devices": list(self.devices),
-                "labels": list(self.labels),
+                "devices": live_devices,
+                "labels": live_labels,
                 "config_path": self.config_path,
                 "extrinsics_path": self.extrinsics_path,
                 "settings": settings,
@@ -327,7 +439,7 @@ class OperatorState:
             }
             _write_json(session_dir / "manifest.json", manifest)
             self._record_events_fh = (session_dir / "events.jsonl").open("a", encoding="utf-8")
-            self._record_last_frame_versions = [-1 for _ in self.devices]
+            self._record_last_frame_versions = [-1 for _ in range(camera_count)]
             self.recording = RecordingStatus(
                 active=True,
                 session_id=session_id,
@@ -359,10 +471,14 @@ class OperatorState:
         session_dir = _unique_dir(self.record_dir, session_id)
         frames_dir = session_dir / "frames"
         frames_dir.mkdir(parents=True, exist_ok=False)
-        for index in range(len(self.devices)):
+        live_snapshot = self.live.snapshot()
+        live_cameras = live_snapshot.get("cameras", [])
+        camera_count = len(live_cameras) if isinstance(live_cameras, list) else len(self.devices)
+        labels = [self.labels[index] if index < len(self.labels) else f"cam{index + 1}" for index in range(camera_count)]
+        for index in range(camera_count):
             (frames_dir / f"cam{index + 1}").mkdir()
         live_snapshot, frame, jpeg_items = self._recording_payload_inputs()
-        images = _write_record_images(frames_dir, self.labels, live_snapshot, jpeg_items, [-1 for _ in self.devices], 0)
+        images = _write_record_images(frames_dir, labels, live_snapshot, jpeg_items, [-1 for _ in range(camera_count)], 0)
         payload = {
             "schema_version": 1,
             "event": "snapshot",
@@ -458,6 +574,13 @@ def _bounded_float(value: Any, name: str, min_value: float, max_value: float) ->
     parsed = float(value)
     if not min_value <= parsed <= max_value:
         raise ValueError(f"{name} must be between {min_value} and {max_value}")
+    return parsed
+
+
+def _positive_int(value: Any, name: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} must be positive")
     return parsed
 
 

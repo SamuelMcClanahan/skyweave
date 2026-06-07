@@ -17,10 +17,14 @@ export class CameraRenderer {
         this.cameraMeshes = new Map();
         this.frustumMeshes = new Map();
         this.highlightedCameraIds = new Set();
+        this.glyphScale = 1.0;
+        this.frustumRangeM = CAMERA_FRUSTUM_DEPTH_M;
     }
 
-    update(cameras, visibility, highlightedCameraIds = []) {
+    update(cameras, visibility, highlightedCameraIds = [], settings = {}) {
         this.highlightedCameraIds = new Set(highlightedCameraIds);
+        this.glyphScale = Number(settings.glyphScale || 1.0);
+        this.frustumRangeM = Number(settings.frustumRangeM || CAMERA_FRUSTUM_DEPTH_M);
 
         // Clear existing meshes
         this.cameraGroup.children.forEach(child => {
@@ -46,7 +50,8 @@ export class CameraRenderer {
         const isHighlighted = this.highlightedCameraIds.has(camera.id);
 
         // Camera body. This is a visible glyph, not the physical camera size.
-        const cameraGeometry = new THREE.ConeGeometry(CAMERA_BODY_RADIUS_M, CAMERA_BODY_LENGTH_M, 4);
+        const scale = this.glyphScale;
+        const cameraGeometry = new THREE.ConeGeometry(CAMERA_BODY_RADIUS_M * scale, CAMERA_BODY_LENGTH_M * scale, 4);
         const cameraColor = isHighlighted ? 0x00e5ff : 0xffffff;
         const cameraMaterial = new THREE.MeshStandardMaterial({
             color: cameraColor,
@@ -74,7 +79,7 @@ export class CameraRenderer {
 
         // Add label (using CSS2DRenderer would be better, but using sprite for now)
         const label = this.createLabel(`CAM ${camera.id}`);
-        label.position.set(0, 0, CAMERA_LABEL_OFFSET_M);
+        label.position.set(0, 0, CAMERA_LABEL_OFFSET_M * scale);
         group.add(label);
 
         this.cameraMeshes.set(camera.id, cameraMesh);
@@ -95,7 +100,7 @@ export class CameraRenderer {
         // Create wireframe frustum showing camera FOV
         const fovH = camera.fov_h_deg * (Math.PI / 180);
         const fovV = camera.fov_v_deg * (Math.PI / 180);
-        const depth = CAMERA_FRUSTUM_DEPTH_M;
+        const depth = this.frustumRangeM;
 
         const halfWidth = Math.tan(fovH / 2) * depth;
         const halfHeight = Math.tan(fovV / 2) * depth;
@@ -159,7 +164,11 @@ export class CameraRenderer {
         });
 
         const sprite = new THREE.Sprite(material);
-        sprite.scale.set(...CAMERA_LABEL_SCALE);
+        sprite.scale.set(
+            CAMERA_LABEL_SCALE[0] * this.glyphScale,
+            CAMERA_LABEL_SCALE[1] * this.glyphScale,
+            CAMERA_LABEL_SCALE[2]
+        );
 
         return sprite;
     }

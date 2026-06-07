@@ -15,7 +15,7 @@ from skyweave.calibration.charuco_live_state import LiveCameraSettings, LiveTuni
 from skyweave.camera.live_benchmark import DEFAULT_LIVE_BENCHMARK_CONFIG
 from skyweave.operator.runtime import OperatorRuntime, OperatorRuntimeOptions
 from skyweave.operator.server import OperatorServer
-from skyweave.operator.state import OperatorState
+from skyweave.operator.state import OperatorState, TRACKING_MODES
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=DEFAULT_LIVE_BENCHMARK_CONFIG)
     parser.add_argument("--extrinsics", default="configs/extrinsics.yaml")
     parser.add_argument("--profile-dir", default="data/profiles")
-    parser.add_argument("--mode", choices=("auto", "real", "stress"), default="auto")
+    parser.add_argument("--mode", choices=TRACKING_MODES, default="auto")
     parser.add_argument("--target-hz", type=float, default=30.0)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=800)

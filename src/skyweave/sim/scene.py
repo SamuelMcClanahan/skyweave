@@ -32,12 +32,8 @@ def build_scene(config: SimulationConfig) -> SyntheticScene:
 def _build_cameras(config: SimulationConfig) -> dict[int, CameraCalib]:
     K = make_intrinsics(config.image_width, config.image_height, config.focal_length_px)
     D = np.zeros(5, dtype=np.float64)
-    target = np.array([0.0, 0.35, 1.25], dtype=np.float64)
-    positions = {
-        0: np.array([0.0, -2.2, 1.05], dtype=np.float64),
-        1: np.array([-2.0, 0.9, 1.15], dtype=np.float64),
-        2: np.array([2.0, 0.9, 1.15], dtype=np.float64),
-    }
+    target = np.asarray(config.camera_target_m, dtype=np.float64)
+    positions = _camera_positions(config)
     return {
         camera_id: CameraCalib(
             id=camera_id,
@@ -49,6 +45,55 @@ def _build_cameras(config: SimulationConfig) -> dict[int, CameraCalib]:
         )
         for camera_id, position in positions.items()
     }
+
+
+def _camera_positions(config: SimulationConfig) -> dict[int, np.ndarray]:
+    layout = config.camera_layout.strip().lower()
+    if layout == "legacy_3":
+        return {
+            0: np.array([0.0, -2.2, 1.05], dtype=np.float64),
+            1: np.array([-2.0, 0.9, 1.15], dtype=np.float64),
+            2: np.array([2.0, 0.9, 1.15], dtype=np.float64),
+        }
+    if layout != "room_perimeter":
+        raise ValueError(f"unsupported simulation camera_layout {config.camera_layout!r}")
+    if config.camera_count <= 0:
+        raise ValueError("simulation camera_count must be positive")
+
+    width_m, depth_m, _height_m = config.room_size_m
+    half_w = max(float(width_m) / 2.0 - float(config.camera_margin_m), 0.05)
+    half_d = max(float(depth_m) / 2.0 - float(config.camera_margin_m), 0.05)
+    points = _room_perimeter_points(config.camera_count, half_w, half_d)
+    return {
+        camera_id: np.array([x, y, float(config.camera_height_m)], dtype=np.float64)
+        for camera_id, (x, y) in enumerate(points)
+    }
+
+
+def _room_perimeter_points(count: int, half_w: float, half_d: float) -> list[tuple[float, float]]:
+    perimeter = 4.0 * (half_w + half_d)
+    start = half_w
+    points: list[tuple[float, float]] = []
+    for camera_id in range(count):
+        distance = (start + perimeter * camera_id / count) % perimeter
+        points.append(_point_on_rectangle_perimeter(distance, half_w, half_d))
+    return points
+
+
+def _point_on_rectangle_perimeter(distance: float, half_w: float, half_d: float) -> tuple[float, float]:
+    bottom = 2.0 * half_w
+    right = 2.0 * half_d
+    top = 2.0 * half_w
+    if distance < bottom:
+        return -half_w + distance, -half_d
+    distance -= bottom
+    if distance < right:
+        return half_w, -half_d + distance
+    distance -= right
+    if distance < top:
+        return half_w - distance, half_d
+    distance -= top
+    return -half_w, half_d - distance
 
 
 def _build_truth(config: SimulationConfig) -> list[GroundTruthSample]:
@@ -84,4 +129,3 @@ def _build_truth(config: SimulationConfig) -> list[GroundTruthSample]:
             )
         )
     return truth
-

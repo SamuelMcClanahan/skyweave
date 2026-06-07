@@ -249,9 +249,18 @@ Run the combined operator dashboard plus existing visualizer for live testing:
 
 Open `/operator` for the split control surface and `/viz/` for the standalone
 visualizer. The operator panel controls runtime camera settings, motion packet
-filters, Kalman gains, real/stress/auto mode, and YAML profiles under
+filters, Kalman gains, real/stress/rendered/auto mode, and YAML profiles under
 `data/profiles/`. The visualizer pane is the existing `viz_web` app consuming the
-same `/ws` `VizFrame` stream.
+same `/ws` `VizFrame` stream. Open `/mosaic` to inspect all camera feeds in a
+compact grid.
+
+For desktop tuning without physical cameras, run rendered synthetic frames
+through the same frame-diff motion path used by real cameras:
+
+```bash
+.venv/bin/python -m skyweave.cli.operator --config configs/sim_mvp_ov9281_100hz_15cam_perimeter_numba.yaml --mode rendered --width 640 --height 480 --fps 60 --host 127.0.0.1 --port 8088
+.venv/bin/python -m skyweave.cli.sim_check --source rendered --config configs/sim_mvp_ov9281_100hz_15cam_perimeter_numba.yaml
+```
 
 Room scans belong to the visualizer side. Export a phone scan as GLB/GLTF, place
 it under `data/room/`, and pass it with `--room-mesh data/room/<scan>.glb`. The

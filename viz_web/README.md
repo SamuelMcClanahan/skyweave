@@ -11,6 +11,6 @@ Run from the repo root:
 
 Then open `http://localhost:8080`.
 
-The frontend uses CDN-hosted Cesium.js and Three.js. There is no build step.
+The frontend serves vendored Cesium.js and Three.js from `viz_web/vendor`. There is no build step.
 
 Detailed usage and integration notes live in `docs/visualizer.md`.

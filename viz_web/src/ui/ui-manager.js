@@ -16,6 +16,8 @@ export class UIManager {
 
         // Subscribe to state changes
         this.state.subscribe(this.onStateChange.bind(this));
+        this.updateSettingsControls();
+        this.updateVisibilityControls();
 
         requestAnimationFrame(() => {
             document.body.classList.add('ui-ready');
@@ -37,8 +39,12 @@ export class UIManager {
         this.elements.cameraList = document.getElementById('camera-list');
 
         // Right sidebar
+        this.elements.sceneMode = document.getElementById('scene-mode');
         this.elements.scaleSlider = document.getElementById('scale-slider');
+        this.elements.scaleLabels = document.getElementById('scale-labels');
         this.elements.autoZoom = document.getElementById('auto-zoom');
+        this.elements.glyphScale = document.getElementById('glyph-scale');
+        this.elements.frustumRange = document.getElementById('frustum-range');
         this.elements.rayModeRadios = document.querySelectorAll('input[name="ray-mode"]');
         this.elements.perCameraRays = document.getElementById('per-camera-rays');
 
@@ -97,12 +103,35 @@ export class UIManager {
         });
 
         // Settings
+        this.elements.sceneMode.addEventListener('change', (e) => {
+            const sceneMode = e.target.value === 'map' ? 'map' : 'room';
+            const patch = { sceneMode };
+            if (sceneMode === 'room') {
+                patch.glyphScale = Math.min(this.state.settings.glyphScale, 0.0015);
+                patch.frustumRangeM = Math.min(this.state.settings.frustumRangeM, 1.0);
+                patch.scaleValue = Math.min(this.state.settings.scaleValue, 8);
+            } else {
+                patch.glyphScale = Math.max(this.state.settings.glyphScale, 0.25);
+                patch.frustumRangeM = Math.max(this.state.settings.frustumRangeM, 650.0);
+                patch.scaleValue = Math.max(this.state.settings.scaleValue, 50);
+            }
+            Object.entries(patch).forEach(([key, value]) => this.state.setSetting(key, value));
+        });
+
         this.elements.scaleSlider.addEventListener('input', (e) => {
             this.state.setSetting('scaleValue', parseInt(e.target.value));
         });
 
         this.elements.autoZoom.addEventListener('change', (e) => {
             this.state.setSetting('autoZoom', e.target.checked);
+        });
+
+        this.elements.glyphScale.addEventListener('input', (e) => {
+            this.state.setSetting('glyphScale', this.sliderToGlyphScale(parseInt(e.target.value)));
+        });
+
+        this.elements.frustumRange.addEventListener('input', (e) => {
+            this.state.setSetting('frustumRangeM', this.sliderToFrustumRange(parseInt(e.target.value)));
         });
 
         // Panel controls
@@ -170,6 +199,10 @@ export class UIManager {
 
             case 'settings':
                 this.updateSettingsControls();
+                break;
+
+            case 'visibility':
+                this.updateVisibilityControls();
                 break;
         }
     }
@@ -331,12 +364,74 @@ export class UIManager {
     }
 
     updateSettingsControls() {
+        if (this.elements.sceneMode) {
+            this.elements.sceneMode.value = this.state.settings.sceneMode;
+        }
         if (this.elements.scaleSlider) {
             this.elements.scaleSlider.value = this.state.settings.scaleValue;
+        }
+        if (this.elements.scaleLabels) {
+            const labels = this.state.settings.sceneMode === 'room'
+                ? ['3m', '8m', '16m']
+                : ['50m', '700m', '10km'];
+            this.elements.scaleLabels.querySelectorAll('span').forEach((el, index) => {
+                el.textContent = labels[index] || '';
+            });
         }
         if (this.elements.autoZoom) {
             this.elements.autoZoom.checked = this.state.settings.autoZoom;
         }
+        if (this.elements.glyphScale) {
+            this.elements.glyphScale.value = this.glyphScaleToSlider(this.state.settings.glyphScale);
+        }
+        if (this.elements.frustumRange) {
+            this.elements.frustumRange.value = this.frustumRangeToSlider(this.state.settings.frustumRangeM);
+        }
+    }
+
+    updateVisibilityControls() {
+        const bindings = [
+            ['toggleCameras', 'cameras'],
+            ['toggleFrustums', 'frustums'],
+            ['toggleVoxels', 'voxels'],
+            ['toggleTracks', 'tracks'],
+            ['toggleTrails', 'trails'],
+            ['toggleGrid', 'grid']
+        ];
+        bindings.forEach(([elementKey, visibilityKey]) => {
+            const el = this.elements[elementKey];
+            if (el) {
+                el.checked = Boolean(this.state.visibility[visibilityKey]);
+            }
+        });
+    }
+
+    sliderToGlyphScale(value) {
+        const t = Math.min(100, Math.max(0, value)) / 100;
+        const min = 0.0015;
+        const max = 1.0;
+        return min * Math.pow(max / min, t);
+    }
+
+    glyphScaleToSlider(value) {
+        const min = 0.0015;
+        const max = 1.0;
+        const safe = Math.min(max, Math.max(min, Number(value) || min));
+        return Math.round((Math.log(safe / min) / Math.log(max / min)) * 100);
+    }
+
+    sliderToFrustumRange(value) {
+        const t = Math.min(100, Math.max(0, value)) / 100;
+        const min = 1.0;
+        const max = 650.0;
+        return min * Math.pow(max / min, t);
+    }
+
+    frustumRangeToSlider(value) {
+        const min = 1.0;
+        const max = 650.0;
+        const safe = Math.min(max, Math.max(min, Number(value) || min));
+        return Math.round((Math.log(safe / min) / Math.log(max / min)) * 100);
     }
 
     showTrackDetailPanel() {

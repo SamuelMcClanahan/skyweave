@@ -4,25 +4,51 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Skyweave - Tactical Airspace Visualization</title>
+    <script>
+        window.CESIUM_BASE_URL = 'vendor/cesium/';
+        window.addEventListener('error', event => {
+            const detail = event.error?.stack || event.message || 'Unknown visualizer error';
+            window.dispatchEvent(new CustomEvent('skyweave-viz-error', { detail }));
+        });
+        window.addEventListener('unhandledrejection', event => {
+            const reason = event.reason;
+            const detail = reason?.stack || reason?.message || String(reason || 'Unhandled visualizer rejection');
+            window.dispatchEvent(new CustomEvent('skyweave-viz-error', { detail }));
+        });
+    </script>
     <link rel="stylesheet" href="styles/main.css">
     <link rel="stylesheet" href="styles/anduril-theme.css">
     <link rel="stylesheet" href="styles/panels.css">
 
     <!-- Cesium.js -->
-    <script src="https://cesium.com/downloads/cesiumjs/releases/1.113/Build/Cesium/Cesium.js"></script>
-    <link href="https://cesium.com/downloads/cesiumjs/releases/1.113/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+    <script src="vendor/cesium/Cesium.js"></script>
+    <link href="vendor/cesium/Widgets/widgets.css" rel="stylesheet">
 
     <!-- Import map for ES modules -->
     <script type="importmap">
     {
         "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            "three": "./vendor/three/build/three.module.js",
+            "three/addons/": "./vendor/three/examples/jsm/"
         }
     }
     </script>
 </head>
 <body>
+    <div id="viz-boot" style="position:fixed;inset:12px auto auto 12px;z-index:4999;max-width:min(520px,calc(100vw - 24px));padding:10px 12px;background:rgba(5,7,10,.92);border:1px solid rgba(111,183,255,.55);color:#d7ebff;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap">loading visualizer shell</div>
+    <div id="viz-error" style="display:none;position:fixed;inset:12px;z-index:5000;padding:12px;background:rgba(30,0,0,.94);border:1px solid rgba(255,119,112,.75);color:#ffd8d6;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow:auto"></div>
+    <script>
+        window.skyweaveVizStatus = message => {
+            const panel = document.getElementById('viz-boot');
+            if (panel) panel.textContent = message;
+        };
+        window.addEventListener('skyweave-viz-error', event => {
+            const panel = document.getElementById('viz-error');
+            if (!panel) return;
+            panel.style.display = 'block';
+            panel.textContent = event.detail;
+        });
+    </script>
     <!-- Top Status Bar -->
     <div id="top-bar">
         <div class="logo">
@@ -181,9 +207,16 @@
                 </div>
                 <div class="section-content">
                     <div class="control-group">
+                        <label class="control-label">Scene</label>
+                        <select id="scene-mode">
+                            <option value="room">Room</option>
+                            <option value="map">Map</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
                         <label class="control-label">Scale</label>
                         <input type="range" id="scale-slider" min="0" max="100" value="50" class="slider">
-                        <div class="scale-labels">
+                        <div class="scale-labels" id="scale-labels">
                             <span>50m</span>
                             <span>700m</span>
                             <span>10km</span>
@@ -194,6 +227,24 @@
                             <input type="checkbox" id="auto-zoom" checked>
                             Auto-Zoom to Tracks
                         </label>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Glyph Scale</label>
+                        <input type="range" id="glyph-scale" min="0" max="100" value="25" class="slider">
+                        <div class="scale-labels">
+                            <span>Tiny</span>
+                            <span>Room</span>
+                            <span>Map</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Frustum Range</label>
+                        <input type="range" id="frustum-range" min="0" max="100" value="25" class="slider">
+                        <div class="scale-labels">
+                            <span>1m</span>
+                            <span>8m</span>
+                            <span>650m</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -283,6 +334,6 @@
     </div>
 
     <!-- Load application modules -->
-    <script type="module" src="src/main.js"></script>
+    <script type="module" src="src/main.js?v=room-mode-scale"></script>
 </body>
 </html>

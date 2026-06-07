@@ -21,17 +21,21 @@ class SkyweaveViz {
 
     async init() {
         console.log('Initializing Skyweave Visualizer...');
+        window.skyweaveVizStatus?.('main module loaded');
 
         try {
             // Initialize scene manager (Three.js)
+            window.skyweaveVizStatus?.('initializing Cesium + Three scene');
             this.sceneManager = new SceneManager(this.state);
             await this.sceneManager.init();
 
             // Initialize UI manager
+            window.skyweaveVizStatus?.('initializing visualizer UI');
             this.uiManager = new UIManager(this.state, this.sceneManager);
             this.uiManager.init();
 
             // Initialize WebSocket client
+            window.skyweaveVizStatus?.('connecting visualizer websocket');
             this.wsClient = new WSClient(this.state);
             this.wsClient.onMessage = this.handleMessage.bind(this);
             this.wsClient.onConnectionChange = this.handleConnectionChange.bind(this);
@@ -42,9 +46,11 @@ class SkyweaveViz {
             // Start render loop
             this.animate();
 
+            document.getElementById('viz-boot')?.remove();
             console.log('Skyweave Visualizer initialized successfully');
         } catch (error) {
             console.error('Failed to initialize visualizer:', error);
+            window.skyweaveVizStatus?.('visualizer initialization failed');
             this.showError('Initialization failed: ' + error.message);
         }
     }

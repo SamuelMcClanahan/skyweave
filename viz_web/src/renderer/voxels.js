@@ -13,7 +13,7 @@ export class VoxelRenderer {
         this.pointClouds = [];
     }
 
-    update(weavefieldHistory, visibility) {
+    update(weavefieldHistory, visibility, settings = {}) {
         // Clear existing point clouds
         this.pointClouds.forEach(pc => {
             this.voxelGroup.remove(pc);
@@ -29,14 +29,14 @@ export class VoxelRenderer {
         // Create point cloud for each weavefield volume
         weavefieldHistory.forEach((volume, index) => {
             if (volume.voxels && volume.voxels.length > 0) {
-                const pointCloud = this.createPointCloud(volume, index, weavefieldHistory.length);
+                const pointCloud = this.createPointCloud(volume, index, weavefieldHistory.length, settings);
                 this.pointClouds.push(pointCloud);
                 this.voxelGroup.add(pointCloud);
             }
         });
     }
 
-    createPointCloud(volume, index, totalVolumes) {
+    createPointCloud(volume, index, totalVolumes, settings = {}) {
         const voxels = volume.voxels;
         const grid = volume.grid;
 
@@ -76,11 +76,11 @@ export class VoxelRenderer {
 
         // Create shader material for glowing points
         const material = new THREE.PointsMaterial({
-            size: VOXEL_POINT_SIZE_PX,
+            size: settings.sceneMode === 'room' ? 1.2 : VOXEL_POINT_SIZE_PX,
             vertexColors: true,
             transparent: true,
-            opacity: 0.8 * decayFactor,
-            blending: THREE.AdditiveBlending,
+            opacity: (settings.sceneMode === 'room' ? 0.16 : 0.8) * decayFactor,
+            blending: settings.sceneMode === 'room' ? THREE.NormalBlending : THREE.AdditiveBlending,
             sizeAttenuation: false,
             depthWrite: false
         });

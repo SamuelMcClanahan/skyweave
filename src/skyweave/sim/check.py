@@ -12,16 +12,19 @@ from skyweave.fusion.geom import point_distance
 from skyweave.fusion.kalman import TrackManager
 from skyweave.fusion.triangulator import triangulate_detections
 from skyweave.log import JsonlLogger
-from skyweave.messages import RunSummary
+from skyweave.messages import DetectionPacket, MotionPacket, RunSummary
 from skyweave.rayweave.grid import VoxelGrid
 from skyweave.rayweave.peaks import PeakExtractor
 from skyweave.rayweave.scorer import RayweaveScorer
 from skyweave.recording.recorder import Recorder
 from skyweave.sim.generator import SyntheticPacketGenerator
+from skyweave.sim.rendered import RenderedFrameGenerator, rendered_motion_packets
 from skyweave.sim.scene import build_scene
+from skyweave.camera.motion import MotionPacketConfig
 
 DEFAULT_SIM_CHECK_CONFIG = "configs/sim.yaml"
 DEFAULT_RECORD_DIR = "data/recordings"
+SIM_SOURCE_CHOICES = ("packet", "rendered")
 
 
 def run_sim_check(
@@ -29,17 +32,27 @@ def run_sim_check(
     logger: JsonlLogger,
     recorder: Recorder | None = None,
     config_path: str = DEFAULT_SIM_CHECK_CONFIG,
+    source: str = "packet",
+    motion_config: MotionPacketConfig | None = None,
 ) -> RunSummary:
+    if source not in SIM_SOURCE_CHOICES:
+        raise ValueError(f"source must be one of {', '.join(SIM_SOURCE_CHOICES)}")
     grid = VoxelGrid.from_config(config.rayweave.grid)
     _validate_grid(grid)
     scene = build_scene(config.simulation)
-    generator = SyntheticPacketGenerator(scene, config.simulation)
+    frames = (
+        SyntheticPacketGenerator(scene, config.simulation).frames()
+        if source == "packet"
+        else RenderedFrameGenerator(scene, config.simulation).frames()
+    )
+    rendered_builders = {}
+    rendered_previous_frames = {}
     aligner = TimeAligner(config.fusion.align_window_ns, config.fusion.min_cameras_per_frame)
     scorer = RayweaveScorer(grid, scene.cameras, config.rayweave.scorer)
     peak_extractor = PeakExtractor(grid, config.rayweave.peaks)
     tracks = TrackManager(config.kalman)
 
-    logger.event("app_start", config_path=str(Path(config_path)), scene=scene.name)
+    logger.event("app_start", config_path=str(Path(config_path)), scene=scene.name, source=source)
 
     peak_errors: list[float] = []
     track_errors: list[float] = []
@@ -48,18 +61,25 @@ def run_sim_check(
     not_visible_packets = 0
     false_positive_packets = 0
 
-    for frame in generator.frames():
+    for frame in frames:
         start = time.perf_counter()
         stage_ms = _empty_stage_timings()
-        dropped_packets += frame.dropped_packets
-        not_visible_packets += frame.not_visible_packets
-        false_positive_packets += frame.false_positive_packets
-        for camera_id in frame.not_visible_camera_ids:
+        motion_packets, detection_packets, dropped, not_visible, not_visible_camera_ids, false_pos = _frame_packets(
+            frame,
+            source,
+            rendered_builders,
+            rendered_previous_frames,
+            motion_config,
+        )
+        dropped_packets += dropped
+        not_visible_packets += not_visible
+        false_positive_packets += false_pos
+        for camera_id in not_visible_camera_ids:
             logger.event("camera_not_visible", camera_id=camera_id, frame_seq=frame.truth.frame_seq)
         if recorder:
-            recorder.record_motion_packets(frame.motion_packets)
-            recorder.record_detection_packets(frame.detection_packets)
-        for packet in frame.motion_packets:
+            recorder.record_motion_packets(motion_packets)
+            recorder.record_detection_packets(detection_packets)
+        for packet in motion_packets:
             logger.event(
                 "motion_packet_published",
                 camera_id=packet.camera_id,
@@ -69,9 +89,9 @@ def run_sim_check(
             )
 
         stage_start = time.perf_counter()
-        aligned = aligner.align_frame(frame.motion_packets, frame.detection_packets)
+        aligned = aligner.align_frame(motion_packets, detection_packets)
         stage_ms["alignment"] = _elapsed_ms(stage_start)
-        if aligned is None:
+        if aligned is None or not any(packet.motion_patches for packet in motion_packets):
             stage_start = time.perf_counter()
             track = tracks.update(None, frame.truth.ts_ns)
             stage_ms["kalman"] = _elapsed_ms(stage_start)
@@ -158,6 +178,7 @@ def run_sim_check(
         false_positive_packets,
         config.pass_peak_rmse_m,
         config.pass_track_rmse_m,
+        required_peak_frames=max(0, len(scene.truth) - 1) if source == "rendered" else None,
     )
     logger.event("summary_stats", **summary.model_dump(mode="json"))
     if recorder:
@@ -223,6 +244,31 @@ def _empty_stage_timings() -> dict[str, float]:
     }
 
 
+def _frame_packets(
+    frame,
+    source: str,
+    rendered_builders: dict,
+    rendered_previous_frames: dict,
+    motion_config: MotionPacketConfig | None = None,
+) -> tuple[list[MotionPacket], list[DetectionPacket], int, int, list[int], int]:
+    if source == "packet":
+        return (
+            frame.motion_packets,
+            frame.detection_packets,
+            frame.dropped_packets,
+            frame.not_visible_packets,
+            list(frame.not_visible_camera_ids),
+            frame.false_positive_packets,
+        )
+    motion_packets = rendered_motion_packets(frame, rendered_builders, rendered_previous_frames, config=motion_config)
+    not_visible_camera_ids = [
+        camera_id
+        for camera_id, meta in frame.camera_meta.items()
+        if not meta.visible
+    ]
+    return motion_packets, [], 0, len(not_visible_camera_ids), not_visible_camera_ids, 0
+
+
 def _log_stage_timings(
     config,
     logger: JsonlLogger,
@@ -258,6 +304,7 @@ def _summary(
     false_positive_packets: int,
     pass_peak_rmse: float,
     pass_track_rmse: float,
+    required_peak_frames: int | None = None,
 ) -> RunSummary:
     finite_peak = [x for x in peak_errors if math.isfinite(x)]
     finite_track = [x for x in track_errors if math.isfinite(x)]
@@ -266,7 +313,8 @@ def _summary(
     max_track = max(finite_track) if finite_track else math.inf
     p50 = statistics.median(latencies_ms) if latencies_ms else math.inf
     p95 = _percentile(latencies_ms, 95.0) if latencies_ms else math.inf
-    passed = peak_rmse <= pass_peak_rmse and track_rmse <= pass_track_rmse and len(finite_peak) == frames
+    required_peaks = frames if required_peak_frames is None else required_peak_frames
+    passed = peak_rmse <= pass_peak_rmse and track_rmse <= pass_track_rmse and len(finite_peak) >= required_peaks
     return RunSummary(
         scene=scene,
         frames=frames,

@@ -5,6 +5,7 @@ simulation:
   image_width: 640
   image_height: 480
   focal_length_px: 360.0
+  camera_layout: "legacy_3"
   patch_size_px: 5
   pixel_noise_std_px: 0.0
   dropout_probability: 0.0

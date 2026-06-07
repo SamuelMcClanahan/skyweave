@@ -1,6 +1,7 @@
 // Scene manager: Cesium earth context plus a transparent Three.js overlay.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 import { CameraRenderer } from './cameras.js';
 import { TrackRenderer } from './tracks.js';
@@ -12,10 +13,12 @@ import { TooltipManager } from '../ui/tooltip-manager.js';
 
 const OSM_TILE_URL = 'https://tile.openstreetmap.org/';
 const OSM_CREDIT = 'Map data (c) OpenStreetMap contributors';
-const EARTH_FALLBACK_COLOR = '#10131a';
+const EARTH_FALLBACK_COLOR = '#182331';
 const AUTO_FIT_INTERVAL_MS = 1500;
 const SCALE_MIN_RANGE_M = 50;
 const SCALE_MAX_RANGE_M = 10000;
+const ROOM_SCALE_MIN_RANGE_M = 3;
+const ROOM_SCALE_MAX_RANGE_M = 16;
 const DEFAULT_VIEW_PITCH_RAD = -Math.PI / 4;
 const POINTER_DRAG_THRESHOLD_PX = 6;
 const DRAG_CLICK_SUPPRESS_MS = 250;
@@ -51,6 +54,8 @@ export class SceneManager {
         this.roomFallback = null;
         this.roomLoader = new GLTFLoader();
         this.loadedRoomUrl = '';
+        this.useCesium = false;
+        this.sceneMode = state.settings.sceneMode;
 
         // Raycaster for mouse interaction
         this.raycaster = new THREE.Raycaster();
@@ -72,9 +77,15 @@ export class SceneManager {
         this.canvas = document.getElementById('three-canvas');
 
         // Initialize Cesium first as the earth layer.
-        this.initCesium();
+        window.skyweaveVizStatus?.('initializing Cesium viewer');
+        if (this.sceneMode === 'map') {
+            this.initCesium();
+        } else {
+            this.disableCesiumLayer();
+        }
 
         // Initialize Three.js as the transparent tactical overlay.
+        window.skyweaveVizStatus?.('initializing Three overlay');
         this.initThree();
 
         // Initialize renderers
@@ -88,10 +99,12 @@ export class SceneManager {
         this.roomGroup.name = 'Room Scan';
         this.scene.add(this.roomGroup);
         this.tooltipManager = new TooltipManager(this.state);
+        window.skyweaveVizStatus?.('applying visualizer settings');
         this.applySettings(this.state.settings, true);
         this.applyRoomSettings(this.state.room, true);
 
         // Setup event listeners
+        window.skyweaveVizStatus?.('installing visualizer input handlers');
         this.setupEventListeners();
 
         // Subscribe to state changes
@@ -99,6 +112,16 @@ export class SceneManager {
     }
 
     initCesium() {
+        if (typeof Cesium === 'undefined') {
+            this.useCesium = false;
+            const container = document.getElementById('cesiumContainer');
+            if (container) {
+                container.style.display = 'none';
+            }
+            console.warn('Cesium unavailable; using local Three.js fallback scene.');
+            return;
+        }
+        this.useCesium = true;
         this.configureCesiumIon();
 
         // Initialize Cesium viewer focused on San Francisco.
@@ -297,16 +320,25 @@ export class SceneManager {
         // Create renderer with transparency
         this.renderer = new THREE.WebGLRenderer({
             canvas: this.canvas,
-            alpha: true,
+            alpha: this.useCesium,
             antialias: true
         });
         this.renderer.setSize(width, height);
         this.renderer.setPixelRatio(window.devicePixelRatio);
-        this.renderer.setClearColor(0x000000, 0); // Fully transparent
+        this.renderer.setClearColor(0x05070a, this.useCesium ? 0 : 1);
         this.renderer.autoClear = true;
+        if (!this.useCesium) {
+            this.camera.position.set(6, -9, 5);
+            this.camera.up.set(0, 0, 1);
+            this.camera.lookAt(0, 0, 1);
+        }
 
-        // No OrbitControls - Cesium handles camera navigation
-        // Three.js camera will sync to Cesium's camera position
+        this.controls = new OrbitControls(this.camera, this.canvas);
+        this.controls.enableDamping = true;
+        this.controls.dampingFactor = 0.08;
+        this.controls.screenSpacePanning = true;
+        this.controls.target.set(0, 0, 1);
+        this.controls.enabled = !this.useCesium;
 
         // Lighting
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -317,7 +349,44 @@ export class SceneManager {
         this.scene.add(directionalLight);
     }
 
+    disableCesiumLayer() {
+        this.useCesium = false;
+        const container = document.getElementById('cesiumContainer');
+        if (container) {
+            container.style.display = 'none';
+        }
+    }
+
+    setSceneMode(sceneMode) {
+        const nextMode = sceneMode === 'map' ? 'map' : 'room';
+        this.sceneMode = nextMode;
+        const container = document.getElementById('cesiumContainer');
+        if (nextMode === 'map') {
+            if (!this.cesiumViewer && typeof Cesium !== 'undefined') {
+                this.initCesium();
+            }
+            if (container) container.style.display = 'block';
+            this.useCesium = Boolean(this.cesiumViewer);
+        } else {
+            this.disableCesiumLayer();
+        }
+        if (this.controls) {
+            this.controls.enabled = !this.useCesium;
+        }
+        if (this.canvas) {
+            this.canvas.style.pointerEvents = this.useCesium ? 'none' : 'auto';
+        }
+        if (this.renderer) {
+            this.renderer.setClearColor(0x05070a, this.useCesium ? 0 : 1);
+        }
+        this.onWindowResize();
+        this.applyViewScale(this.state.settings.scaleValue);
+    }
+
     syncCameraWithCesium() {
+        if (!this.useCesium || !this.cesiumViewer) {
+            return;
+        }
         // Sync Three.js camera with Cesium camera for seamless overlay
         const cesiumCamera = this.cesiumViewer.camera;
 
@@ -381,7 +450,7 @@ export class SceneManager {
     }
 
     getInteractionCanvas() {
-        return this.cesiumViewer.scene?.canvas || this.canvas;
+        return this.cesiumViewer?.scene?.canvas || this.canvas;
     }
 
     onWindowResize() {
@@ -451,7 +520,7 @@ export class SceneManager {
         if (newHoveredCameraId !== this.hoveredCameraId) {
             this.hoveredCameraId = newHoveredCameraId;
             if (this.fovCoverageRenderer && this.state.visibility.frustums) {
-                this.fovCoverageRenderer.update(this.state.cameras, this.state.visibility, this.hoveredCameraId);
+            this.fovCoverageRenderer.update(this.state.cameras, this.state.visibility, this.hoveredCameraId, this.state.settings);
             }
         }
 
@@ -466,7 +535,7 @@ export class SceneManager {
         switch (event) {
             case 'tracks':
                 if (this.trackRenderer) {
-                    this.trackRenderer.update(state.tracks, state.visibility, state.selectedTrackId);
+                    this.trackRenderer.update(state.tracks, state.visibility, state.selectedTrackId, state.settings);
                 }
                 if (this.rayRenderer && state.visibility.rays !== 'none') {
                     this.rayRenderer.update(state.tracks, state.cameras, state.visibility.rays, state.selectedTrackId);
@@ -477,16 +546,16 @@ export class SceneManager {
             case 'cameras':
                 if (this.cameraRenderer) {
                     const highlightedIds = this.getHighlightedCameraIds(state);
-                    this.cameraRenderer.update(state.cameras, state.visibility, highlightedIds);
+                    this.cameraRenderer.update(state.cameras, state.visibility, highlightedIds, state.settings);
                 }
                 if (this.fovCoverageRenderer) {
-                    this.fovCoverageRenderer.update(state.cameras, state.visibility, this.hoveredCameraId);
+                    this.fovCoverageRenderer.update(state.cameras, state.visibility, this.hoveredCameraId, state.settings);
                 }
                 break;
 
             case 'weavefield':
                 if (this.voxelRenderer) {
-                    this.voxelRenderer.update(state.weavefieldHistory, state.visibility);
+                    this.voxelRenderer.update(state.weavefieldHistory, state.visibility, state.settings);
                 }
                 break;
 
@@ -494,16 +563,16 @@ export class SceneManager {
                 // Update all renderers with new visibility settings
                 if (this.cameraRenderer) {
                     const highlightedIds = this.getHighlightedCameraIds(state);
-                    this.cameraRenderer.update(state.cameras, state.visibility, highlightedIds);
+                    this.cameraRenderer.update(state.cameras, state.visibility, highlightedIds, state.settings);
                 }
                 if (this.fovCoverageRenderer) {
-                    this.fovCoverageRenderer.update(state.cameras, state.visibility, this.hoveredCameraId);
+                    this.fovCoverageRenderer.update(state.cameras, state.visibility, this.hoveredCameraId, state.settings);
                 }
                 if (this.trackRenderer) {
-                    this.trackRenderer.update(state.tracks, state.visibility, state.selectedTrackId);
+                    this.trackRenderer.update(state.tracks, state.visibility, state.selectedTrackId, state.settings);
                 }
                 if (this.voxelRenderer) {
-                    this.voxelRenderer.update(state.weavefieldHistory, state.visibility);
+                    this.voxelRenderer.update(state.weavefieldHistory, state.visibility, state.settings);
                 }
                 if (this.rayRenderer) {
                     this.rayRenderer.update(state.tracks, state.cameras, state.visibility.rays, state.selectedTrackId);
@@ -515,11 +584,11 @@ export class SceneManager {
 
             case 'selection':
                 if (this.trackRenderer) {
-                    this.trackRenderer.update(state.tracks, state.visibility, state.selectedTrackId);
+                    this.trackRenderer.update(state.tracks, state.visibility, state.selectedTrackId, state.settings);
                 }
                 if (this.cameraRenderer) {
                     const highlightedIds = this.getHighlightedCameraIds(state);
-                    this.cameraRenderer.update(state.cameras, state.visibility, highlightedIds);
+                    this.cameraRenderer.update(state.cameras, state.visibility, highlightedIds, state.settings);
                 }
                 if (this.rayRenderer && state.visibility.rays !== 'none') {
                     this.rayRenderer.update(state.tracks, state.cameras, state.visibility.rays, state.selectedTrackId);
@@ -541,9 +610,15 @@ export class SceneManager {
     }
 
     applySettings(settings, force = false) {
+        this.setSceneMode(settings.sceneMode);
         if (this.gridRenderer) {
-            this.gridRenderer.updateScale(settings.scaleValue);
+            this.gridRenderer.updateScale(settings.scaleValue, settings.sceneMode);
         }
+        const highlightedIds = this.getHighlightedCameraIds(this.state);
+        this.cameraRenderer?.update(this.state.cameras, this.state.visibility, highlightedIds, settings);
+        this.fovCoverageRenderer?.update(this.state.cameras, this.state.visibility, this.hoveredCameraId, settings);
+        this.trackRenderer?.update(this.state.tracks, this.state.visibility, this.state.selectedTrackId, settings);
+        this.voxelRenderer?.update(this.state.weavefieldHistory, this.state.visibility, settings);
         if (force || settings.scaleValue !== this.lastAppliedScaleValue) {
             this.lastAppliedScaleValue = settings.scaleValue;
             this.applyViewScale(settings.scaleValue);
@@ -682,6 +757,14 @@ export class SceneManager {
     }
 
     resetCamera() {
+        if (!this.useCesium || !this.cesiumViewer) {
+            this.camera.position.set(6, -9, 5);
+            this.camera.up.set(0, 0, 1);
+            this.camera.lookAt(0, 0, 1);
+            this.controls?.target.set(0, 0, 1);
+            this.controls?.update();
+            return;
+        }
         this.cesiumViewer.camera.setView({
             destination: Cesium.Cartesian3.fromDegrees(-122.4194, 37.7749, 2000),
             orientation: {
@@ -738,10 +821,22 @@ export class SceneManager {
 
     scaleValueToRangeMeters(scaleValue) {
         const t = Math.min(100, Math.max(0, scaleValue)) / 100;
+        if (this.state.settings.sceneMode === 'room') {
+            return ROOM_SCALE_MIN_RANGE_M * Math.pow(ROOM_SCALE_MAX_RANGE_M / ROOM_SCALE_MIN_RANGE_M, t);
+        }
         return SCALE_MIN_RANGE_M * Math.pow(SCALE_MAX_RANGE_M / SCALE_MIN_RANGE_M, t);
     }
 
     lookAtLocalPoint(localPoint, rangeMeters) {
+        if (!this.useCesium || !this.cesiumViewer) {
+            const range = Math.max(2.5, Math.min(Number(rangeMeters) || 8, 24));
+            this.camera.position.set(localPoint.x + range * 0.7, localPoint.y - range, localPoint.z + range * 0.55);
+            this.camera.up.set(0, 0, 1);
+            this.camera.lookAt(localPoint.x, localPoint.y, localPoint.z);
+            this.controls?.target.set(localPoint.x, localPoint.y, localPoint.z);
+            this.controls?.update();
+            return;
+        }
         const ecefPoint = this.localToEcef(localPoint);
         const camera = this.cesiumViewer.camera;
         const heading = Number.isFinite(camera.heading) ? camera.heading : 0;
@@ -755,6 +850,10 @@ export class SceneManager {
     }
 
     flyToLocalPoint(localPoint, rangeMeters) {
+        if (!this.useCesium || !this.cesiumViewer) {
+            this.lookAtLocalPoint(localPoint, rangeMeters);
+            return;
+        }
         const ecefCenter = this.localToEcef(localPoint);
         const cartographic = Cesium.Cartographic.fromCartesian(ecefCenter);
 
@@ -774,6 +873,9 @@ export class SceneManager {
     }
 
     localToEcef(localPoint) {
+        if (!this.useCesium || !this.enuTransform) {
+            return localPoint;
+        }
         const localCartesian = new Cesium.Cartesian3(localPoint.x, localPoint.y, localPoint.z);
         const ecefPoint = new Cesium.Cartesian3();
         Cesium.Matrix4.multiplyByPoint(this.enuTransform, localCartesian, ecefPoint);
@@ -794,7 +896,11 @@ export class SceneManager {
 
     render() {
         // Sync Three.js camera with Cesium before rendering
-        this.syncCameraWithCesium();
+        if (this.useCesium) {
+            this.syncCameraWithCesium();
+        } else if (this.controls) {
+            this.controls.update();
+        }
 
         // Render Three.js overlay directly to preserve canvas transparency.
         this.renderer.render(this.scene, this.camera);

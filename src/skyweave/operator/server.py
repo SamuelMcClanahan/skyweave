@@ -53,12 +53,16 @@ class OperatorServer:
         self.app.router.add_get("/select", self._handle_select)
         self.app.router.add_post("/select", self._handle_select)
         self.app.router.add_get("/snapshot.jpg", self._handle_snapshot)
+        self.app.router.add_get("/mosaic", self._handle_mosaic)
         self.app.router.add_get("/stream.mjpg", self._handle_stream)
         self.app.router.add_get("/ws", self._handle_websocket)
         self.app.router.add_get("/viz", self._redirect_viz)
         self.app.router.add_get("/viz/", self._handle_viz_index)
         self.app.router.add_static("/viz/src", self.viz_dir / "src", name="viz_src")
         self.app.router.add_static("/viz/styles", self.viz_dir / "styles", name="viz_styles")
+        vendor_dir = self.viz_dir / "vendor"
+        if vendor_dir.exists():
+            self.app.router.add_static("/viz/vendor", vendor_dir, name="viz_vendor")
         assets_dir = self.viz_dir / "assets"
         if assets_dir.exists():
             self.app.router.add_static("/viz/assets", assets_dir, name="viz_assets")
@@ -85,13 +89,13 @@ class OperatorServer:
         raise web.HTTPFound("/viz/")
 
     async def _handle_operator(self, _request: web.Request) -> web.Response:
-        return web.Response(text=_operator_html(), content_type="text/html")
+        return web.Response(text=_operator_html(), content_type="text/html", headers={"Cache-Control": "no-store"})
 
     async def _handle_viz_index(self, _request: web.Request) -> web.StreamResponse:
         index_path = self.viz_dir / "index.html"
         if not index_path.exists():
             raise web.HTTPNotFound(text="viz_web/index.html not found")
-        return web.FileResponse(index_path)
+        return web.FileResponse(index_path, headers={"Cache-Control": "no-store"})
 
     async def _handle_status(self, _request: web.Request) -> web.Response:
         return web.json_response(self.state.snapshot())
@@ -172,6 +176,9 @@ class OperatorServer:
             raise web.HTTPServiceUnavailable(text="No frame available")
         return web.Response(body=frame[1], content_type="image/jpeg")
 
+    async def _handle_mosaic(self, _request: web.Request) -> web.Response:
+        return web.Response(text=_mosaic_html(len(self.state.live.cameras)), content_type="text/html")
+
     async def _handle_stream(self, request: web.Request) -> web.StreamResponse:
         index = _camera_index_from_request(request, self.state.live.selected_index, len(self.state.live.cameras))
         stream_fps = _stream_fps_from_request(request, default=8.0)
@@ -231,7 +238,7 @@ class OperatorServer:
             return
         message = json.dumps(frame)
         disconnected = set()
-        for ws in self.ws_clients:
+        for ws in list(self.ws_clients):
             try:
                 await ws.send_str(message)
             except Exception:
@@ -317,6 +324,35 @@ def _json_error(message: str, status: int = 400) -> web.Response:
     return web.json_response({"error": message}, status=status)
 
 
+def _mosaic_html(camera_count: int) -> str:
+    tiles = "\n".join(
+        f'<figure><img src="/stream.mjpg?index={index}&fps=8" alt="camera {index}"><figcaption>cam {index}</figcaption></figure>'
+        for index in range(max(camera_count, 0))
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skyweave Camera Mosaic</title>
+  <style>
+    :root {{ color-scheme: dark; --bg: #080b0f; --line: #263241; --text: #e9eef5; --muted: #95a3b5; }}
+    body {{ margin: 0; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, sans-serif; }}
+    header {{ height: 42px; display: flex; align-items: center; padding: 0 12px; border-bottom: 1px solid var(--line); background: #0d1219; font-size: 13px; font-weight: 700; letter-spacing: .08em; }}
+    main {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; padding: 8px; }}
+    figure {{ margin: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #000; }}
+    img {{ width: 100%; aspect-ratio: 16 / 9; object-fit: contain; display: block; }}
+    figcaption {{ padding: 5px 7px; color: var(--muted); font-size: 12px; background: #0d1219; }}
+  </style>
+</head>
+<body>
+  <header>SKYWEAVE CAMERA MOSAIC</header>
+  <main>{tiles}</main>
+</body>
+</html>
+"""
+
+
 def _operator_html() -> str:
     return """<!doctype html>
 <html lang="en">
@@ -334,7 +370,7 @@ def _operator_html() -> str:
     #operator { overflow: auto; border-right: 1px solid var(--line); background: #0c1118; }
     #vizFrame { width: 100%; height: 100%; border: 0; display: block; background: #000; }
     .preview { position: sticky; top: 0; z-index: 2; background: #05070a; border-bottom: 1px solid var(--line); }
-    .cameraFeeds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 8px; }
+    .cameraFeeds { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; padding: 8px; max-height: 44vh; overflow: auto; }
     .cameraFeed { position: relative; padding: 0; min-height: 0; overflow: hidden; background: #000; border-radius: 6px; }
     .cameraFeed.selected { border-color: var(--good); }
     .cameraFeed.failed { border-color: var(--bad); }
@@ -360,6 +396,10 @@ def _operator_html() -> str:
     .metric { padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; min-height: 58px; }
     .metric .label { display: block; margin-bottom: 5px; }
     .metric .value { text-align: left; font-size: 16px; color: var(--accent); }
+    .sliderGrid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+    .sliderRow { display: grid; grid-template-columns: minmax(112px, 0.65fr) minmax(160px, 1fr) minmax(58px, auto); gap: 8px; align-items: center; }
+    .sliderRow input[type="range"] { padding: 0; accent-color: var(--accent); }
+    .sliderValue { color: var(--accent); font-variant-numeric: tabular-nums; text-align: right; font-size: 12px; }
     @media (max-width: 980px) { main { grid-template-columns: 1fr; grid-template-rows: minmax(640px, 65vh) minmax(480px, 35vh); } #operator { border-right: 0; } }
   </style>
 </head>
@@ -371,14 +411,10 @@ def _operator_html() -> str:
   <main>
     <div id="operator">
       <div class="preview">
-        <div class="cameraFeeds">
-          <button type="button" id="feed0" class="cameraFeed" onclick="selectCamera(0)"><img src="/stream.mjpg?index=0&fps=6" alt="Camera 1 stream"><span id="feedLabel0">cam1</span></button>
-          <button type="button" id="feed1" class="cameraFeed" onclick="selectCamera(1)"><img src="/stream.mjpg?index=1&fps=6" alt="Camera 2 stream"><span id="feedLabel1">cam2</span></button>
-          <button type="button" id="feed2" class="cameraFeed" onclick="selectCamera(2)"><img src="/stream.mjpg?index=2&fps=6" alt="Camera 3 stream"><span id="feedLabel2">cam3</span></button>
-        </div>
+        <div id="cameraFeeds" class="cameraFeeds"></div>
         <div class="previewBar">
           <div id="cameraButtons" class="cameraButtons"></div>
-          <span id="selectedCamera" class="label">--</span>
+          <span class="label"><a href="/mosaic" target="_blank" style="color:var(--accent)">mosaic</a> · <span id="selectedCamera">--</span></span>
         </div>
       </div>
       <section>
@@ -389,6 +425,16 @@ def _operator_html() -> str:
           <div class="metric"><span class="label">Speed</span><span class="value" id="trackSpeed">--</span></div>
           <div class="metric"><span class="label">Position</span><span class="value" id="trackPosition">--</span></div>
           <div class="metric"><span class="label">Pipeline</span><span class="value" id="pipeline">--</span></div>
+        </div>
+      </section>
+      <section>
+        <h2>Global Tuning</h2>
+        <div class="sliderGrid">
+          <label class="sliderRow"><span class="label">Motion Threshold</span><input data-global-path="motion.threshold" type="range" min="0" max="255" step="1"><span class="sliderValue" data-global-value="motion.threshold">--</span></label>
+          <label class="sliderRow"><span class="label">Support Cameras</span><input data-global-path="rayweave.scorer.min_supporting_cameras" type="range" min="1" max="15" step="1"><span class="sliderValue" data-global-value="rayweave.scorer.min_supporting_cameras">--</span></label>
+          <label class="sliderRow"><span class="label">Peak Percentile</span><input data-global-path="rayweave.peaks.threshold_percentile" type="range" min="90" max="100" step="0.1"><span class="sliderValue" data-global-value="rayweave.peaks.threshold_percentile">--</span></label>
+          <label class="sliderRow"><span class="label">Kalman Accel</span><input data-global-path="kalman.sigma_accel_mps2" type="range" min="0" max="24" step="0.1"><span class="sliderValue" data-global-value="kalman.sigma_accel_mps2">--</span></label>
+          <label class="sliderRow"><span class="label">Meas. Trust</span><input data-global-path="kalman.measurement_var_scale" type="range" min="0.1" max="12" step="0.1"><span class="sliderValue" data-global-value="kalman.measurement_var_scale">--</span></label>
         </div>
       </section>
       <section>
@@ -459,12 +505,16 @@ def _operator_html() -> str:
       </section>
       <section id="stats"></section>
     </div>
-    <iframe id="vizFrame" src="/viz/" title="Skyweave visualizer"></iframe>
+    <iframe id="vizFrame" src="/viz/?view=room&v=room-mode" title="Skyweave visualizer"></iframe>
   </main>
   <script>
     const fields = new Map();
     const roomFields = new Map();
+    const globalFields = new Map();
+    const globalReadouts = new Map();
+    const globalTimers = new Map();
     let applying = false;
+    let feedSignature = '';
 
     function get(obj, path) {
       return path.split('.').reduce((acc, key) => acc && acc[key], obj);
@@ -477,7 +527,7 @@ def _operator_html() -> str:
     }
     function typedValue(el) {
       if (el.tagName === 'SELECT' && (el.value === 'true' || el.value === 'false')) return el.value === 'true';
-      if (el.type === 'number') return Number(el.value);
+      if (el.type === 'number' || el.type === 'range') return Number(el.value);
       if (el.dataset.room && (el.dataset.room.endsWith('_m') || el.dataset.room.endsWith('_deg'))) return el.value.split(',').map(v => Number(v.trim()));
       return el.value;
     }
@@ -501,6 +551,23 @@ def _operator_html() -> str:
           if (applying) return;
           patch({room: {[el.dataset.room]: typedValue(el)}});
         });
+      });
+      document.querySelectorAll('[data-global-path]').forEach(el => {
+        globalFields.set(el.dataset.globalPath, el);
+        el.addEventListener('input', () => {
+          if (applying) return;
+          updateGlobalReadout(el.dataset.globalPath, typedValue(el));
+        });
+        el.addEventListener('change', () => {
+          if (applying) return;
+          clearTimeout(globalTimers.get(el.dataset.globalPath));
+          const payload = {};
+          setPath(payload, el.dataset.globalPath, typedValue(el));
+          patch(payload);
+        });
+      });
+      document.querySelectorAll('[data-global-value]').forEach(el => {
+        globalReadouts.set(el.dataset.globalValue, el);
       });
       document.getElementById('trackingMode').addEventListener('change', event => patch({tracking: {requested_mode: event.target.value}}));
       document.getElementById('recordStart').addEventListener('click', startRecording);
@@ -547,20 +614,66 @@ def _operator_html() -> str:
       const classes = [camera.selected ? 'selected' : '', camera.status === 'failed' ? 'failed' : ''].join(' ');
       return `<button type="button" class="${classes}" onclick="selectCamera(${camera.index})">${camera.label || 'cam'} ${camera.index}</button>`;
     }
-    function renderStatus(s) {
-      applying = true;
-      document.getElementById('runtime').textContent = s.operator.status;
-      document.getElementById('runtime').className = 'status ' + (s.operator.error ? 'bad' : 'good');
-      document.getElementById('mode').textContent = s.tracking.effective_mode + ' / ' + s.tracking.requested_mode;
-      document.getElementById('cameraButtons').innerHTML = s.cameras.map(cameraButton).join('');
-      document.getElementById('selectedCamera').textContent = s.device;
-      s.cameras.forEach(camera => {
+    function escapeText(value) {
+      return String(value).replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+    }
+    function formatGlobalValue(path, value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return '--';
+      if (path.includes('threshold_percentile')) return number.toFixed(1) + '%';
+      if (path.includes('measurement_var_scale')) return number.toFixed(1) + 'x';
+      if (path.includes('sigma_accel_mps2')) return number.toFixed(1);
+      return Number.isInteger(number) ? String(number) : number.toFixed(2);
+    }
+    function updateGlobalReadout(path, value) {
+      const readout = globalReadouts.get(path);
+      if (readout) readout.textContent = formatGlobalValue(path, value);
+    }
+    function updateGlobalControls(settings, cameraCount) {
+      for (const [path, el] of globalFields.entries()) {
+        if (path === 'rayweave.scorer.min_supporting_cameras') {
+          const maxSupport = Math.max(1, Number(cameraCount || 1));
+          el.max = String(maxSupport);
+        }
+        const value = get(settings, path);
+        if (value !== undefined && document.activeElement !== el) el.value = value;
+        updateGlobalReadout(path, value);
+      }
+    }
+    function renderCameraFeeds(cameras) {
+      const signature = cameras.map(camera => `${camera.index}:${camera.label || ''}:${camera.device || ''}`).join('|');
+      const root = document.getElementById('cameraFeeds');
+      if (signature !== feedSignature) {
+        feedSignature = signature;
+        root.innerHTML = cameras.map(camera => {
+          const index = Number(camera.index);
+          const label = escapeText(camera.label || `cam${index + 1}`);
+          return `<button type="button" id="feed${index}" class="cameraFeed" onclick="selectCamera(${index})"><img data-index="${index}" alt="${label} stream" loading="lazy" decoding="async"><span id="feedLabel${index}">${label}</span></button>`;
+        }).join('');
+      }
+      cameras.forEach(camera => {
         const feed = document.getElementById('feed' + camera.index);
         const label = document.getElementById('feedLabel' + camera.index);
         if (!feed || !label) return;
         feed.className = 'cameraFeed' + (camera.selected ? ' selected' : '') + (camera.status === 'failed' ? ' failed' : '');
         label.textContent = `${camera.label || 'cam'} · ${camera.capture_fps.toFixed(1)} fps`;
+        const img = feed.querySelector('img');
+        const version = String(camera.frame_seq || 0);
+        if (img && img.dataset.version !== version) {
+          img.dataset.version = version;
+          img.src = `/snapshot.jpg?index=${camera.index}&v=${version}`;
+        }
       });
+    }
+    function renderStatus(s) {
+      applying = true;
+      document.getElementById('runtime').textContent = s.operator.status;
+      document.getElementById('runtime').className = 'status ' + (s.operator.error ? 'bad' : 'good');
+      document.getElementById('mode').textContent = s.tracking.effective_mode + ' / ' + s.tracking.requested_mode;
+      renderCameraFeeds(s.cameras);
+      updateGlobalControls(s.settings, s.cameras.length);
+      document.getElementById('cameraButtons').innerHTML = s.cameras.map(cameraButton).join('');
+      document.getElementById('selectedCamera').textContent = s.device;
       const modeSelect = document.getElementById('trackingMode');
       modeSelect.innerHTML = s.tracking.mode_choices.map(m => `<option value="${m}">${m}</option>`).join('');
       modeSelect.value = s.tracking.requested_mode;

@@ -30,6 +30,7 @@ from skyweave.rayweave.grid import VoxelGrid
 from skyweave.rayweave.peaks import PeakExtractor
 from skyweave.rayweave.scorer import RayweaveScorer
 from skyweave.sim.generator import SyntheticFrame, SyntheticPacketGenerator
+from skyweave.sim.rendered import RenderedFrame, RenderedFrameGenerator
 from skyweave.sim.scene import build_scene
 from skyweave.timestamps import monotonic_ns
 
@@ -53,6 +54,7 @@ class _Pipeline:
     cameras: dict[int, Any]
     viz_cameras: list[dict[str, Any]]
     stress_frames: list[SyntheticFrame]
+    rendered_frames: list[RenderedFrame]
     effective_mode: str
     reason: str
 
@@ -94,9 +96,9 @@ class OperatorRuntime:
         settings_revision = -1
         tracking_revision = -1
         camera_signature: tuple[int, int, float, str, int] | None = None
-        frame_times: dict[int, list[float]] = {idx: [] for idx in range(len(self.state.devices))}
-        active_specs = [self.board for _ in self.state.devices]
-        cached_detections = [("none", 0, 0) for _ in self.state.devices]
+        frame_times: dict[int, list[float]] = {idx: [] for idx in range(len(self.state.live.cameras))}
+        active_specs = [self.board for _ in self.state.live.cameras]
+        cached_detections = [("none", 0, 0) for _ in self.state.live.cameras]
         frame_seq = 0
 
         try:
@@ -108,7 +110,48 @@ class OperatorRuntime:
                     settings_revision = revision
                     tracking_revision = next_tracking_revision
                     pipeline = self._build_pipeline(settings)
-                    frame_times = {idx: [] for idx in range(len(self.state.devices))}
+                    frame_times = {idx: [] for idx in pipeline.cameras}
+                    active_specs = [self.board for _ in range(len(self.state.live.cameras))]
+                    cached_detections = [("none", 0, 0) for _ in range(len(self.state.live.cameras))]
+
+                if pipeline is not None and pipeline.effective_mode in {"stress", "rendered"}:
+                    if sources:
+                        for source in sources:
+                            source.close()
+                        sources = []
+                    loop_start = time.perf_counter()
+                    self._apply_camera_selection()
+                    synthetic_start = time.perf_counter()
+                    if pipeline.effective_mode == "rendered":
+                        packets, rendered_frame, truth_position = self._rendered_packets(pipeline, settings, frame_seq)
+                    else:
+                        packets, truth_position = self._synthetic_packets(pipeline, frame_seq)
+                        rendered_frame = None
+                    camera_read_ms = _elapsed_ms(synthetic_start)
+                    preview_start = time.perf_counter()
+                    if rendered_frame is not None:
+                        self._update_rendered_preview(cv2, rendered_frame, packets, settings, frame_times, frame_seq)
+                    else:
+                        self._update_synthetic_preview(cv2, packets, settings, frame_times, frame_seq)
+                    preview_ms = _elapsed_ms(preview_start)
+                    self._run_fusion_frame(
+                        pipeline,
+                        packets,
+                        frame_seq,
+                        loop_start,
+                        {
+                            "camera_read_ms": camera_read_ms,
+                            "motion_ms": camera_read_ms if pipeline.effective_mode == "rendered" else 0.0,
+                            "preview_ms": preview_ms,
+                        },
+                        truth_position=truth_position,
+                    )
+                    frame_seq += 1
+                    elapsed = time.perf_counter() - loop_start
+                    target = 1.0 / self.options.target_hz if self.options.target_hz > 0.0 else 0.0
+                    if target > elapsed:
+                        time.sleep(target - elapsed)
+                    continue
 
                 if not sources or camera_signature != next_signature:
                     for source in sources:
@@ -181,26 +224,45 @@ class OperatorRuntime:
         config.simulation.image_height = settings.camera.height
         config.simulation.timestep_hz = settings.camera.fps
         config.kalman = settings.kalman.to_kalman_config()
+        with self.state.lock:
+            config.fusion.min_cameras_per_frame = self.state.fusion.min_cameras_per_frame
+            config.fusion.pixel_noise_px = self.state.fusion.pixel_noise_px
+            config.rayweave.scorer.min_supporting_cameras = self.state.rayweave.scorer.min_supporting_cameras
+            if self.state.rayweave.scorer.top_k_voxels is not None:
+                config.rayweave.scorer.top_k_voxels = self.state.rayweave.scorer.top_k_voxels
+            config.rayweave.peaks.threshold_percentile = self.state.rayweave.peaks.threshold_percentile
+            config.rayweave.peaks.max_peaks = self.state.rayweave.peaks.max_peaks
 
         requested_mode = self.state.requested_mode
         extrinsic_cameras, calibration = load_extrinsic_camera_calibs(self.state.extrinsics_path)
         self.state.set_calibration(calibration)
 
         if requested_mode in {"auto", "real"} and extrinsic_cameras:
+            self.state.live.configure_cameras(list(self.state.devices))
             cameras = scale_camera_calibs(extrinsic_cameras, settings.camera.width, settings.camera.height)
             effective_mode = "real"
             reason = "loaded calibrated extrinsics"
             stress_frames: list[SyntheticFrame] = []
+            rendered_frames: list[RenderedFrame] = []
         else:
             scene = build_scene(config.simulation)
             cameras = scene.cameras
-            stress_frames = SyntheticPacketGenerator(scene, config.simulation).frames()
-            effective_mode = "stress"
+            if requested_mode == "rendered":
+                stress_frames = []
+                rendered_frames = RenderedFrameGenerator(scene, config.simulation).frames()
+                self.state.live.ensure_camera_count(len(cameras), device_prefix="rendered://cam")
+                effective_mode = "rendered"
+                reason = "rendered synthetic frames selected"
+            else:
+                stress_frames = SyntheticPacketGenerator(scene, config.simulation).frames()
+                rendered_frames = []
+                self.state.live.ensure_camera_count(len(cameras))
+                effective_mode = "stress"
             if requested_mode == "real":
                 reason = calibration.message
             elif requested_mode == "auto":
                 reason = f"auto fallback: {calibration.message}"
-            else:
+            elif requested_mode == "stress":
                 reason = "stress mode selected"
 
         grid = VoxelGrid.from_config(config.rayweave.grid)
@@ -213,7 +275,7 @@ class OperatorRuntime:
 
         pipeline = _Pipeline(
             config=config,
-            motion_states={idx: MotionCameraState() for idx in range(len(self.state.devices))},
+            motion_states={idx: MotionCameraState() for idx in cameras},
             grid=grid,
             aligner=TimeAligner(config.fusion.align_window_ns, config.fusion.min_cameras_per_frame),
             scorer=scorer,
@@ -222,12 +284,71 @@ class OperatorRuntime:
             cameras=cameras,
             viz_cameras=[viz_camera(camera, settings.camera.fps, online=True) for camera in cameras.values()],
             stress_frames=stress_frames,
+            rendered_frames=rendered_frames,
             effective_mode=effective_mode,
             reason=reason,
         )
         self.state.set_pipeline(PipelineStatus(mode=effective_mode, reason=reason))
         self.state.set_runtime_status("running")
         return pipeline
+
+    def _synthetic_packets(self, pipeline: _Pipeline, frame_seq: int) -> tuple[list[MotionPacket], tuple[float, float, float] | None]:
+        if not pipeline.stress_frames:
+            return [], None
+        stress_frame = pipeline.stress_frames[frame_seq % len(pipeline.stress_frames)]
+        capture_ts_ns = monotonic_ns()
+        packets = [
+            packet.model_copy(
+                update={
+                    "header": packet.header.model_copy(
+                        update={
+                            "frame_seq": frame_seq,
+                            "capture_ts_ns": capture_ts_ns,
+                            "publish_ts_ns": capture_ts_ns,
+                        }
+                    )
+                }
+            )
+            for packet in stress_frame.motion_packets
+        ]
+        truth_position = tuple(float(value) for value in stress_frame.truth.position)
+        return packets, truth_position
+
+    def _rendered_packets(
+        self,
+        pipeline: _Pipeline,
+        settings,
+        frame_seq: int,
+    ) -> tuple[list[MotionPacket], RenderedFrame | None, tuple[float, float, float] | None]:
+        if not pipeline.rendered_frames:
+            return [], None, None
+        rendered_frame = pipeline.rendered_frames[frame_seq % len(pipeline.rendered_frames)]
+        capture_ts_ns = monotonic_ns()
+        motion_config = settings.motion.to_motion_config()
+        packets: list[MotionPacket] = []
+        for frame in rendered_frame.camera_frames:
+            state = pipeline.motion_states[frame.camera_id]
+            builder = state.builder
+            if (
+                builder is None
+                or builder.image_width != frame.image_width
+                or builder.image_height != frame.image_height
+                or builder.config != motion_config
+            ):
+                builder = FrameDiffMotionPacketBuilder(
+                    frame.camera_id,
+                    frame.image_width,
+                    frame.image_height,
+                    config=motion_config,
+                    source_id=f"rendered_cam{frame.camera_id}",
+                )
+                state.builder = builder
+                state.previous_frame = None
+            packet = builder.build(state.previous_frame, frame.gray, frame_seq, capture_ts_ns, publish_ts_ns=capture_ts_ns)
+            state.previous_frame = frame.gray
+            packets.append(packet)
+        truth_position = tuple(float(value) for value in rendered_frame.truth.position)
+        return packets, rendered_frame, truth_position
 
     def _open_sources(self, camera_settings) -> list[OpenCVCameraSource]:
         sources: list[OpenCVCameraSource] = []
@@ -375,6 +496,137 @@ class OperatorRuntime:
                 frame_jpeg=frame_jpeg,
             )
 
+    def _update_synthetic_preview(
+        self,
+        cv2,
+        packets: list[MotionPacket],
+        settings,
+        frame_times: dict[int, list[float]],
+        frame_seq: int,
+    ) -> None:
+        packets_by_camera = {packet.camera_id: packet for packet in packets}
+        with self.state.live.lock:
+            camera_count = len(self.state.live.cameras)
+            needs_first = [self.state.live.frame_jpegs[index] is None for index in range(camera_count)]
+        preview_stride = max(1, int(round(settings.camera.fps / 8.0)))
+        should_encode = frame_seq % preview_stride == 0
+        width = max(1, int(round(settings.camera.width * settings.camera.display_scale)))
+        height = max(1, int(round(settings.camera.height * settings.camera.display_scale)))
+        for camera_id in range(camera_count):
+            start = time.perf_counter()
+            packet = packets_by_camera.get(camera_id)
+            frame_jpeg = None
+            sharpness = 0.0
+            if should_encode or needs_first[camera_id]:
+                annotated = cv2.cvtColor(
+                    _synthetic_preview_gray(width, height, camera_id, frame_seq),
+                    cv2.COLOR_GRAY2BGR,
+                )
+                if packet is not None:
+                    _draw_motion_blobs(cv2, annotated, packet)
+                sharpness = _sharpness_score(cv2, cv2.cvtColor(annotated, cv2.COLOR_BGR2GRAY))
+                ok, encoded = cv2.imencode(
+                    ".jpg",
+                    annotated,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), int(settings.camera.jpeg_quality)],
+                )
+                frame_jpeg = bytes(encoded) if ok else None
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            times = frame_times.setdefault(camera_id, [])
+            times.append(time.perf_counter())
+            if len(times) > 30:
+                times.pop(0)
+            self.state.live.record_camera_frame(
+                camera_index=camera_id,
+                frame_seq=frame_seq,
+                detection_dictionary="synthetic",
+                marker_count=0,
+                corner_count=0,
+                latency_ms=latency_ms,
+                sharpness=sharpness,
+                capture_fps=_fps_from_times(times),
+                frame_jpeg=frame_jpeg,
+            )
+
+    def _update_rendered_preview(
+        self,
+        cv2,
+        rendered_frame: RenderedFrame,
+        packets: list[MotionPacket],
+        settings,
+        frame_times: dict[int, list[float]],
+        frame_seq: int,
+    ) -> None:
+        packets_by_camera = {packet.camera_id: packet for packet in packets}
+        with self.state.live.lock:
+            needs_first = [
+                self.state.live.frame_jpegs[index] is None
+                for index in range(len(self.state.live.cameras))
+            ]
+        preview_stride = max(1, int(round(settings.camera.fps / 8.0)))
+        should_encode = frame_seq % preview_stride == 0
+        for camera_frame in rendered_frame.camera_frames:
+            camera_id = camera_frame.camera_id
+            start = time.perf_counter()
+            packet = packets_by_camera.get(camera_id)
+            meta = rendered_frame.camera_meta.get(camera_id)
+            frame_jpeg = None
+            sharpness = 0.0
+            if should_encode or (camera_id < len(needs_first) and needs_first[camera_id]):
+                display_gray = _resize_gray(cv2, camera_frame.gray, settings.camera.display_scale)
+                annotated = cv2.cvtColor(display_gray, cv2.COLOR_GRAY2BGR)
+                if meta is not None and meta.projected is not None:
+                    sx = annotated.shape[1] / max(float(camera_frame.image_width), 1.0)
+                    sy = annotated.shape[0] / max(float(camera_frame.image_height), 1.0)
+                    center = (int(round(meta.projected[0] * sx)), int(round(meta.projected[1] * sy)))
+                    cv2.circle(annotated, center, 5, (80, 255, 120), 1)
+                    cv2.putText(
+                        annotated,
+                        "truth",
+                        (center[0] + 6, max(12, center[1] - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35,
+                        (80, 255, 120),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                if packet is not None:
+                    _draw_motion_blobs(cv2, annotated, packet)
+                label = "visible" if meta is not None and meta.visible else "not visible"
+                cv2.putText(
+                    annotated,
+                    f"cam{camera_id} {label} thr={settings.motion.threshold}",
+                    (8, 16),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42,
+                    (220, 235, 245),
+                    1,
+                    cv2.LINE_AA,
+                )
+                sharpness = _sharpness_score(cv2, cv2.cvtColor(annotated, cv2.COLOR_BGR2GRAY))
+                ok, encoded = cv2.imencode(
+                    ".jpg",
+                    annotated,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), int(settings.camera.jpeg_quality)],
+                )
+                frame_jpeg = bytes(encoded) if ok else None
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            times = frame_times.setdefault(camera_id, [])
+            times.append(time.perf_counter())
+            if len(times) > 30:
+                times.pop(0)
+            self.state.live.record_camera_frame(
+                camera_index=camera_id,
+                frame_seq=frame_seq,
+                detection_dictionary="rendered",
+                marker_count=len(packet.blobs) if packet is not None else 0,
+                corner_count=len(packet.motion_patches) if packet is not None else 0,
+                latency_ms=latency_ms,
+                sharpness=sharpness,
+                capture_fps=_fps_from_times(times),
+                frame_jpeg=frame_jpeg,
+            )
+
     def _run_fusion_frame(
         self,
         pipeline: _Pipeline | None,
@@ -382,6 +634,7 @@ class OperatorRuntime:
         frame_seq: int,
         loop_start: float,
         stage_ms: dict[str, float],
+        truth_position: tuple[float, float, float] | None = None,
     ) -> None:
         if pipeline is None:
             return
@@ -446,7 +699,7 @@ class OperatorRuntime:
             "cameras": pipeline.viz_cameras,
             "measurements": measurement_payloads,
             "weavefield_history": volume_payloads,
-            "truth_position": None,
+            "truth_position": truth_position,
             "stats": {
                 "fps": self.state.live.capture_fps,
                 "latency_ms": total_ms,
@@ -463,6 +716,21 @@ class OperatorRuntime:
 
 def _elapsed_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
+
+
+def _synthetic_preview_gray(width: int, height: int, camera_id: int, frame_seq: int):
+    import numpy as np
+
+    frame = np.zeros((height, width), dtype=np.uint8)
+    frame[:, :] = 8 + (camera_id * 7) % 22
+    grid_step = max(8, min(width, height) // 8)
+    frame[::grid_step, :] = 24
+    frame[:, ::grid_step] = 24
+    y = 6 + (camera_id * 13) % max(height - 12, 1)
+    x0 = (frame_seq * 3 + camera_id * 17) % max(width, 1)
+    x1 = min(width, x0 + max(6, width // 18))
+    frame[max(0, y - 1) : min(height, y + 2), x0:x1] = 42
+    return frame
 
 
 def _draw_motion_blobs(cv2, image, packet: MotionPacket) -> None:

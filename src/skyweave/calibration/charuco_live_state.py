@@ -279,6 +279,37 @@ class LiveState:
             self.condition.notify_all()
             return True
 
+    def ensure_camera_count(self, count: int, device_prefix: str = "synthetic://cam") -> None:
+        if count <= 0:
+            raise ValueError("camera count must be positive")
+        self.configure_cameras([f"{device_prefix}{index + 1}" for index in range(count)])
+
+    def configure_cameras(self, devices: list[str]) -> None:
+        if not devices:
+            raise ValueError("at least one camera is required")
+        with self.condition:
+            if list(self.devices) == list(devices) and len(self.cameras) == len(devices):
+                return
+            self.devices = list(devices)
+            self.cameras = [CameraStatus(device=device) for device in self.devices]
+            self.frame_jpegs = [None for _ in self.devices]
+            self.frame_versions = [0 for _ in self.devices]
+            count = len(self.devices)
+            self.selected_index = min(self.selected_index, count - 1)
+            self.requested_index = min(self.requested_index, count - 1)
+            self.camera_id = self.selected_index
+            selected = self.cameras[self.selected_index]
+            self.frame_seq = selected.frame_seq
+            self.dictionary = selected.dictionary
+            self.marker_count = selected.marker_count
+            self.corner_count = selected.corner_count
+            self.capture_fps = selected.capture_fps
+            self.latency_ms = selected.latency_ms
+            self.sharpness = selected.sharpness
+            self.frame_jpeg = None
+            self.frame_version += 1
+            self.condition.notify_all()
+
     def update_error(self, error: str) -> None:
         with self.condition:
             self.error = error

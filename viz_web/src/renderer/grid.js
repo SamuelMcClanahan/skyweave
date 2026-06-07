@@ -3,9 +3,12 @@ import * as THREE from 'three';
 
 const GRID_MIN_SIZE_M = 100;
 const GRID_MAX_SIZE_M = 20000;
+const ROOM_GRID_MIN_SIZE_M = 3;
+const ROOM_GRID_MAX_SIZE_M = 16;
 const GRID_DIVISIONS = 50;
 const MARKER_COUNT_PER_AXIS = 5;
 const LABEL_SCALE = [40, 10, 1];
+const ROOM_LABEL_SCALE = [0.35, 0.09, 1];
 
 export class GridRenderer {
     constructor(scene) {
@@ -13,21 +16,22 @@ export class GridRenderer {
         this.gridGroup = new THREE.Group();
         this.gridGroup.name = 'grid';
 
-        this.createGrid(GRID_MIN_SIZE_M);
+        this.createGrid(GRID_MIN_SIZE_M, 'map');
         this.scene.add(this.gridGroup);
     }
 
-    createGrid(size) {
+    createGrid(size, sceneMode = 'map') {
+        const isRoom = sceneMode === 'room';
         // Main ground grid
-        const grid = new THREE.GridHelper(size, GRID_DIVISIONS, 0x333333, 0x111111);
+        const grid = new THREE.GridHelper(size, GRID_DIVISIONS, 0x6fb7ff, 0x2f3f52);
         grid.material.transparent = true;
-        grid.material.opacity = 0.15;
+        grid.material.opacity = isRoom ? 0.18 : 0.34;
         this.gridGroup.add(grid);
 
         // Axes helper
         const axes = new THREE.AxesHelper(size / 10);
         axes.material.transparent = true;
-        axes.material.opacity = 0.6;
+        axes.material.opacity = 0.9;
         this.gridGroup.add(axes);
 
         // Add distance markers
@@ -38,16 +42,16 @@ export class GridRenderer {
             const label = `${Math.round(i)}m`;
 
             // X-axis markers
-            const markerX = this.createDistanceMarker(label, new THREE.Vector3(i, 0, 0));
+            const markerX = this.createDistanceMarker(label, new THREE.Vector3(i, 0, 0), sceneMode);
             this.gridGroup.add(markerX);
 
             // Y-axis markers
-            const markerY = this.createDistanceMarker(label, new THREE.Vector3(0, i, 0));
+            const markerY = this.createDistanceMarker(label, new THREE.Vector3(0, i, 0), sceneMode);
             this.gridGroup.add(markerY);
         }
     }
 
-    createDistanceMarker(text, position) {
+    createDistanceMarker(text, position, sceneMode = 'map') {
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
         canvas.width = 128;
@@ -70,7 +74,7 @@ export class GridRenderer {
 
         const sprite = new THREE.Sprite(material);
         sprite.position.copy(position);
-        sprite.scale.set(...LABEL_SCALE);
+        sprite.scale.set(...(sceneMode === 'room' ? ROOM_LABEL_SCALE : LABEL_SCALE));
 
         return sprite;
     }
@@ -79,12 +83,14 @@ export class GridRenderer {
         this.gridGroup.visible = visible;
     }
 
-    updateScale(scaleValue) {
+    updateScale(scaleValue, sceneMode = 'map') {
         const t = Math.min(100, Math.max(0, scaleValue)) / 100;
-        const size = GRID_MIN_SIZE_M * Math.pow(GRID_MAX_SIZE_M / GRID_MIN_SIZE_M, t);
+        const minSize = sceneMode === 'room' ? ROOM_GRID_MIN_SIZE_M : GRID_MIN_SIZE_M;
+        const maxSize = sceneMode === 'room' ? ROOM_GRID_MAX_SIZE_M : GRID_MAX_SIZE_M;
+        const size = minSize * Math.pow(maxSize / minSize, t);
 
         this.clearGrid();
-        this.createGrid(size);
+        this.createGrid(size, sceneMode);
     }
 
     clearGrid() {

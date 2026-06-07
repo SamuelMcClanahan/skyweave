@@ -9,6 +9,7 @@ from skyweave.recording.recorder import Recorder
 from skyweave.sim.check import (
     DEFAULT_RECORD_DIR,
     DEFAULT_SIM_CHECK_CONFIG,
+    SIM_SOURCE_CHOICES,
     print_sim_summary,
     run_sim_check,
 )
@@ -20,6 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--record", action="store_true", help="Record packets and outputs for replay.")
     parser.add_argument("--record-dir", default=DEFAULT_RECORD_DIR, help="Directory for recorded sessions.")
     parser.add_argument("--log-stages", action="store_true", help="Write per-frame stage timings to JSONL logs.")
+    parser.add_argument("--source", choices=SIM_SOURCE_CHOICES, default="packet", help="Synthetic source to validate.")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
@@ -29,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     logger = JsonlLogger(config.logging.log_dir)
     recorder = Recorder.create(args.record_dir, config, args.config) if args.record else None
     try:
-        summary = run_sim_check(config, logger, recorder=recorder, config_path=args.config)
+        summary = run_sim_check(config, logger, recorder=recorder, config_path=args.config, source=args.source)
     finally:
         if recorder:
             recorder.close()

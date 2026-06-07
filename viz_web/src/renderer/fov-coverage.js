@@ -15,10 +15,15 @@ export class FovCoverageRenderer {
 
         this.frustumMeshes = new Map();
         this.hoveredCameraId = null;
+        this.frustumRangeM = COVERAGE_FRUSTUM_DEPTH_M;
+        this.hoverFrustumRangeM = COVERAGE_FRUSTUM_DEPTH_HOVER_M;
     }
 
-    update(cameras, visibility, hoveredCameraId = null) {
+    update(cameras, visibility, hoveredCameraId = null, settings = {}) {
         this.hoveredCameraId = hoveredCameraId;
+        this.frustumRangeM = Number(settings.frustumRangeM || COVERAGE_FRUSTUM_DEPTH_M);
+        this.hoverFrustumRangeM = Math.max(this.frustumRangeM * 1.4, Number(settings.hoverFrustumRangeM || this.frustumRangeM));
+        this.sceneMode = settings.sceneMode || 'map';
 
         // Clear existing meshes
         this.frustumMeshes.forEach((mesh, id) => {
@@ -49,10 +54,10 @@ export class FovCoverageRenderer {
         const fovV = camera.fov_v_deg * (Math.PI / 180);
 
         // Full size when hovered, small size otherwise
-        const depth = isHovered ? COVERAGE_FRUSTUM_DEPTH_HOVER_M : COVERAGE_FRUSTUM_DEPTH_M;
+        const depth = isHovered ? this.hoverFrustumRangeM : this.frustumRangeM;
 
         // Create frustum geometry as a pyramid
-        const nearDist = 10.0;
+        const nearDist = Math.min(10.0, Math.max(0.04, depth * 0.025));
         const farDist = depth;
 
         const nearHalfWidth = Math.tan(fovH / 2) * nearDist;
@@ -94,7 +99,9 @@ export class FovCoverageRenderer {
         geometry.computeVertexNormals();
 
         // Brighter and more opaque when hovered
-        const opacity = isHovered ? COVERAGE_HOVER_OPACITY : COVERAGE_BASE_OPACITY;
+        const baseOpacity = this.sceneMode === 'room' ? 0.004 : COVERAGE_BASE_OPACITY;
+        const hoverOpacity = this.sceneMode === 'room' ? 0.02 : COVERAGE_HOVER_OPACITY;
+        const opacity = isHovered ? hoverOpacity : baseOpacity;
         const color = isHovered ? 0x00ffff : 0x00aaff; // Brighter cyan on hover
 
         // Semi-transparent material with additive blending for overlap
@@ -103,7 +110,7 @@ export class FovCoverageRenderer {
             transparent: true,
             opacity: opacity,
             side: THREE.DoubleSide,
-            blending: THREE.AdditiveBlending,
+            blending: this.sceneMode === 'room' ? THREE.NormalBlending : THREE.AdditiveBlending,
             depthWrite: false,
         });
 
