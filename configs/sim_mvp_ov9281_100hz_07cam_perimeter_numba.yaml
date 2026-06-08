@@ -30,7 +30,9 @@ rayweave:
     backend: "numba"
   peaks:
     threshold_percentile: 99.5
-    max_peaks: 1
+    max_peaks: 4
+    soft_argmax_radius_voxels: 1
+    soft_argmax_beta: 6.0
 
 fusion:
   align_window_ns: 5000000
@@ -38,10 +40,11 @@ fusion:
   pixel_noise_px: 1.0
 
 kalman:
-  sigma_accel_mps2: 6.0
+  sigma_accel_mps2: 3.0
   initial_position_var: 1.0
   initial_velocity_var: 4.0
-  measurement_var_scale: 1.0
+  measurement_var_scale: 3.0
+  gate_mahalanobis_squared: 35.0
   coast_seconds: 2.0
 
 logging:

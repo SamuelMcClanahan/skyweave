@@ -29,6 +29,7 @@ export class UIManager {
         this.elements.trackCount = document.getElementById('track-count');
         this.elements.fpsDisplay = document.getElementById('fps-display');
         this.elements.latencyDisplay = document.getElementById('latency-display');
+        this.elements.rmseDisplay = document.getElementById('rmse-display');
 
         // Left sidebar
         this.elements.camerasOnline = document.getElementById('cameras-online');
@@ -43,6 +44,7 @@ export class UIManager {
         this.elements.scaleSlider = document.getElementById('scale-slider');
         this.elements.scaleLabels = document.getElementById('scale-labels');
         this.elements.autoZoom = document.getElementById('auto-zoom');
+        this.elements.originTrackView = document.getElementById('origin-track-view');
         this.elements.glyphScale = document.getElementById('glyph-scale');
         this.elements.frustumRange = document.getElementById('frustum-range');
         this.elements.rayModeRadios = document.querySelectorAll('input[name="ray-mode"]');
@@ -104,12 +106,16 @@ export class UIManager {
 
         // Settings
         this.elements.sceneMode.addEventListener('change', (e) => {
-            const sceneMode = e.target.value === 'map' ? 'map' : 'room';
+            const sceneMode = this.normalizeSceneMode(e.target.value);
             const patch = { sceneMode };
             if (sceneMode === 'room') {
                 patch.glyphScale = Math.min(this.state.settings.glyphScale, 0.0015);
                 patch.frustumRangeM = Math.min(this.state.settings.frustumRangeM, 1.0);
                 patch.scaleValue = Math.min(this.state.settings.scaleValue, 8);
+            } else if (sceneMode === 'airspace') {
+                patch.glyphScale = Math.max(Math.min(this.state.settings.glyphScale, 0.08), 0.035);
+                patch.frustumRangeM = Math.max(Math.min(this.state.settings.frustumRangeM, 90.0), 35.0);
+                patch.scaleValue = Math.max(this.state.settings.scaleValue, 58);
             } else {
                 patch.glyphScale = Math.max(this.state.settings.glyphScale, 0.25);
                 patch.frustumRangeM = Math.max(this.state.settings.frustumRangeM, 650.0);
@@ -124,6 +130,10 @@ export class UIManager {
 
         this.elements.autoZoom.addEventListener('change', (e) => {
             this.state.setSetting('autoZoom', e.target.checked);
+        });
+
+        this.elements.originTrackView.addEventListener('change', (e) => {
+            this.state.setSetting('originTrackView', e.target.checked);
         });
 
         this.elements.glyphScale.addEventListener('input', (e) => {
@@ -245,6 +255,11 @@ export class UIManager {
         // Update latency display
         if (this.state.stats.latency_p50_ms) {
             this.elements.latencyDisplay.textContent = `${Math.round(this.state.stats.latency_p50_ms)}ms`;
+        }
+        if (this.elements.rmseDisplay) {
+            this.elements.rmseDisplay.textContent = Number.isFinite(this.state.stats.track_rmse_m)
+                ? `${(this.state.stats.track_rmse_m * 100).toFixed(1)}cm`
+                : '--';
         }
     }
 
@@ -371,15 +386,16 @@ export class UIManager {
             this.elements.scaleSlider.value = this.state.settings.scaleValue;
         }
         if (this.elements.scaleLabels) {
-            const labels = this.state.settings.sceneMode === 'room'
-                ? ['3m', '8m', '16m']
-                : ['50m', '700m', '10km'];
+            const labels = this.scaleLabelsForMode(this.state.settings.sceneMode);
             this.elements.scaleLabels.querySelectorAll('span').forEach((el, index) => {
                 el.textContent = labels[index] || '';
             });
         }
         if (this.elements.autoZoom) {
             this.elements.autoZoom.checked = this.state.settings.autoZoom;
+        }
+        if (this.elements.originTrackView) {
+            this.elements.originTrackView.checked = this.state.settings.originTrackView;
         }
         if (this.elements.glyphScale) {
             this.elements.glyphScale.value = this.glyphScaleToSlider(this.state.settings.glyphScale);
@@ -432,6 +448,16 @@ export class UIManager {
         const max = 650.0;
         const safe = Math.min(max, Math.max(min, Number(value) || min));
         return Math.round((Math.log(safe / min) / Math.log(max / min)) * 100);
+    }
+
+    normalizeSceneMode(value) {
+        return value === 'map' || value === 'airspace' ? value : 'room';
+    }
+
+    scaleLabelsForMode(sceneMode) {
+        if (sceneMode === 'room') return ['3m', '8m', '16m'];
+        if (sceneMode === 'airspace') return ['20m', '55m', '160m'];
+        return ['50m', '700m', '10km'];
     }
 
     showTrackDetailPanel() {

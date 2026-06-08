@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from skyweave.calibration.charuco_live_state import LiveState, LiveTuningSettings
+from skyweave.sim.scene import SCENE_CHOICES
+from skyweave.rayweave.scorer import EVIDENCE_MODE_CHOICES, PATCH_EVIDENCE_MODE
 
 TRACKING_MODES = ("auto", "real", "stress", "rendered")
 
@@ -81,9 +83,14 @@ class FusionRuntimeSettings:
 class RayweaveScorerRuntimeSettings:
     min_supporting_cameras: int = 2
     top_k_voxels: int | None = None
+    evidence_mode: str = PATCH_EVIDENCE_MODE
 
     def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"min_supporting_cameras": self.min_supporting_cameras}
+        payload: dict[str, Any] = {
+            "min_supporting_cameras": self.min_supporting_cameras,
+            "evidence_mode": self.evidence_mode,
+            "evidence_mode_choices": list(EVIDENCE_MODE_CHOICES),
+        }
         if self.top_k_voxels is not None:
             payload["top_k_voxels"] = self.top_k_voxels
         return payload
@@ -96,17 +103,26 @@ class RayweaveScorerRuntimeSettings:
             )
         if "top_k_voxels" in payload:
             self.top_k_voxels = _positive_int(payload["top_k_voxels"], "rayweave.scorer.top_k_voxels")
+        if "evidence_mode" in payload:
+            evidence_mode = str(payload["evidence_mode"])
+            if evidence_mode not in EVIDENCE_MODE_CHOICES:
+                raise ValueError(f"rayweave.scorer.evidence_mode must be one of {', '.join(EVIDENCE_MODE_CHOICES)}")
+            self.evidence_mode = evidence_mode
 
 
 @dataclass
 class RayweavePeakRuntimeSettings:
     threshold_percentile: float = 99.5
-    max_peaks: int = 1
+    max_peaks: int = 4
+    soft_argmax_radius_voxels: int = 1
+    soft_argmax_beta: float = 6.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "threshold_percentile": self.threshold_percentile,
             "max_peaks": self.max_peaks,
+            "soft_argmax_radius_voxels": self.soft_argmax_radius_voxels,
+            "soft_argmax_beta": self.soft_argmax_beta,
         }
 
     def update(self, payload: dict[str, Any]) -> None:
@@ -119,6 +135,18 @@ class RayweavePeakRuntimeSettings:
             )
         if "max_peaks" in payload:
             self.max_peaks = _positive_int(payload["max_peaks"], "rayweave.peaks.max_peaks")
+        if "soft_argmax_radius_voxels" in payload:
+            self.soft_argmax_radius_voxels = _non_negative_int(
+                payload["soft_argmax_radius_voxels"],
+                "rayweave.peaks.soft_argmax_radius_voxels",
+            )
+        if "soft_argmax_beta" in payload:
+            self.soft_argmax_beta = _bounded_float(
+                payload["soft_argmax_beta"],
+                "rayweave.peaks.soft_argmax_beta",
+                0.0,
+                100.0,
+            )
 
 
 @dataclass
@@ -179,6 +207,10 @@ class PipelineStatus:
     kalman_ms: float = 0.0
     total_ms: float = 0.0
     target_sleep_ms: float = 0.0
+    truth_error_m: float | None = None
+    track_rmse_m: float | None = None
+    track_axis_rmse_m: list[float] | None = None
+    truth_error_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -200,6 +232,10 @@ class PipelineStatus:
             "kalman_ms": self.kalman_ms,
             "total_ms": self.total_ms,
             "target_sleep_ms": self.target_sleep_ms,
+            "truth_error_m": self.truth_error_m,
+            "track_rmse_m": self.track_rmse_m,
+            "track_axis_rmse_m": list(self.track_axis_rmse_m) if self.track_axis_rmse_m is not None else None,
+            "truth_error_count": self.truth_error_count,
         }
 
 
@@ -235,6 +271,7 @@ class OperatorState:
     extrinsics_path: str
     profile_dir: Path
     requested_mode: str = "auto"
+    simulation_scene: str = "paper_airplane_arc"
     record_dir: Path = Path("data/operator_recordings")
     live: LiveState = field(init=False)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -257,6 +294,7 @@ class OperatorState:
     def __post_init__(self) -> None:
         if self.requested_mode not in TRACKING_MODES:
             raise ValueError(f"requested_mode must be one of {', '.join(TRACKING_MODES)}")
+        self.simulation_scene = _simulation_scene(self.simulation_scene)
         self.condition = threading.Condition(self.lock)
         self.live = LiveState(devices=self.devices, tuning=LiveTuningSettings())
         self.calibration = CalibrationStatus(extrinsics_path=self.extrinsics_path)
@@ -287,6 +325,8 @@ class OperatorState:
                     "requested_mode": self.requested_mode,
                     "effective_mode": self.pipeline.mode,
                     "mode_choices": list(TRACKING_MODES),
+                    "simulation_scene": self.simulation_scene,
+                    "simulation_scene_choices": list(SCENE_CHOICES),
                     "reason": self.pipeline.reason,
                     "revision": self.tracking_revision,
                 },
@@ -306,7 +346,10 @@ class OperatorState:
             settings["rayweave"] = self.rayweave.to_dict()
             return {
                 "version": 1,
-                "tracking": {"requested_mode": self.requested_mode},
+                "tracking": {
+                    "requested_mode": self.requested_mode,
+                    "simulation_scene": self.simulation_scene,
+                },
                 "settings": settings,
                 "room": self.room.to_dict(),
             }
@@ -335,6 +378,14 @@ class OperatorState:
                     next_mode = _tracking_mode(tracking["mode"])
                     tracking_changed = tracking_changed or next_mode != self.requested_mode
                     self.requested_mode = next_mode
+                if "simulation_scene" in tracking:
+                    next_scene = _simulation_scene(tracking["simulation_scene"])
+                    tracking_changed = tracking_changed or next_scene != self.simulation_scene
+                    self.simulation_scene = next_scene
+                if "scene" in tracking:
+                    next_scene = _simulation_scene(tracking["scene"])
+                    tracking_changed = tracking_changed or next_scene != self.simulation_scene
+                    self.simulation_scene = next_scene
             if "mode" in payload:
                 next_mode = _tracking_mode(payload["mode"])
                 tracking_changed = tracking_changed or next_mode != self.requested_mode
@@ -570,6 +621,13 @@ def _tracking_mode(value: Any) -> str:
     return mode
 
 
+def _simulation_scene(value: Any) -> str:
+    scene = str(value).strip().lower()
+    if scene not in SCENE_CHOICES:
+        raise ValueError(f"simulation scene must be one of {', '.join(SCENE_CHOICES)}")
+    return scene
+
+
 def _bounded_float(value: Any, name: str, min_value: float, max_value: float) -> float:
     parsed = float(value)
     if not min_value <= parsed <= max_value:
@@ -581,6 +639,13 @@ def _positive_int(value: Any, name: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise ValueError(f"{name} must be positive")
+    return parsed
+
+
+def _non_negative_int(value: Any, name: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError(f"{name} must be non-negative")
     return parsed
 
 

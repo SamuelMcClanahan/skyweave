@@ -14,11 +14,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", choices=SIM_SOURCE_CHOICES, default="rendered", help="Synthetic source to tune against.")
     parser.add_argument("--passes", type=int, default=2, help="Coordinate-search passes.")
     parser.add_argument("--max-evals", type=int, default=72, help="Maximum candidate evaluations.")
+    parser.add_argument("--frames-limit", type=int, help="Optional frame cap for faster exploratory tuning.")
     parser.add_argument("--profile-output", help="Optional operator profile YAML to write.")
     parser.add_argument("--profile-name", default="autotuned-rendered", help="Profile name stored in output YAML.")
     args = parser.parse_args(argv)
 
-    result = run_autotune(args.config, source=args.source, passes=args.passes, max_evals=args.max_evals)
+    result = run_autotune(
+        args.config,
+        source=args.source,
+        passes=args.passes,
+        max_evals=args.max_evals,
+        frames_limit=args.frames_limit,
+    )
     output_path: Path | None = None
     if args.profile_output:
         output_path = write_operator_profile(

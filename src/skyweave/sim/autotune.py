@@ -25,6 +25,7 @@ class TuneCandidate:
     peak_threshold_percentile: float
     kalman_sigma_accel_mps2: float
     kalman_measurement_var_scale: float
+    kalman_gate_mahalanobis_squared: float
 
     @classmethod
     def from_config(cls, config: SimCheckConfig) -> TuneCandidate:
@@ -37,6 +38,7 @@ class TuneCandidate:
             peak_threshold_percentile=config.rayweave.peaks.threshold_percentile,
             kalman_sigma_accel_mps2=config.kalman.sigma_accel_mps2,
             kalman_measurement_var_scale=config.kalman.measurement_var_scale,
+            kalman_gate_mahalanobis_squared=config.kalman.gate_mahalanobis_squared,
         )
 
     def replace(self, **kwargs: Any) -> TuneCandidate:
@@ -72,6 +74,7 @@ class TuneCandidate:
             "kalman": {
                 "sigma_accel_mps2": self.kalman_sigma_accel_mps2,
                 "measurement_var_scale": self.kalman_measurement_var_scale,
+                "gate_mahalanobis_squared": self.kalman_gate_mahalanobis_squared,
             },
         }
 
@@ -136,6 +139,7 @@ def run_autotune(
         ("peak_threshold_percentile", [96.0, 97.5, 98.5, 99.0, 99.5, 99.8]),
         ("kalman_sigma_accel_mps2", [0.5, 1.0, 2.0, 3.5, 6.0, 9.0, 12.0]),
         ("kalman_measurement_var_scale", [0.5, 1.0, 1.5, 2.5, 4.0, 8.0]),
+        ("kalman_gate_mahalanobis_squared", [7.81, 11.345, 14.16, 20.0, 35.0]),
     ]
 
     for _pass_index in range(max(1, passes)):
@@ -209,6 +213,7 @@ def _evaluate(config: SimCheckConfig, candidate: TuneCandidate, source: str, eva
     trial.rayweave.peaks.threshold_percentile = candidate.peak_threshold_percentile
     trial.kalman.sigma_accel_mps2 = candidate.kalman_sigma_accel_mps2
     trial.kalman.measurement_var_scale = candidate.kalman_measurement_var_scale
+    trial.kalman.gate_mahalanobis_squared = candidate.kalman_gate_mahalanobis_squared
     with contextlib.redirect_stdout(io.StringIO()):
         summary = run_sim_check(
             trial,

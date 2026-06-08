@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,6 +59,7 @@ class _Pipeline:
     rendered_frames: list[RenderedFrame]
     effective_mode: str
     reason: str
+    truth_error_history: deque[tuple[float, float, float]]
 
 
 class OperatorRuntime:
@@ -225,13 +228,18 @@ class OperatorRuntime:
         config.simulation.timestep_hz = settings.camera.fps
         config.kalman = settings.kalman.to_kalman_config()
         with self.state.lock:
+            config.simulation.scene = self.state.simulation_scene
+            _apply_scene_preset(config)
             config.fusion.min_cameras_per_frame = self.state.fusion.min_cameras_per_frame
             config.fusion.pixel_noise_px = self.state.fusion.pixel_noise_px
             config.rayweave.scorer.min_supporting_cameras = self.state.rayweave.scorer.min_supporting_cameras
+            config.rayweave.scorer.evidence_mode = self.state.rayweave.scorer.evidence_mode
             if self.state.rayweave.scorer.top_k_voxels is not None:
                 config.rayweave.scorer.top_k_voxels = self.state.rayweave.scorer.top_k_voxels
             config.rayweave.peaks.threshold_percentile = self.state.rayweave.peaks.threshold_percentile
             config.rayweave.peaks.max_peaks = self.state.rayweave.peaks.max_peaks
+            config.rayweave.peaks.soft_argmax_radius_voxels = self.state.rayweave.peaks.soft_argmax_radius_voxels
+            config.rayweave.peaks.soft_argmax_beta = self.state.rayweave.peaks.soft_argmax_beta
 
         requested_mode = self.state.requested_mode
         extrinsic_cameras, calibration = load_extrinsic_camera_calibs(self.state.extrinsics_path)
@@ -287,6 +295,7 @@ class OperatorRuntime:
             rendered_frames=rendered_frames,
             effective_mode=effective_mode,
             reason=reason,
+            truth_error_history=deque(maxlen=max(30, int(settings.camera.fps * 10))),
         )
         self.state.set_pipeline(PipelineStatus(mode=effective_mode, reason=reason))
         self.state.set_runtime_status("running")
@@ -295,7 +304,10 @@ class OperatorRuntime:
     def _synthetic_packets(self, pipeline: _Pipeline, frame_seq: int) -> tuple[list[MotionPacket], tuple[float, float, float] | None]:
         if not pipeline.stress_frames:
             return [], None
-        stress_frame = pipeline.stress_frames[frame_seq % len(pipeline.stress_frames)]
+        frame_index = frame_seq % len(pipeline.stress_frames)
+        if frame_seq > 0 and frame_index == 0:
+            _reset_synthetic_loop(pipeline)
+        stress_frame = pipeline.stress_frames[frame_index]
         capture_ts_ns = monotonic_ns()
         packets = [
             packet.model_copy(
@@ -322,7 +334,10 @@ class OperatorRuntime:
     ) -> tuple[list[MotionPacket], RenderedFrame | None, tuple[float, float, float] | None]:
         if not pipeline.rendered_frames:
             return [], None, None
-        rendered_frame = pipeline.rendered_frames[frame_seq % len(pipeline.rendered_frames)]
+        frame_index = frame_seq % len(pipeline.rendered_frames)
+        if frame_seq > 0 and frame_index == 0:
+            _reset_synthetic_loop(pipeline)
+        rendered_frame = pipeline.rendered_frames[frame_index]
         capture_ts_ns = monotonic_ns()
         motion_config = settings.motion.to_motion_config()
         packets: list[MotionPacket] = []
@@ -593,6 +608,8 @@ class OperatorRuntime:
                 if packet is not None:
                     _draw_motion_blobs(cv2, annotated, packet)
                 label = "visible" if meta is not None and meta.visible else "not visible"
+                if meta is not None and meta.visible and meta.depth_m is not None:
+                    label = f"{label} r={meta.radius_px:.1f}px z={meta.depth_m:.1f}m"
                 cv2.putText(
                     annotated,
                     f"cam{camera_id} {label} thr={settings.motion.threshold}",
@@ -661,10 +678,11 @@ class OperatorRuntime:
             volume = scored.volume
             peaks_ms = _elapsed_ms(start)
             start = time.perf_counter()
-            track = pipeline.tracks.update(measurements[0] if measurements else None, aligned.ts_ns)
+            track = pipeline.tracks.update(measurements, aligned.ts_ns)
             kalman_ms = _elapsed_ms(start)
 
         track_payloads = [track.model_dump(mode="json")] if track else []
+        truth_metrics = _update_truth_metrics(pipeline, track, truth_position)
         measurement_payloads = [measurement.model_dump(mode="json") for measurement in measurements]
         volume_payloads = [volume.model_dump(mode="json")] if volume else []
         total_ms = _elapsed_ms(loop_start)
@@ -688,6 +706,10 @@ class OperatorRuntime:
             kalman_ms=kalman_ms,
             total_ms=total_ms,
             target_sleep_ms=max(0.0, target_ms - total_ms),
+            truth_error_m=truth_metrics["truth_error_m"],
+            track_rmse_m=truth_metrics["track_rmse_m"],
+            track_axis_rmse_m=truth_metrics["track_axis_rmse_m"],
+            truth_error_count=truth_metrics["truth_error_count"],
         )
         self.state.set_pipeline(status)
         telemetry = track_telemetry(track, measurements[0].ts_ns if measurements else None)
@@ -707,11 +729,100 @@ class OperatorRuntime:
                 "n_cameras": len(pipeline.viz_cameras),
                 "n_voxels": len(volume.voxels) if volume else 0,
                 "mode": pipeline.effective_mode,
+                "scene": pipeline.config.simulation.scene,
                 "room_revision": self.state.room.revision,
+                "truth_error_m": truth_metrics["truth_error_m"],
+                "track_rmse_m": truth_metrics["track_rmse_m"],
+                "track_error_x_rmse_m": truth_metrics["track_axis_rmse_m"][0] if truth_metrics["track_axis_rmse_m"] else None,
+                "track_error_y_rmse_m": truth_metrics["track_axis_rmse_m"][1] if truth_metrics["track_axis_rmse_m"] else None,
+                "track_error_z_rmse_m": truth_metrics["track_axis_rmse_m"][2] if truth_metrics["track_axis_rmse_m"] else None,
+                "truth_error_count": truth_metrics["truth_error_count"],
             },
             "room": self.state.room.to_dict(),
         }
         self.state.set_viz_frame(frame)
+
+
+def _apply_scene_preset(config) -> None:
+    scene = config.simulation.scene
+    if scene == "pixel_plane_crossing":
+        config.simulation.camera_count = 7
+        config.simulation.camera_layout = "dispersed_perimeter"
+        config.simulation.room_size_m = (42.0, 24.0, 14.0)
+        config.simulation.camera_height_m = 1.6
+        config.simulation.camera_target_m = (0.0, 0.0, 8.8)
+        config.simulation.camera_margin_m = 1.5
+        config.simulation.patch_size_px = 3
+        config.simulation.render_background_intensity = 28
+        config.simulation.render_object_intensity = 245
+        config.simulation.render_object_radius_m = 0.035
+        config.simulation.render_object_shape = "disk"
+        config.simulation.render_noise_std = 1.5
+        config.simulation.render_blur_px = 0
+        config.simulation.render_trail_alpha = 0.0
+        config.rayweave.grid.origin_m = (-12.0, -7.0, 6.0)
+        config.rayweave.grid.dims = (48, 28, 16)
+        config.rayweave.grid.voxel_size_m = 0.50
+        return
+
+    if config.simulation.camera_layout == "dispersed_perimeter":
+        config.simulation.camera_layout = "room_perimeter"
+        config.simulation.room_size_m = (4.4, 4.4, 2.6)
+        config.simulation.camera_height_m = 1.15
+        config.simulation.camera_target_m = (0.0, 0.35, 1.25)
+        config.simulation.camera_margin_m = 0.20
+        config.simulation.patch_size_px = 5
+        config.simulation.render_background_intensity = 36
+        config.simulation.render_object_intensity = 230
+        config.simulation.render_object_radius_m = 0.06
+        config.simulation.render_object_shape = "disk"
+        config.simulation.render_noise_std = 0.0
+        config.simulation.render_blur_px = 0
+        config.simulation.render_trail_alpha = 0.0
+        config.rayweave.grid.origin_m = (-2.0, -2.0, 0.0)
+        config.rayweave.grid.dims = (96, 96, 64)
+        config.rayweave.grid.voxel_size_m = 0.05
+
+
+def _update_truth_metrics(
+    pipeline: _Pipeline,
+    track: Track | None,
+    truth_position: tuple[float, float, float] | None,
+) -> dict[str, Any]:
+    if track is not None and truth_position is not None:
+        error = tuple(float(track.state[index]) - float(truth_position[index]) for index in range(3))
+        pipeline.truth_error_history.append(error)
+    if not pipeline.truth_error_history:
+        return {
+            "truth_error_m": None,
+            "track_rmse_m": None,
+            "track_axis_rmse_m": None,
+            "truth_error_count": 0,
+        }
+
+    errors = list(pipeline.truth_error_history)
+    latest = errors[-1]
+    current = math.sqrt(sum(value * value for value in latest))
+    axis_rmse = [
+        math.sqrt(sum(error[axis] * error[axis] for error in errors) / len(errors))
+        for axis in range(3)
+    ]
+    rmse = math.sqrt(sum(sum(value * value for value in error) for error in errors) / len(errors))
+    return {
+        "truth_error_m": current,
+        "track_rmse_m": rmse,
+        "track_axis_rmse_m": axis_rmse,
+        "truth_error_count": len(errors),
+    }
+
+
+def _reset_synthetic_loop(pipeline: _Pipeline) -> None:
+    pipeline.aligner = TimeAligner(pipeline.config.fusion.align_window_ns, pipeline.config.fusion.min_cameras_per_frame)
+    pipeline.tracks = TrackManager(pipeline.config.kalman)
+    pipeline.truth_error_history.clear()
+    for state in pipeline.motion_states.values():
+        state.previous_frame = None
+        state.builder = None
 
 
 def _elapsed_ms(start: float) -> float:

@@ -32,11 +32,12 @@ def test_autotune_runs_and_writes_operator_profile(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    result = run_autotune(config, source="rendered", passes=1, max_evals=8)
+    result = run_autotune(config, source="rendered", passes=1, max_evals=8, frames_limit=3)
     profile_path = write_operator_profile(tmp_path / "profiles" / "autotuned.yaml", result)
     profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
 
     assert len(result.evaluations) >= 2
+    assert result.best.summary.frames == 3
     assert result.best.score <= result.baseline.score
     assert profile["settings"]["motion"]["threshold"] == result.best.candidate.motion_threshold
     assert profile["settings"]["rayweave"]["scorer"]["min_supporting_cameras"] >= 1

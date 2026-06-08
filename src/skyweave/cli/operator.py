@@ -13,9 +13,11 @@ from skyweave.calibration.charuco import (
 )
 from skyweave.calibration.charuco_live_state import LiveCameraSettings, LiveTuningSettings
 from skyweave.camera.live_benchmark import DEFAULT_LIVE_BENCHMARK_CONFIG
+from skyweave.config import load_config
 from skyweave.operator.runtime import OperatorRuntime, OperatorRuntimeOptions
 from skyweave.operator.server import OperatorServer
 from skyweave.operator.state import OperatorState, TRACKING_MODES
+from skyweave.sim.scene import SCENE_CHOICES
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--viz-dir", default="viz_web")
     parser.add_argument("--room-assets-dir", default="data/room")
     parser.add_argument("--room-mesh", default=None, help="Optional GLB/GLTF path or URL for the visualizer room mesh.")
+    parser.add_argument("--room-translation", default=None, help="Room mesh translation as x,y,z meters.")
+    parser.add_argument("--room-rotation", default=None, help="Room mesh rotation as x,y,z degrees.")
     args = parser.parse_args(argv)
 
     if args.device and args.devices:
@@ -59,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
 
     devices = _parse_devices(args.device, args.devices)
     labels = _parse_labels(args.labels, len(devices))
+    config = load_config(args.config)
     state = OperatorState(
         devices=devices,
         labels=labels,
@@ -66,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         extrinsics_path=args.extrinsics,
         profile_dir=Path(args.profile_dir),
         requested_mode=args.mode,
+        simulation_scene=_operator_simulation_scene(config.simulation.scene),
     )
     state.live.tuning = LiveTuningSettings(
         camera=LiveCameraSettings(
@@ -83,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.room_mesh:
         state.room.mesh_url = _room_mesh_url(args.room_mesh, Path(args.room_assets_dir))
+    if args.room_translation:
+        state.room.translation_m = _parse_triplet(args.room_translation, "--room-translation")
+    if args.room_rotation:
+        state.room.rotation_deg = _parse_triplet(args.room_rotation, "--room-rotation")
 
     board = CharucoBoardSpec(
         squares_x=args.squares_x,
@@ -127,6 +137,22 @@ def _parse_labels(labels: str | None, count: int) -> list[str]:
     while len(parsed) < count:
         parsed.append(f"cam{len(parsed) + 1}")
     return parsed[:count]
+
+
+def _parse_triplet(value: str, name: str) -> list[float]:
+    parts = [item.strip() for item in value.split(",")]
+    if len(parts) != 3:
+        raise SystemExit(f"{name} must be exactly three comma-separated numbers")
+    try:
+        return [float(item) for item in parts]
+    except ValueError as exc:
+        raise SystemExit(f"{name} must contain only numbers") from exc
+
+
+def _operator_simulation_scene(scene: str) -> str:
+    if scene in SCENE_CHOICES:
+        return scene
+    return SCENE_CHOICES[0]
 
 
 def _room_mesh_url(value: str, assets_dir: Path) -> str:

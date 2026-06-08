@@ -17,11 +17,14 @@ class ScorerConfig(BaseModel):
     min_supporting_cameras: int = 2
     top_k_voxels: int = 5000
     backend: str = "python_numpy"
+    evidence_mode: str = "patches"
 
 
 class PeakConfig(BaseModel):
     threshold_percentile: float = 99.5
     max_peaks: int = 1
+    soft_argmax_radius_voxels: int = 1
+    soft_argmax_beta: float = 6.0
 
 
 class RayweaveConfig(BaseModel):
@@ -65,10 +68,11 @@ class FusionConfig(BaseModel):
 
 
 class KalmanConfig(BaseModel):
-    sigma_accel_mps2: float = 6.0
+    sigma_accel_mps2: float = 3.0
     initial_position_var: float = 1.0
     initial_velocity_var: float = 4.0
-    measurement_var_scale: float = 1.0
+    measurement_var_scale: float = 3.0
+    gate_mahalanobis_squared: float = 35.0
     coast_seconds: float = 2.0
 
 

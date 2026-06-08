@@ -258,8 +258,17 @@ For desktop tuning without physical cameras, run rendered synthetic frames
 through the same frame-diff motion path used by real cameras:
 
 ```bash
-.venv/bin/python -m skyweave.cli.operator --config configs/sim_mvp_ov9281_100hz_15cam_perimeter_numba.yaml --mode rendered --width 640 --height 480 --fps 60 --host 127.0.0.1 --port 8088
-.venv/bin/python -m skyweave.cli.sim_check --source rendered --config configs/sim_mvp_ov9281_100hz_15cam_perimeter_numba.yaml
+.venv/bin/python -m skyweave.cli.operator --config configs/sim_mvp_ov9281_100hz_07cam_perimeter_numba.yaml --mode rendered --width 640 --height 480 --fps 60 --host 127.0.0.1 --port 8088
+.venv/bin/python -m skyweave.cli.sim_check --source rendered --config configs/sim_mvp_ov9281_100hz_07cam_perimeter_numba.yaml
+```
+
+For a pitch demo where dispersed cameras track an aircraft-like target that is
+only about a pixel or two in each camera view, use the pixel-plane rendered
+profile:
+
+```bash
+.venv/bin/python -m skyweave.cli.operator --config configs/sim_pixel_plane_07cam_rendered_numba.yaml --mode rendered --width 640 --height 480 --fps 60 --host 127.0.0.1 --port 8088
+.venv/bin/python -m skyweave.cli.sim_check --source rendered --config configs/sim_pixel_plane_07cam_rendered_numba.yaml
 ```
 
 Room scans belong to the visualizer side. Export a phone scan as GLB/GLTF, place

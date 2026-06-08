@@ -20,3 +20,14 @@ def test_load_room_perimeter_camera_count_profiles() -> None:
         assert config.rayweave.grid.voxel_size_m == 0.05
         assert config.rayweave.scorer.min_supporting_cameras == 2
         assert config.fusion.min_cameras_per_frame == 2
+
+
+def test_load_pixel_plane_rendered_profile() -> None:
+    config = load_config("configs/sim_pixel_plane_07cam_rendered_numba.yaml")
+    assert config.simulation.scene == "pixel_plane_crossing"
+    assert config.simulation.camera_count == 7
+    assert config.simulation.camera_layout == "dispersed_perimeter"
+    assert config.simulation.render_object_radius_m < 0.05
+    assert config.rayweave.grid.voxel_size_m == 0.50
+    assert config.rayweave.scorer.min_supporting_cameras == 3
+    assert config.fusion.min_cameras_per_frame == 3

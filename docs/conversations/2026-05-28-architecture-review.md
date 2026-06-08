@@ -11,10 +11,9 @@ arrays pointed at the sky, while also supporting more precise reconstruction and
 motion profiling of closer drones.
 
 The current demo hardware is OV9281-based. The intended v1 direction is many
-cheap camera nodes, likely Luckfox Pico Ultra-class boards with SC3336 color
+cheap camera nodes, being Luckfox Pico Ultra clone boards with SC3336 color
 MIPI-CSI cameras, reporting to a central Jetson over Ethernet. Later sensors may
-include IMX415-class or better cameras. Later compute may scale from Rubik Pi or
-MacBook Pro M4 to Jetson Orin Nano Super, AGX, or Thor-class hardware.
+include IMX415-class or better cameras.
 
 ## Main Architectural Clarification
 

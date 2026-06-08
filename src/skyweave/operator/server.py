@@ -421,9 +421,12 @@ def _operator_html() -> str:
         <h2>Tracking</h2>
         <div class="grid">
           <label class="full"><span class="label">Mode</span><select id="trackingMode"></select></label>
+          <label class="full"><span class="label">Motion Demo</span><select id="simulationScene"></select></label>
           <div class="metric"><span class="label">Track</span><span class="value" id="trackStatus">--</span></div>
           <div class="metric"><span class="label">Speed</span><span class="value" id="trackSpeed">--</span></div>
           <div class="metric"><span class="label">Position</span><span class="value" id="trackPosition">--</span></div>
+          <div class="metric"><span class="label">Truth Error</span><span class="value" id="truthError">--</span></div>
+          <div class="metric"><span class="label">RMSE</span><span class="value" id="trackRmse">--</span></div>
           <div class="metric"><span class="label">Pipeline</span><span class="value" id="pipeline">--</span></div>
         </div>
       </section>
@@ -431,10 +434,17 @@ def _operator_html() -> str:
         <h2>Global Tuning</h2>
         <div class="sliderGrid">
           <label class="sliderRow"><span class="label">Motion Threshold</span><input data-global-path="motion.threshold" type="range" min="0" max="255" step="1"><span class="sliderValue" data-global-value="motion.threshold">--</span></label>
+          <label class="sliderRow"><span class="label">Merge Radius</span><input data-global-path="motion.merge_radius_px" type="range" min="0" max="24" step="1"><span class="sliderValue" data-global-value="motion.merge_radius_px">--</span></label>
+          <label class="sliderRow"><span class="label">Fill Fragments</span><select data-global-path="motion.fill_fragments"><option value="false">off</option><option value="true">on</option></select><span class="sliderValue" data-global-value="motion.fill_fragments">--</span></label>
+          <label class="sliderRow"><span class="label">Evidence Mode</span><select data-global-path="rayweave.scorer.evidence_mode"></select><span class="sliderValue" data-global-value="rayweave.scorer.evidence_mode">--</span></label>
           <label class="sliderRow"><span class="label">Support Cameras</span><input data-global-path="rayweave.scorer.min_supporting_cameras" type="range" min="1" max="15" step="1"><span class="sliderValue" data-global-value="rayweave.scorer.min_supporting_cameras">--</span></label>
           <label class="sliderRow"><span class="label">Peak Percentile</span><input data-global-path="rayweave.peaks.threshold_percentile" type="range" min="90" max="100" step="0.1"><span class="sliderValue" data-global-value="rayweave.peaks.threshold_percentile">--</span></label>
+          <label class="sliderRow"><span class="label">Max Peaks</span><input data-global-path="rayweave.peaks.max_peaks" type="range" min="1" max="8" step="1"><span class="sliderValue" data-global-value="rayweave.peaks.max_peaks">--</span></label>
+          <label class="sliderRow"><span class="label">Soft Radius</span><input data-global-path="rayweave.peaks.soft_argmax_radius_voxels" type="range" min="0" max="3" step="1"><span class="sliderValue" data-global-value="rayweave.peaks.soft_argmax_radius_voxels">--</span></label>
+          <label class="sliderRow"><span class="label">Soft Beta</span><input data-global-path="rayweave.peaks.soft_argmax_beta" type="range" min="0" max="24" step="0.5"><span class="sliderValue" data-global-value="rayweave.peaks.soft_argmax_beta">--</span></label>
           <label class="sliderRow"><span class="label">Kalman Accel</span><input data-global-path="kalman.sigma_accel_mps2" type="range" min="0" max="24" step="0.1"><span class="sliderValue" data-global-value="kalman.sigma_accel_mps2">--</span></label>
           <label class="sliderRow"><span class="label">Meas. Trust</span><input data-global-path="kalman.measurement_var_scale" type="range" min="0.1" max="12" step="0.1"><span class="sliderValue" data-global-value="kalman.measurement_var_scale">--</span></label>
+          <label class="sliderRow"><span class="label">Gate d2</span><input data-global-path="kalman.gate_mahalanobis_squared" type="range" min="1" max="100" step="0.1"><span class="sliderValue" data-global-value="kalman.gate_mahalanobis_squared">--</span></label>
         </div>
       </section>
       <section>
@@ -471,6 +481,9 @@ def _operator_html() -> str:
           <label><span class="label">Components</span><input data-path="motion.max_components" type="number" min="1"></label>
           <label><span class="label">Patch Side</span><input data-path="motion.max_patch_side_px" type="number" min="1"></label>
           <label><span class="label">Motion Pixels</span><input data-path="motion.max_motion_pixels" type="number" min="1"></label>
+          <label><span class="label">Merge Radius</span><input data-path="motion.merge_radius_px" type="number" min="0"></label>
+          <label><span class="label">Fill Fragments</span><select data-path="motion.fill_fragments"><option value="false">false</option><option value="true">true</option></select></label>
+          <label><span class="label">Evidence Mode</span><select data-path="rayweave.scorer.evidence_mode"></select></label>
         </div>
       </section>
       <section>
@@ -480,6 +493,7 @@ def _operator_html() -> str:
           <label><span class="label">Position Var</span><input data-path="kalman.initial_position_var" type="number" min="0.001" step="0.1"></label>
           <label><span class="label">Velocity Var</span><input data-path="kalman.initial_velocity_var" type="number" min="0.001" step="0.1"></label>
           <label><span class="label">Measurement Scale</span><input data-path="kalman.measurement_var_scale" type="number" min="0.001" step="0.1"></label>
+          <label><span class="label">Gate d2</span><input data-path="kalman.gate_mahalanobis_squared" type="number" min="0.001" step="0.1"></label>
           <label><span class="label">Coast Seconds</span><input data-path="kalman.coast_seconds" type="number" min="0" step="0.1"></label>
         </div>
       </section>
@@ -515,6 +529,8 @@ def _operator_html() -> str:
     const globalTimers = new Map();
     let applying = false;
     let feedSignature = '';
+    let scenePatchTimer = null;
+    let pendingScene = null;
 
     function get(obj, path) {
       return path.split('.').reduce((acc, key) => acc && acc[key], obj);
@@ -534,6 +550,14 @@ def _operator_html() -> str:
     async function patch(payload) {
       await fetch('/api/settings', {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
       await refresh();
+    }
+    function updateSelectOptions(select, values, currentValue, labelFn = value => value) {
+      const signature = values.join('|');
+      if (select.dataset.signature !== signature && document.activeElement !== select) {
+        select.dataset.signature = signature;
+        select.innerHTML = values.map(value => `<option value="${escapeText(value)}">${escapeText(labelFn(value))}</option>`).join('');
+      }
+      if (document.activeElement !== select) select.value = currentValue;
     }
     function wireControls() {
       document.querySelectorAll('[data-path]').forEach(el => {
@@ -570,6 +594,11 @@ def _operator_html() -> str:
         globalReadouts.set(el.dataset.globalValue, el);
       });
       document.getElementById('trackingMode').addEventListener('change', event => patch({tracking: {requested_mode: event.target.value}}));
+      document.getElementById('simulationScene').addEventListener('change', event => {
+        pendingScene = event.target.value;
+        clearTimeout(scenePatchTimer);
+        scenePatchTimer = setTimeout(() => patch({tracking: {simulation_scene: pendingScene}}), 350);
+      });
       document.getElementById('recordStart').addEventListener('click', startRecording);
       document.getElementById('recordStop').addEventListener('click', stopRecording);
       document.getElementById('recordSnapshot').addEventListener('click', saveRecordSnapshot);
@@ -618,11 +647,15 @@ def _operator_html() -> str:
       return String(value).replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
     }
     function formatGlobalValue(path, value) {
+      if (typeof value === 'boolean') return value ? 'on' : 'off';
+      if (typeof value === 'string') return value.replaceAll('_', ' ');
       const number = Number(value);
       if (!Number.isFinite(number)) return '--';
       if (path.includes('threshold_percentile')) return number.toFixed(1) + '%';
       if (path.includes('measurement_var_scale')) return number.toFixed(1) + 'x';
+      if (path.includes('gate_mahalanobis_squared')) return number.toFixed(1);
       if (path.includes('sigma_accel_mps2')) return number.toFixed(1);
+      if (path.includes('soft_argmax_beta')) return number.toFixed(1);
       return Number.isInteger(number) ? String(number) : number.toFixed(2);
     }
     function updateGlobalReadout(path, value) {
@@ -634,6 +667,9 @@ def _operator_html() -> str:
         if (path === 'rayweave.scorer.min_supporting_cameras') {
           const maxSupport = Math.max(1, Number(cameraCount || 1));
           el.max = String(maxSupport);
+        }
+        if (path === 'rayweave.scorer.evidence_mode') {
+          updateSelectOptions(el, settings.rayweave.scorer.evidence_mode_choices || [], get(settings, path));
         }
         const value = get(settings, path);
         if (value !== undefined && document.activeElement !== el) el.value = value;
@@ -665,8 +701,20 @@ def _operator_html() -> str:
         }
       });
     }
+    function desiredVizView(status) {
+      return status.tracking.simulation_scene === 'pixel_plane_crossing' ? 'airspace' : 'room';
+    }
+    function updateVizFrame(status) {
+      const frame = document.getElementById('vizFrame');
+      if (!frame) return;
+      const view = desiredVizView(status);
+      if (frame.dataset.view === view) return;
+      frame.dataset.view = view;
+      frame.src = `/viz/?view=${encodeURIComponent(view)}&v=${encodeURIComponent(view + '-' + status.tracking.revision)}`;
+    }
     function renderStatus(s) {
       applying = true;
+      updateVizFrame(s);
       document.getElementById('runtime').textContent = s.operator.status;
       document.getElementById('runtime').className = 'status ' + (s.operator.error ? 'bad' : 'good');
       document.getElementById('mode').textContent = s.tracking.effective_mode + ' / ' + s.tracking.requested_mode;
@@ -675,12 +723,18 @@ def _operator_html() -> str:
       document.getElementById('cameraButtons').innerHTML = s.cameras.map(cameraButton).join('');
       document.getElementById('selectedCamera').textContent = s.device;
       const modeSelect = document.getElementById('trackingMode');
-      modeSelect.innerHTML = s.tracking.mode_choices.map(m => `<option value="${m}">${m}</option>`).join('');
-      modeSelect.value = s.tracking.requested_mode;
+      updateSelectOptions(modeSelect, s.tracking.mode_choices, s.tracking.requested_mode);
+      const sceneSelect = document.getElementById('simulationScene');
+      if (pendingScene && s.tracking.simulation_scene === pendingScene) pendingScene = null;
+      const sceneValue = pendingScene || s.tracking.simulation_scene;
+      updateSelectOptions(sceneSelect, s.tracking.simulation_scene_choices, sceneValue, scene => scene.replaceAll('_', ' '));
       for (const [path, el] of fields.entries()) {
         const value = get(s.settings, path);
         if (path === 'motion.backend') {
           el.innerHTML = s.settings.motion.backend_choices.map(v => `<option value="${v}">${v}</option>`).join('');
+        }
+        if (path === 'rayweave.scorer.evidence_mode') {
+          el.innerHTML = s.settings.rayweave.scorer.evidence_mode_choices.map(v => `<option value="${v}">${v}</option>`).join('');
         }
         if (value !== undefined && document.activeElement !== el) el.value = value;
       }
@@ -691,13 +745,17 @@ def _operator_html() -> str:
       document.getElementById('trackStatus').textContent = s.track.status + (s.track.track_id ? ` #${s.track.track_id}` : '');
       document.getElementById('trackSpeed').textContent = s.track.speed_mps.toFixed(2) + ' m/s';
       document.getElementById('trackPosition').textContent = s.track.position_m.map(v => v.toFixed(2)).join(', ');
+      document.getElementById('truthError').textContent = s.pipeline.truth_error_m == null ? '--' : (s.pipeline.truth_error_m * 100).toFixed(1) + ' cm';
+      document.getElementById('trackRmse').textContent = s.pipeline.track_rmse_m == null ? '--' : (s.pipeline.track_rmse_m * 100).toFixed(1) + ' cm';
       document.getElementById('pipeline').textContent = `${s.pipeline.packet_count} pkts · ${s.pipeline.blob_count} blobs · ${s.pipeline.measurement_count} meas · ${s.pipeline.track_count} trk`;
       document.getElementById('recordStatus').textContent = s.recording.active ? 'recording' : 'idle';
       document.getElementById('recordFrames').textContent = `${s.recording.frame_count} frames · ${s.recording.image_count} images`;
       document.getElementById('recordPath').textContent = s.recording.output_dir || '--';
+      const axisRmse = s.pipeline.track_axis_rmse_m ? s.pipeline.track_axis_rmse_m.map(v => (v * 100).toFixed(1)).join(', ') + ' cm' : '--';
       const rows = [
         ['Corners', s.corner_count], ['Markers', s.marker_count], ['Detect Rate', (s.detection_rate * 100).toFixed(1) + '%'],
         ['FPS', s.capture_fps.toFixed(1)], ['Latency', s.latency_ms.toFixed(2) + ' ms'], ['Sharpness', s.sharpness.toFixed(1)],
+        ['Truth RMSE xyz', axisRmse],
         ['Stages', `read ${s.pipeline.camera_read_ms.toFixed(1)} · motion ${s.pipeline.motion_ms.toFixed(1)} · preview ${s.pipeline.preview_ms.toFixed(1)} ms`],
         ['Fusion', `align ${s.pipeline.alignment_ms.toFixed(2)} · score ${s.pipeline.scoring_ms.toFixed(2)} · peaks ${s.pipeline.peaks_ms.toFixed(2)} · KF ${s.pipeline.kalman_ms.toFixed(2)} ms`],
         ['Loop Budget', `${s.pipeline.total_ms.toFixed(1)} ms work · ${s.pipeline.target_sleep_ms.toFixed(1)} ms sleep`],

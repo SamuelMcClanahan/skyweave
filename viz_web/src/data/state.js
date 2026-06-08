@@ -1,7 +1,8 @@
 export class VizState {
     constructor() {
         const params = new URLSearchParams(window.location.search);
-        const initialSceneMode = params.get('view') === 'room' ? 'room' : 'map';
+        const viewParam = params.get('view');
+        const initialSceneMode = viewParam === 'room' || viewParam === 'airspace' ? viewParam : 'map';
         this.tracks = new Map();
         this.cameras = new Map();
         this.measurements = [];
@@ -30,11 +31,12 @@ export class VizState {
             rays: 'none'
         };
         this.settings = {
-            autoZoom: true,
-            scaleValue: initialSceneMode === 'room' ? 8 : 50,
+            autoZoom: false,
+            originTrackView: false,
+            scaleValue: initialSceneMode === 'room' ? 8 : initialSceneMode === 'airspace' ? 58 : 50,
             sceneMode: initialSceneMode,
-            glyphScale: initialSceneMode === 'room' ? 0.0015 : 1.0,
-            frustumRangeM: initialSceneMode === 'room' ? 1.0 : 650.0
+            glyphScale: initialSceneMode === 'room' ? 0.0015 : initialSceneMode === 'airspace' ? 0.035 : 1.0,
+            frustumRangeM: initialSceneMode === 'room' ? 1.0 : initialSceneMode === 'airspace' ? 35.0 : 650.0
         };
         this.subscribers = new Set();
     }

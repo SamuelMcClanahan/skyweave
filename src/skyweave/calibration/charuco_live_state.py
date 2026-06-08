@@ -83,6 +83,8 @@ class LiveMotionSettings:
     max_components: int = 8
     max_patch_side_px: int = 64
     max_motion_pixels: int = 225
+    merge_radius_px: int = 0
+    fill_fragments: bool = False
     backend: str = "auto"
 
     def to_motion_config(self) -> MotionPacketConfig:
@@ -92,6 +94,8 @@ class LiveMotionSettings:
             max_components=self.max_components,
             max_patch_side_px=self.max_patch_side_px,
             max_motion_pixels=self.max_motion_pixels,
+            merge_radius_px=self.merge_radius_px,
+            fill_fragments=self.fill_fragments,
             backend=self.backend,
         )
 
@@ -102,6 +106,8 @@ class LiveMotionSettings:
             "max_components": self.max_components,
             "max_patch_side_px": self.max_patch_side_px,
             "max_motion_pixels": self.max_motion_pixels,
+            "merge_radius_px": self.merge_radius_px,
+            "fill_fragments": self.fill_fragments,
             "backend": self.backend,
             "backend_choices": list(MOTION_BACKEND_CHOICES),
         }
@@ -109,10 +115,11 @@ class LiveMotionSettings:
 
 @dataclass
 class LiveKalmanSettings:
-    sigma_accel_mps2: float = 6.0
+    sigma_accel_mps2: float = 3.0
     initial_position_var: float = 1.0
     initial_velocity_var: float = 4.0
-    measurement_var_scale: float = 1.0
+    measurement_var_scale: float = 3.0
+    gate_mahalanobis_squared: float = 35.0
     coast_seconds: float = 2.0
 
     def to_kalman_config(self) -> KalmanConfig:
@@ -121,6 +128,7 @@ class LiveKalmanSettings:
             initial_position_var=self.initial_position_var,
             initial_velocity_var=self.initial_velocity_var,
             measurement_var_scale=self.measurement_var_scale,
+            gate_mahalanobis_squared=self.gate_mahalanobis_squared,
             coast_seconds=self.coast_seconds,
         )
 
@@ -130,6 +138,7 @@ class LiveKalmanSettings:
             "initial_position_var": self.initial_position_var,
             "initial_velocity_var": self.initial_velocity_var,
             "measurement_var_scale": self.measurement_var_scale,
+            "gate_mahalanobis_squared": self.gate_mahalanobis_squared,
             "coast_seconds": self.coast_seconds,
         }
 
@@ -529,6 +538,10 @@ def _update_motion_settings(settings: LiveMotionSettings, payload: dict[str, obj
         settings.max_patch_side_px = _positive_int(payload["max_patch_side_px"], "motion.max_patch_side_px")
     if "max_motion_pixels" in payload:
         settings.max_motion_pixels = _positive_int(payload["max_motion_pixels"], "motion.max_motion_pixels")
+    if "merge_radius_px" in payload:
+        settings.merge_radius_px = _nonnegative_int(payload["merge_radius_px"], "motion.merge_radius_px")
+    if "fill_fragments" in payload:
+        settings.fill_fragments = bool(payload["fill_fragments"])
     if "backend" in payload:
         backend = str(payload["backend"])
         if backend not in MOTION_BACKEND_CHOICES:
@@ -545,6 +558,11 @@ def _update_kalman_settings(settings: LiveKalmanSettings, payload: dict[str, obj
         settings.initial_velocity_var = _positive_float(payload["initial_velocity_var"], "kalman.initial_velocity_var")
     if "measurement_var_scale" in payload:
         settings.measurement_var_scale = _positive_float(payload["measurement_var_scale"], "kalman.measurement_var_scale")
+    if "gate_mahalanobis_squared" in payload:
+        settings.gate_mahalanobis_squared = _positive_float(
+            payload["gate_mahalanobis_squared"],
+            "kalman.gate_mahalanobis_squared",
+        )
     if "coast_seconds" in payload:
         settings.coast_seconds = _nonnegative_float(payload["coast_seconds"], "kalman.coast_seconds")
 

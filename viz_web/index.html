@@ -68,6 +68,10 @@
                 <span class="status-label">LATENCY</span>
                 <span class="status-value" id="latency-display">--</span>
             </div>
+            <div class="status-item">
+                <span class="status-label">RMSE</span>
+                <span class="status-value" id="rmse-display">--</span>
+            </div>
             <div class="status-item connection-status">
                 <span class="status-indicator" id="connection-indicator"></span>
                 <span class="status-value" id="connection-status">CONNECTING</span>
@@ -210,6 +214,7 @@
                         <label class="control-label">Scene</label>
                         <select id="scene-mode">
                             <option value="room">Room</option>
+                            <option value="airspace">Airspace</option>
                             <option value="map">Map</option>
                         </select>
                     </div>
@@ -224,8 +229,14 @@
                     </div>
                     <div class="control-group">
                         <label class="control-label">
-                            <input type="checkbox" id="auto-zoom" checked>
+                            <input type="checkbox" id="auto-zoom">
                             Auto-Zoom to Tracks
+                        </label>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">
+                            <input type="checkbox" id="origin-track-view">
+                            Origin Track View
                         </label>
                     </div>
                     <div class="control-group">
@@ -334,6 +345,6 @@
     </div>
 
     <!-- Load application modules -->
-    <script type="module" src="src/main.js?v=room-mode-scale"></script>
+    <script type="module" src="src/main.js?v=room-fit-demo2"></script>
 </body>
 </html>

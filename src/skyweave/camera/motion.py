@@ -31,6 +31,8 @@ class MotionPacketConfig:
     max_components: int = 8
     max_patch_side_px: int = 64
     max_motion_pixels: int = 225
+    merge_radius_px: int = 0
+    fill_fragments: bool = False
     backend: str = DEFAULT_MOTION_BACKEND
 
 
@@ -93,6 +95,7 @@ class FrameDiffMotionPacketBuilder:
 
     def _motion_evidence(self, diff: np.ndarray) -> tuple[list[MotionBlob], list[MotionPatch]]:
         mask = diff >= self.config.threshold
+        mask = _merge_motion_mask(mask, self.config.merge_radius_px, fill_fragments=self.config.fill_fragments)
         components = _connected_components(mask)
         components = [component for component in components if component.shape[0] >= self.config.min_area_px]
         components.sort(key=lambda component: component.shape[0], reverse=True)
@@ -100,7 +103,7 @@ class FrameDiffMotionPacketBuilder:
         blobs: list[MotionBlob] = []
         patches: list[MotionPatch] = []
         for blob_id, component in enumerate(components[: self.config.max_components]):
-            bounded = _bounded_component(component, self.config)
+            bounded = _bounded_component(component, self.config, fill_fragments=self.config.fill_fragments)
             if bounded.size == 0:
                 continue
             ys = bounded[:, 0]
@@ -109,11 +112,18 @@ class FrameDiffMotionPacketBuilder:
             y0 = int(ys.min())
             x1 = int(xs.max()) + 1
             y1 = int(ys.max()) + 1
-            patch_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-            patch_mask[ys - y0, xs - x0] = 255
+            if self.config.fill_fragments:
+                patch_mask = np.full((y1 - y0, x1 - x0), 255, dtype=np.uint8)
+                ys_rel, xs_rel = np.nonzero(patch_mask)
+                ys = ys_rel + y0
+                xs = xs_rel + x0
+                patch_mask, ys, xs = _limit_patch_pixels(patch_mask, ys, xs, x0, y0, self.config.max_motion_pixels)
+            else:
+                patch_mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+                patch_mask[ys - y0, xs - x0] = 255
 
             values = diff[ys, xs].astype(np.float64)
-            area = int(bounded.shape[0])
+            area = int(xs.size)
             confidence = min(1.0, area / max(float(self.config.max_motion_pixels), 1.0))
             blobs.append(
                 MotionBlob(
@@ -148,6 +158,12 @@ class FrameDiffMotionPacketBuilder:
 
         diff = cv2.absdiff(current, previous)
         _, mask = cv2.threshold(diff, self.config.threshold - 1, 255, cv2.THRESH_BINARY)
+        mask = _merge_motion_mask_opencv(
+            cv2,
+            mask,
+            self.config.merge_radius_px,
+            fill_fragments=self.config.fill_fragments,
+        )
         if cv2.countNonZero(mask) == 0:
             return diff, [], []
         n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=4)
@@ -167,7 +183,13 @@ class FrameDiffMotionPacketBuilder:
             height = int(stats[component_id, cv2.CC_STAT_HEIGHT])
             area = int(stats[component_id, cv2.CC_STAT_AREA])
             bounded = _bounded_bbox(x0, y0, width, height, centroids[component_id], self.config)
-            patch_mask, ys, xs = _extract_opencv_patch(labels, component_id, bounded, self.config.max_motion_pixels)
+            patch_mask, ys, xs = _extract_opencv_patch(
+                labels,
+                component_id,
+                bounded,
+                self.config.max_motion_pixels,
+                fill_fragments=self.config.fill_fragments,
+            )
             if patch_mask.size == 0 or xs.size == 0:
                 continue
 
@@ -212,6 +234,12 @@ class FrameDiffMotionPacketBuilder:
 
         diff = cv2.absdiff(current, previous)
         _, mask = cv2.threshold(diff, self.config.threshold - 1, 255, cv2.THRESH_BINARY)
+        mask = _merge_motion_mask_opencv(
+            cv2,
+            mask,
+            self.config.merge_radius_px,
+            fill_fragments=self.config.fill_fragments,
+        )
         if cv2.countNonZero(mask) == 0:
             return diff, [], []
 
@@ -349,7 +377,7 @@ def _connected_components(mask: np.ndarray) -> list[np.ndarray]:
     return components
 
 
-def _bounded_component(component: np.ndarray, config: MotionPacketConfig) -> np.ndarray:
+def _bounded_component(component: np.ndarray, config: MotionPacketConfig, *, fill_fragments: bool = False) -> np.ndarray:
     bounded = component
     side = max(config.max_patch_side_px, 1)
     ys = bounded[:, 0]
@@ -362,7 +390,7 @@ def _bounded_component(component: np.ndarray, config: MotionPacketConfig) -> np.
         keep = (x0 <= xs) & (xs < x0 + side) & (y0 <= ys) & (ys < y0 + side)
         bounded = bounded[keep]
     max_pixels = max(config.max_motion_pixels, 1)
-    if bounded.shape[0] > max_pixels:
+    if not fill_fragments and bounded.shape[0] > max_pixels:
         indices = np.linspace(0, bounded.shape[0] - 1, max_pixels, dtype=np.int32)
         bounded = bounded[indices]
     return bounded
@@ -394,9 +422,13 @@ def _extract_opencv_patch(
     component_id: int,
     bbox: tuple[int, int, int, int],
     max_motion_pixels: int,
+    *,
+    fill_fragments: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     x0, y0, width, height = bbox
     component_mask = labels[y0 : y0 + height, x0 : x0 + width] == component_id
+    if fill_fragments:
+        component_mask = _fill_bbox_mask(component_mask)
     ys_rel, xs_rel = np.nonzero(component_mask)
     if xs_rel.size == 0:
         return np.empty((0, 0), dtype=np.uint8), ys_rel, xs_rel
@@ -410,6 +442,90 @@ def _extract_opencv_patch(
     patch_mask = np.zeros((height, width), dtype=np.uint8)
     patch_mask[ys_rel, xs_rel] = 255
     return patch_mask, ys, xs
+
+
+def _merge_motion_mask(mask: np.ndarray, radius: int, *, fill_fragments: bool = False) -> np.ndarray:
+    radius = int(radius)
+    if radius <= 0 or not np.any(mask):
+        return mask
+    dilated = _binary_dilate(mask, radius)
+    if fill_fragments:
+        return dilated
+    return _binary_erode(dilated, radius)
+
+
+def _merge_motion_mask_opencv(cv2_module, mask: np.ndarray, radius: int, *, fill_fragments: bool = False) -> np.ndarray:
+    radius = int(radius)
+    if radius <= 0:
+        return mask
+    kernel_size = radius * 2 + 1
+    kernel = cv2_module.getStructuringElement(cv2_module.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    if fill_fragments:
+        return cv2_module.dilate(mask, kernel, iterations=1)
+    return cv2_module.morphologyEx(mask, cv2_module.MORPH_CLOSE, kernel)
+
+
+def _binary_dilate(mask: np.ndarray, radius: int) -> np.ndarray:
+    offsets = _disk_offsets(radius)
+    padded = np.pad(mask.astype(bool), radius, mode="constant", constant_values=False)
+    output = np.zeros(mask.shape, dtype=bool)
+    height, width = mask.shape
+    for dy, dx in offsets:
+        y0 = radius + dy
+        x0 = radius + dx
+        output |= padded[y0 : y0 + height, x0 : x0 + width]
+    return output
+
+
+def _binary_erode(mask: np.ndarray, radius: int) -> np.ndarray:
+    offsets = _disk_offsets(radius)
+    padded = np.pad(mask.astype(bool), radius, mode="constant", constant_values=True)
+    output = np.ones(mask.shape, dtype=bool)
+    height, width = mask.shape
+    for dy, dx in offsets:
+        y0 = radius + dy
+        x0 = radius + dx
+        output &= padded[y0 : y0 + height, x0 : x0 + width]
+    return output
+
+
+def _disk_offsets(radius: int) -> list[tuple[int, int]]:
+    radius = max(int(radius), 0)
+    r2 = radius * radius
+    return [
+        (dy, dx)
+        for dy in range(-radius, radius + 1)
+        for dx in range(-radius, radius + 1)
+        if dy * dy + dx * dx <= r2
+    ]
+
+
+def _fill_bbox_mask(mask: np.ndarray) -> np.ndarray:
+    ys, xs = np.nonzero(mask)
+    if xs.size == 0:
+        return mask
+    filled = np.zeros(mask.shape, dtype=bool)
+    filled[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1] = True
+    return filled
+
+
+def _limit_patch_pixels(
+    patch_mask: np.ndarray,
+    ys: np.ndarray,
+    xs: np.ndarray,
+    x0: int,
+    y0: int,
+    max_motion_pixels: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    max_pixels = max(max_motion_pixels, 1)
+    if xs.size <= max_pixels:
+        return patch_mask, ys, xs
+    indices = np.linspace(0, xs.size - 1, max_pixels, dtype=np.int32)
+    ys = ys[indices]
+    xs = xs[indices]
+    sparse_mask = np.zeros(patch_mask.shape, dtype=np.uint8)
+    sparse_mask[ys - y0, xs - x0] = 255
+    return sparse_mask, ys, xs
 
 
 def _extract_contour_patch(

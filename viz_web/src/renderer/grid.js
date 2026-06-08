@@ -5,10 +5,13 @@ const GRID_MIN_SIZE_M = 100;
 const GRID_MAX_SIZE_M = 20000;
 const ROOM_GRID_MIN_SIZE_M = 3;
 const ROOM_GRID_MAX_SIZE_M = 16;
+const AIRSPACE_GRID_MIN_SIZE_M = 24;
+const AIRSPACE_GRID_MAX_SIZE_M = 180;
 const GRID_DIVISIONS = 50;
 const MARKER_COUNT_PER_AXIS = 5;
 const LABEL_SCALE = [40, 10, 1];
 const ROOM_LABEL_SCALE = [0.35, 0.09, 1];
+const AIRSPACE_LABEL_SCALE = [1.8, 0.45, 1];
 
 export class GridRenderer {
     constructor(scene) {
@@ -74,7 +77,8 @@ export class GridRenderer {
 
         const sprite = new THREE.Sprite(material);
         sprite.position.copy(position);
-        sprite.scale.set(...(sceneMode === 'room' ? ROOM_LABEL_SCALE : LABEL_SCALE));
+        const scale = sceneMode === 'room' ? ROOM_LABEL_SCALE : sceneMode === 'airspace' ? AIRSPACE_LABEL_SCALE : LABEL_SCALE;
+        sprite.scale.set(...scale);
 
         return sprite;
     }
@@ -85,8 +89,16 @@ export class GridRenderer {
 
     updateScale(scaleValue, sceneMode = 'map') {
         const t = Math.min(100, Math.max(0, scaleValue)) / 100;
-        const minSize = sceneMode === 'room' ? ROOM_GRID_MIN_SIZE_M : GRID_MIN_SIZE_M;
-        const maxSize = sceneMode === 'room' ? ROOM_GRID_MAX_SIZE_M : GRID_MAX_SIZE_M;
+        const minSize = sceneMode === 'room'
+            ? ROOM_GRID_MIN_SIZE_M
+            : sceneMode === 'airspace'
+                ? AIRSPACE_GRID_MIN_SIZE_M
+                : GRID_MIN_SIZE_M;
+        const maxSize = sceneMode === 'room'
+            ? ROOM_GRID_MAX_SIZE_M
+            : sceneMode === 'airspace'
+                ? AIRSPACE_GRID_MAX_SIZE_M
+                : GRID_MAX_SIZE_M;
         const size = minSize * Math.pow(maxSize / minSize, t);
 
         this.clearGrid();

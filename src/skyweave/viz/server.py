@@ -31,6 +31,9 @@ class VizServer:
         self.app.router.add_get("/", self._handle_index)
         self.app.router.add_static("/src", self.viz_dir / "src", name="src")
         self.app.router.add_static("/styles", self.viz_dir / "styles", name="styles")
+        vendor_dir = self.viz_dir / "vendor"
+        if vendor_dir.exists():
+            self.app.router.add_static("/vendor", vendor_dir, name="vendor")
         assets_dir = self.viz_dir / "assets"
         if assets_dir.exists():
             self.app.router.add_static("/assets", assets_dir, name="assets")

@@ -11,6 +11,8 @@ const ARROW_HEAD_WIDTH_M = 8;
 const MIN_DIRECTION_SPEED_MPS = 0.01;
 const SELECTED_TRACK_COLOR = 0x00e5ff;
 const SELECTED_HALO_RADIUS_M = TRACK_RADIUS_M * 1.8;
+const AIRSPACE_TRACK_SCALE_FACTOR = 0.28;
+const AIRSPACE_PLANE_BASE_GLYPH_SCALE = 0.035;
 
 export class TrackRenderer {
     constructor(scene) {
@@ -24,14 +26,18 @@ export class TrackRenderer {
         this.velocityArrows = new Map();
         this.labels = new Map();
         this.selectionHalos = new Map();
+        this.planeModels = new Map();
         this.glyphScale = 1.0;
+        this.sceneMode = 'map';
     }
 
     update(tracks, visibility, selectedTrackId, settings = {}) {
         const nextGlyphScale = Number(settings.glyphScale || 1.0);
-        if (nextGlyphScale !== this.glyphScale) {
+        const nextSceneMode = String(settings.sceneMode || 'map');
+        if (nextGlyphScale !== this.glyphScale || nextSceneMode !== this.sceneMode) {
             Array.from(this.trackMeshes.keys()).forEach(trackId => this.removeTrack(trackId));
             this.glyphScale = nextGlyphScale;
+            this.sceneMode = nextSceneMode;
         }
 
         // Clear old tracks that no longer exist
@@ -83,6 +89,10 @@ export class TrackRenderer {
             emissiveIntensity = 0.15;
         }
         trackMesh.material.emissiveIntensity = emissiveIntensity;
+
+        if (this.planeModels.has(track.id)) {
+            this.updatePlaneModel(track, position, velocity, color, emissiveIntensity, isSelected);
+        }
 
         // Update confidence halo
         if (this.selectionHalos.has(track.id)) {
@@ -150,9 +160,9 @@ export class TrackRenderer {
                 arrow.setDirection(velocity.clone().normalize());
             }
             arrow.setLength(
-                Math.max(MIN_ARROW_LENGTH_M * this.glyphScale, speed * ARROW_SPEED_SCALE * this.glyphScale),
-                ARROW_HEAD_LENGTH_M * this.glyphScale,
-                ARROW_HEAD_WIDTH_M * this.glyphScale
+                Math.max(MIN_ARROW_LENGTH_M * this.getTrackGlyphScale(), speed * ARROW_SPEED_SCALE * this.getTrackGlyphScale()),
+                ARROW_HEAD_LENGTH_M * this.getTrackGlyphScale(),
+                ARROW_HEAD_WIDTH_M * this.getTrackGlyphScale()
             );
         }
 
@@ -160,28 +170,37 @@ export class TrackRenderer {
         if (this.labels.has(track.id)) {
             const label = this.labels.get(track.id);
             label.position.copy(position);
-            label.position.z += TRACK_LABEL_OFFSET_M * this.glyphScale;
+            label.position.z += TRACK_LABEL_OFFSET_M * this.getTrackGlyphScale();
         }
     }
 
     createTrackMesh(track) {
         const group = new THREE.Group();
+        const trackGlyphScale = this.getTrackGlyphScale();
 
         // Main track sphere
-        const geometry = new THREE.SphereGeometry(TRACK_RADIUS_M * this.glyphScale, 24, 24);
+        const geometry = new THREE.SphereGeometry(TRACK_RADIUS_M * trackGlyphScale, 24, 24);
         const material = new THREE.MeshStandardMaterial({
             color: this.getTrackColor(track),
             emissive: this.getTrackColor(track),
             emissiveIntensity: 0.3,
             metalness: 0.1,
-            roughness: 0.6
+            roughness: 0.6,
+            transparent: this.sceneMode === 'airspace',
+            opacity: this.sceneMode === 'airspace' ? 0.42 : 1.0
         });
 
         const mesh = new THREE.Mesh(geometry, material);
         mesh.userData.trackId = track.id;
         group.add(mesh);
 
-        const haloGeometry = new THREE.SphereGeometry(SELECTED_HALO_RADIUS_M * this.glyphScale, 24, 24);
+        if (this.sceneMode === 'airspace') {
+            const planeModel = this.createPlaneModel(track);
+            group.add(planeModel);
+            this.planeModels.set(track.id, planeModel);
+        }
+
+        const haloGeometry = new THREE.SphereGeometry(SELECTED_HALO_RADIUS_M * trackGlyphScale, 24, 24);
         const haloMaterial = new THREE.MeshBasicMaterial({
             color: SELECTED_TRACK_COLOR,
             transparent: true,
@@ -199,10 +218,10 @@ export class TrackRenderer {
         const arrow = new THREE.ArrowHelper(
             new THREE.Vector3(1, 0, 0),
             new THREE.Vector3(0, 0, 0),
-            MIN_ARROW_LENGTH_M * this.glyphScale,
+            MIN_ARROW_LENGTH_M * trackGlyphScale,
             arrowColor,
-            ARROW_HEAD_LENGTH_M * this.glyphScale,
-            ARROW_HEAD_WIDTH_M * this.glyphScale
+            ARROW_HEAD_LENGTH_M * trackGlyphScale,
+            ARROW_HEAD_WIDTH_M * trackGlyphScale
         );
         group.add(arrow);
         this.velocityArrows.set(track.id, arrow);
@@ -214,6 +233,77 @@ export class TrackRenderer {
 
         this.trackMeshes.set(track.id, mesh);
         this.trackGroup.add(group);
+    }
+
+    getTrackGlyphScale() {
+        if (this.sceneMode === 'airspace') {
+            return this.glyphScale * AIRSPACE_TRACK_SCALE_FACTOR;
+        }
+        return this.glyphScale;
+    }
+
+    getPlaneModelScale() {
+        return Math.max(0.35, Math.min(2.0, this.glyphScale / AIRSPACE_PLANE_BASE_GLYPH_SCALE));
+    }
+
+    createPlaneModel(track) {
+        const color = this.getTrackColor(track);
+        const material = new THREE.MeshStandardMaterial({
+            color,
+            emissive: color,
+            emissiveIntensity: 0.55,
+            metalness: 0.15,
+            roughness: 0.42
+        });
+
+        const model = new THREE.Group();
+        model.name = `tiny-plane-${track.id}`;
+        model.userData.trackId = track.id;
+        model.scale.setScalar(this.getPlaneModelScale());
+
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.055, 0.045), material);
+        body.userData.trackId = track.id;
+        model.add(body);
+
+        const nose = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.16, 10), material);
+        nose.rotation.z = -Math.PI / 2;
+        nose.position.x = 0.31;
+        nose.userData.trackId = track.id;
+        model.add(nose);
+
+        const wing = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.42, 0.018), material);
+        wing.position.x = -0.02;
+        wing.userData.trackId = track.id;
+        model.add(wing);
+
+        const tail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.22, 0.018), material);
+        tail.position.x = -0.23;
+        tail.position.z = 0.035;
+        tail.userData.trackId = track.id;
+        model.add(tail);
+
+        return model;
+    }
+
+    updatePlaneModel(track, position, velocity, color, emissiveIntensity, isSelected) {
+        const model = this.planeModels.get(track.id);
+        model.position.copy(position);
+        const baseScale = this.getPlaneModelScale();
+        model.scale.setScalar(baseScale * (isSelected ? 1.35 : 1.0));
+
+        if (velocity.lengthSq() > MIN_DIRECTION_SPEED_MPS * MIN_DIRECTION_SPEED_MPS) {
+            const forward = velocity.clone().normalize();
+            const quaternion = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), forward);
+            model.quaternion.copy(quaternion);
+        }
+
+        model.traverse(child => {
+            if (child.material) {
+                child.material.color.setHex(color);
+                child.material.emissive.setHex(color);
+                child.material.emissiveIntensity = Math.max(0.35, emissiveIntensity);
+            }
+        });
     }
 
     updateTrail(track) {
@@ -269,6 +359,21 @@ export class TrackRenderer {
             halo.geometry.dispose();
             halo.material.dispose();
             this.selectionHalos.delete(trackId);
+        }
+
+        if (this.planeModels.has(trackId)) {
+            const planeModel = this.planeModels.get(trackId);
+            const disposedMaterials = new Set();
+            planeModel.traverse(child => {
+                if (child.geometry) {
+                    child.geometry.dispose();
+                }
+                if (child.material && !disposedMaterials.has(child.material)) {
+                    child.material.dispose();
+                    disposedMaterials.add(child.material);
+                }
+            });
+            this.planeModels.delete(trackId);
         }
 
         if (this.trailMeshes.has(trackId)) {
@@ -327,9 +432,10 @@ export class TrackRenderer {
         });
 
         const sprite = new THREE.Sprite(material);
+        const trackGlyphScale = this.getTrackGlyphScale();
         sprite.scale.set(
-            TRACK_LABEL_SCALE[0] * this.glyphScale,
-            TRACK_LABEL_SCALE[1] * this.glyphScale,
+            TRACK_LABEL_SCALE[0] * trackGlyphScale,
+            TRACK_LABEL_SCALE[1] * trackGlyphScale,
             TRACK_LABEL_SCALE[2]
         );
 

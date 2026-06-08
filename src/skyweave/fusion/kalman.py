@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Sequence
 from typing import Literal
 
 import numpy as np
@@ -25,23 +26,27 @@ class TrackManager:
         self._miss_count = 0
         self._trail: deque[tuple[float, float, float, int]] = deque(maxlen=200)
 
-    def update(self, measurement: Measurement3D | None, ts_ns: int) -> Track | None:
+    def update(self, measurement: Measurement3D | Sequence[Measurement3D] | None, ts_ns: int) -> Track | None:
+        candidates = _measurement_candidates(measurement)
         if self._kf is None:
-            if measurement is None:
+            if not candidates:
                 return None
+            measurement = max(candidates, key=lambda item: item.score)
             self._initialize(measurement)
             return self._to_track("candidate")
 
         if self._coast_expired(ts_ns):
             self._retire()
-            if measurement is None:
+            if not candidates:
                 return None
+            measurement = max(candidates, key=lambda item: item.score)
             self._initialize(measurement)
             return self._to_track("candidate")
 
         self._predict(_elapsed_seconds(self._last_ts_ns, ts_ns))
         self._last_ts_ns = ts_ns
 
+        measurement = self._select_measurement(candidates)
         if measurement is None:
             self._miss_count += 1
             return self._to_track("coasting")
@@ -84,6 +89,26 @@ class TrackManager:
         self._kf.R = _measurement_noise_matrix(measurement, self.config.measurement_var_scale)
         self._kf.update(_measurement_vector(measurement))
         self._last_ts_ns = measurement.ts_ns
+
+    def _select_measurement(self, candidates: Sequence[Measurement3D]) -> Measurement3D | None:
+        if not candidates:
+            return None
+        if self._kf is None:
+            return max(candidates, key=lambda item: item.score)
+
+        scored: list[tuple[float, float, Measurement3D]] = []
+        for measurement in candidates:
+            distance_squared = _mahalanobis_squared(self._kf, measurement, self.config.measurement_var_scale)
+            if not np.isfinite(distance_squared):
+                continue
+            gate = float(self.config.gate_mahalanobis_squared)
+            if gate > 0.0 and distance_squared > gate:
+                continue
+            scored.append((distance_squared, -float(measurement.score), measurement))
+        if not scored:
+            return None
+        scored.sort(key=lambda item: (item[0], item[1]))
+        return scored[0][2]
 
     def _append_trail_point(self) -> None:
         state = self._state()
@@ -248,6 +273,27 @@ def _measurement_vector(measurement: Measurement3D) -> np.ndarray:
 
 def _measurement_noise_matrix(measurement: Measurement3D, scale: float) -> np.ndarray:
     return np.asarray(measurement.covariance, dtype=np.float64) * scale
+
+
+def _measurement_candidates(measurement: Measurement3D | Sequence[Measurement3D] | None) -> list[Measurement3D]:
+    if measurement is None:
+        return []
+    if isinstance(measurement, Measurement3D):
+        return [measurement]
+    return list(measurement)
+
+
+def _mahalanobis_squared(kf: KalmanFilter, measurement: Measurement3D, measurement_var_scale: float) -> float:
+    h = np.asarray(kf.H, dtype=np.float64)
+    state = np.asarray(kf.x, dtype=np.float64).reshape(6, 1)
+    innovation = _measurement_vector(measurement) - h @ state
+    innovation_covariance = h @ np.asarray(kf.P, dtype=np.float64) @ h.T
+    innovation_covariance += _measurement_noise_matrix(measurement, measurement_var_scale)
+    try:
+        solved = np.linalg.solve(innovation_covariance, innovation)
+    except np.linalg.LinAlgError:
+        solved = np.linalg.pinv(innovation_covariance) @ innovation
+    return float((innovation.T @ solved).item())
 
 
 def _elapsed_seconds(last_ts_ns: int | None, ts_ns: int) -> float:

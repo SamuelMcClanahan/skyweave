@@ -31,8 +31,14 @@ class PeakExtractor:
         peaks: list[VoxelPeak] = []
         for component in components:
             component = sorted(component, key=lambda idx: candidates[idx], reverse=True)
-            weights = np.asarray([candidates[idx] for idx in component], dtype=np.float64)
-            centers = self.grid.origin + (np.asarray(component, dtype=np.float64) + 0.5) * self.grid.voxel_size
+            peak_idx = component[0]
+            local_indices, local_scores = _local_peak_scores(scored.dense_scores, peak_idx, self.config.soft_argmax_radius_voxels)
+            if local_indices:
+                centers = self.grid.origin + (np.asarray(local_indices, dtype=np.float64) + 0.5) * self.grid.voxel_size
+                weights = _softmax_weights(local_scores, self.config.soft_argmax_beta)
+            else:
+                weights = np.asarray([candidates[idx] for idx in component], dtype=np.float64)
+                centers = self.grid.origin + (np.asarray(component, dtype=np.float64) + 0.5) * self.grid.voxel_size
             total = float(np.sum(weights))
             if total <= 0:
                 continue
@@ -91,6 +97,40 @@ def _neighbors(idx: tuple[int, int, int]):
     ix, iy, iz = idx
     for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
         yield ix + dx, iy + dy, iz + dz
+
+
+def _local_peak_scores(
+    scores: np.ndarray,
+    peak_idx: tuple[int, int, int],
+    radius: int,
+) -> tuple[list[tuple[int, int, int]], np.ndarray]:
+    radius = max(int(radius), 0)
+    px, py, pz = peak_idx
+    indices: list[tuple[int, int, int]] = []
+    values: list[float] = []
+    for ix in range(max(px - radius, 0), min(px + radius + 1, scores.shape[0])):
+        for iy in range(max(py - radius, 0), min(py + radius + 1, scores.shape[1])):
+            for iz in range(max(pz - radius, 0), min(pz + radius + 1, scores.shape[2])):
+                value = float(scores[ix, iy, iz])
+                if value <= 0.0:
+                    continue
+                indices.append((ix, iy, iz))
+                values.append(value)
+    return indices, np.asarray(values, dtype=np.float64)
+
+
+def _softmax_weights(scores: np.ndarray, beta: float) -> np.ndarray:
+    if scores.size == 0:
+        return scores
+    beta = max(float(beta), 0.0)
+    if beta <= 0.0:
+        return np.ones_like(scores, dtype=np.float64) / float(scores.size)
+    shifted = scores - float(np.max(scores))
+    weights = np.exp(beta * shifted)
+    total = float(np.sum(weights))
+    if total <= 0.0 or not np.isfinite(total):
+        return np.ones_like(scores, dtype=np.float64) / float(scores.size)
+    return weights / total
 
 
 def _supporting_cameras(

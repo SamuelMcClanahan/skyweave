@@ -24,23 +24,40 @@ def test_operator_state_updates_settings_tracking_and_room(tmp_path: Path) -> No
     snapshot = state.apply_payload(
         {
             "camera": {"fps": 60, "width": 640, "height": 480},
-            "motion": {"threshold": 48, "backend": "python"},
-            "kalman": {"sigma_accel_mps2": 3.5},
+            "motion": {"threshold": 48, "backend": "python", "merge_radius_px": 6, "fill_fragments": True},
+            "kalman": {"sigma_accel_mps2": 3.5, "gate_mahalanobis_squared": 14.2},
             "fusion": {"min_cameras_per_frame": 3, "pixel_noise_px": 1.7},
-            "rayweave": {"scorer": {"min_supporting_cameras": 3}, "peaks": {"threshold_percentile": 98.4}},
-            "tracking": {"requested_mode": "stress"},
+            "rayweave": {
+                "scorer": {"min_supporting_cameras": 3, "evidence_mode": "centroids"},
+                "peaks": {
+                    "threshold_percentile": 98.4,
+                    "max_peaks": 4,
+                    "soft_argmax_radius_voxels": 2,
+                    "soft_argmax_beta": 4.5,
+                },
+            },
+            "tracking": {"requested_mode": "stress", "simulation_scene": "s_curve"},
             "room": {"mesh_url": "/room-assets/room.glb", "translation_m": [1, 2, 3]},
         }
     )
 
     assert snapshot["settings"]["camera"]["fps"] == 60
     assert snapshot["settings"]["motion"]["threshold"] == 48
+    assert snapshot["settings"]["motion"]["merge_radius_px"] == 6
+    assert snapshot["settings"]["motion"]["fill_fragments"] is True
     assert snapshot["settings"]["kalman"]["sigma_accel_mps2"] == 3.5
+    assert snapshot["settings"]["kalman"]["gate_mahalanobis_squared"] == 14.2
     assert snapshot["settings"]["fusion"]["min_cameras_per_frame"] == 3
     assert snapshot["settings"]["fusion"]["pixel_noise_px"] == 1.7
     assert snapshot["settings"]["rayweave"]["scorer"]["min_supporting_cameras"] == 3
+    assert snapshot["settings"]["rayweave"]["scorer"]["evidence_mode"] == "centroids"
     assert snapshot["settings"]["rayweave"]["peaks"]["threshold_percentile"] == 98.4
+    assert snapshot["settings"]["rayweave"]["peaks"]["max_peaks"] == 4
+    assert snapshot["settings"]["rayweave"]["peaks"]["soft_argmax_radius_voxels"] == 2
+    assert snapshot["settings"]["rayweave"]["peaks"]["soft_argmax_beta"] == 4.5
     assert snapshot["tracking"]["requested_mode"] == "stress"
+    assert snapshot["tracking"]["simulation_scene"] == "s_curve"
+    assert "orbit" in snapshot["tracking"]["simulation_scene_choices"]
     assert snapshot["tracking"]["revision"] == 1
     assert snapshot["room"]["mesh_url"] == "/room-assets/room.glb"
     assert snapshot["cameras"][0]["label"] == "cam1"
@@ -60,8 +77,9 @@ def test_operator_profiles_round_trip(tmp_path: Path) -> None:
     state.apply_payload(
         {
             "camera": {"fps": 45},
-            "tracking": {"requested_mode": "stress"},
-            "rayweave": {"scorer": {"min_supporting_cameras": 4}},
+            "motion": {"merge_radius_px": 5, "fill_fragments": True},
+            "tracking": {"requested_mode": "stress", "simulation_scene": "zigzag"},
+            "rayweave": {"scorer": {"min_supporting_cameras": 4, "evidence_mode": "centroids"}},
         }
     )
 
@@ -69,16 +87,21 @@ def test_operator_profiles_round_trip(tmp_path: Path) -> None:
     state.apply_payload(
         {
             "camera": {"fps": 20},
+            "motion": {"merge_radius_px": 0, "fill_fragments": False},
             "tracking": {"requested_mode": "auto"},
-            "rayweave": {"scorer": {"min_supporting_cameras": 2}},
+            "rayweave": {"scorer": {"min_supporting_cameras": 2, "evidence_mode": "patches"}},
         }
     )
     loaded = load_profile(state, "room-test")
 
     assert saved["name"] == "room-test"
     assert loaded["status"]["settings"]["camera"]["fps"] == 45
+    assert loaded["status"]["settings"]["motion"]["merge_radius_px"] == 5
+    assert loaded["status"]["settings"]["motion"]["fill_fragments"] is True
     assert loaded["status"]["tracking"]["requested_mode"] == "stress"
+    assert loaded["status"]["tracking"]["simulation_scene"] == "zigzag"
     assert loaded["status"]["settings"]["rayweave"]["scorer"]["min_supporting_cameras"] == 4
+    assert loaded["status"]["settings"]["rayweave"]["scorer"]["evidence_mode"] == "centroids"
     assert normalize_profile_name("room-test.yaml") == "room-test"
 
 
@@ -211,6 +234,7 @@ def test_runtime_stress_pipeline_uses_configured_synthetic_camera_count(tmp_path
     runtime = OperatorRuntime(state, CharucoBoardSpec(8, 6, 0.03, 0.0216, "DICT_4X4"))
     state.apply_payload(
         {
+            "tracking": {"simulation_scene": "s_curve"},
             "fusion": {"min_cameras_per_frame": 3, "pixel_noise_px": 2.0},
             "rayweave": {"scorer": {"min_supporting_cameras": 3}, "peaks": {"threshold_percentile": 97.5}},
         }
@@ -222,6 +246,7 @@ def test_runtime_stress_pipeline_uses_configured_synthetic_camera_count(tmp_path
     assert pipeline.effective_mode == "stress"
     assert len(pipeline.cameras) == 7
     assert len(pipeline.viz_cameras) == 7
+    assert pipeline.config.simulation.scene == "s_curve"
     assert pipeline.config.fusion.min_cameras_per_frame == 3
     assert pipeline.config.fusion.pixel_noise_px == 2.0
     assert pipeline.config.rayweave.scorer.min_supporting_cameras == 3
@@ -259,6 +284,7 @@ def test_runtime_rendered_pipeline_uses_frames_without_physical_cameras(tmp_path
         extrinsics_path=str(tmp_path / "missing.yaml"),
         profile_dir=tmp_path / "profiles",
         requested_mode="rendered",
+        simulation_scene="orbit",
     )
     runtime = OperatorRuntime(state, CharucoBoardSpec(8, 6, 0.03, 0.0216, "DICT_4X4"))
 
@@ -268,6 +294,7 @@ def test_runtime_rendered_pipeline_uses_frames_without_physical_cameras(tmp_path
 
     snapshot = state.snapshot()
     assert pipeline.effective_mode == "rendered"
+    assert pipeline.config.simulation.scene == "orbit"
     assert len(pipeline.rendered_frames) == 4
     assert len(pipeline.cameras) == 5
     assert first_frame is not None
@@ -276,6 +303,33 @@ def test_runtime_rendered_pipeline_uses_frames_without_physical_cameras(tmp_path
     assert snapshot["cameras"][4]["device"] == "rendered://cam5"
     assert sum(len(packet.blobs) for packet in first_packets) == 0
     assert sum(len(packet.blobs) for packet in second_packets) > 0
+
+
+def test_runtime_switches_between_plane_and_room_scene_presets(tmp_path: Path) -> None:
+    state = OperatorState(
+        devices=["/dev/video0"],
+        labels=["cam1"],
+        config_path="configs/sim_pixel_plane_07cam_rendered_numba.yaml",
+        extrinsics_path=str(tmp_path / "missing.yaml"),
+        profile_dir=tmp_path / "profiles",
+        requested_mode="rendered",
+        simulation_scene="pixel_plane_crossing",
+    )
+    runtime = OperatorRuntime(state, CharucoBoardSpec(8, 6, 0.03, 0.0216, "DICT_4X4"))
+
+    plane = runtime._build_pipeline(state.live.settings_snapshot()[0])
+    assert plane.config.simulation.scene == "pixel_plane_crossing"
+    assert plane.config.simulation.camera_layout == "dispersed_perimeter"
+    assert plane.config.rayweave.grid.origin_m == (-12.0, -7.0, 6.0)
+    assert plane.config.rayweave.grid.voxel_size_m == 0.50
+
+    state.apply_payload({"tracking": {"simulation_scene": "paper_airplane_arc"}})
+    room = runtime._build_pipeline(state.live.settings_snapshot()[0])
+    assert room.config.simulation.scene == "paper_airplane_arc"
+    assert room.config.simulation.camera_layout == "room_perimeter"
+    assert room.config.simulation.camera_target_m == (0.0, 0.35, 1.25)
+    assert room.config.rayweave.grid.origin_m == (-2.0, -2.0, 0.0)
+    assert room.config.rayweave.grid.voxel_size_m == 0.05
 
 
 def test_operator_recording_writes_events_and_images(tmp_path: Path) -> None:

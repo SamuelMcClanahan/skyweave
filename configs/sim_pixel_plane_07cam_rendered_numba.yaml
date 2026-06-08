@@ -1,0 +1,62 @@
+simulation:
+  scene: "pixel_plane_crossing"
+  frames: 360
+  timestep_hz: 100.0
+  image_width: 1280
+  image_height: 800
+  focal_length_px: 720.0
+  camera_count: 7
+  camera_layout: "dispersed_perimeter"
+  room_size_m: [42.0, 24.0, 14.0]
+  camera_height_m: 1.6
+  camera_target_m: [0.0, 0.0, 8.8]
+  camera_margin_m: 1.5
+  patch_size_px: 3
+  pixel_noise_std_px: 0.0
+  dropout_probability: 0.0
+  timestamp_jitter_ms: 0.0
+  false_positive_probability: 0.0
+  seed: 17
+  render_background_intensity: 28
+  render_object_intensity: 245
+  render_object_radius_m: 0.035
+  render_object_shape: "disk"
+  render_noise_std: 1.5
+  render_blur_px: 0
+  render_trail_alpha: 0.0
+
+rayweave:
+  grid:
+    frame_id: "world"
+    origin_m: [-12.0, -7.0, 6.0]
+    dims: [48, 28, 16]
+    voxel_size_m: 0.50
+  scorer:
+    min_supporting_cameras: 3
+    top_k_voxels: 5000
+    backend: "numba"
+  peaks:
+    threshold_percentile: 99.4
+    max_peaks: 3
+    soft_argmax_radius_voxels: 1
+    soft_argmax_beta: 4.0
+
+fusion:
+  align_window_ns: 5000000
+  min_cameras_per_frame: 3
+  pixel_noise_px: 1.0
+
+kalman:
+  sigma_accel_mps2: 12.0
+  initial_position_var: 4.0
+  initial_velocity_var: 16.0
+  measurement_var_scale: 2.5
+  gate_mahalanobis_squared: 45.0
+  coast_seconds: 2.0
+
+logging:
+  log_dir: "data/logs"
+  console_every: 1
+
+pass_peak_rmse_m: 1.20
+pass_track_rmse_m: 1.20

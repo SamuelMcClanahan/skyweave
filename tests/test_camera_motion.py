@@ -94,6 +94,55 @@ def test_frame_diff_packet_builder_uses_optional_publish_timestamp() -> None:
     assert packet.header.publish_ts_ns == 250
 
 
+def test_merge_and_fill_motion_fragments_emits_one_centroid_blob() -> None:
+    previous = np.zeros((64, 80), dtype=np.uint8)
+    current = previous.copy()
+    previous[20:40, 20:40] = 220
+    current[20:40, 28:48] = 220
+
+    raw_config = MotionPacketConfig(
+        threshold=16,
+        min_area_px=1,
+        max_patch_side_px=64,
+        max_motion_pixels=2000,
+        backend="python",
+    )
+    raw_packet = FrameDiffMotionPacketBuilder(0, 80, 64, config=raw_config).build(
+        previous,
+        current,
+        frame_seq=1,
+        capture_ts_ns=10,
+    )
+    assert len(raw_packet.blobs) == 2
+
+    merged_config = MotionPacketConfig(
+        threshold=16,
+        min_area_px=1,
+        max_patch_side_px=64,
+        max_motion_pixels=2000,
+        merge_radius_px=8,
+        fill_fragments=True,
+        backend="python",
+    )
+    merged_packet = FrameDiffMotionPacketBuilder(0, 80, 64, config=merged_config).build(
+        previous,
+        current,
+        frame_seq=1,
+        capture_ts_ns=10,
+    )
+
+    assert len(merged_packet.blobs) == 1
+    blob = merged_packet.blobs[0]
+    assert blob.bbox_w >= 28
+    assert blob.bbox_h >= 20
+    assert abs(blob.cx - (blob.bbox_x + (blob.bbox_w - 1) / 2.0)) < 1.0
+    assert abs(blob.cy - 29.5) < 1.0
+
+    patch = merged_packet.motion_patches[0]
+    mask = decode_rle_u8(patch.payload, patch.bbox_w, patch.bbox_h)
+    assert int(np.count_nonzero(mask)) == patch.bbox_w * patch.bbox_h
+
+
 def test_array_camera_source_emits_deterministic_frames_and_timestamps() -> None:
     frames = synthetic_motion_frames(16, 12, frames=2, square_size=3)
     source = ArrayCameraSource(camera_id=7, frames=frames, timestamps_ns=[10, 20])

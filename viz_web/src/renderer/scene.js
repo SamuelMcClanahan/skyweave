@@ -19,6 +19,8 @@ const SCALE_MIN_RANGE_M = 50;
 const SCALE_MAX_RANGE_M = 10000;
 const ROOM_SCALE_MIN_RANGE_M = 3;
 const ROOM_SCALE_MAX_RANGE_M = 16;
+const AIRSPACE_SCALE_MIN_RANGE_M = 20;
+const AIRSPACE_SCALE_MAX_RANGE_M = 160;
 const DEFAULT_VIEW_PITCH_RAD = -Math.PI / 4;
 const POINTER_DRAG_THRESHOLD_PX = 6;
 const DRAG_CLICK_SUPPRESS_MS = 250;
@@ -358,7 +360,7 @@ export class SceneManager {
     }
 
     setSceneMode(sceneMode) {
-        const nextMode = sceneMode === 'map' ? 'map' : 'room';
+        const nextMode = sceneMode === 'map' || sceneMode === 'airspace' ? sceneMode : 'room';
         this.sceneMode = nextMode;
         const container = document.getElementById('cesiumContainer');
         if (nextMode === 'map') {
@@ -540,6 +542,7 @@ export class SceneManager {
                 if (this.rayRenderer && state.visibility.rays !== 'none') {
                     this.rayRenderer.update(state.tracks, state.cameras, state.visibility.rays, state.selectedTrackId);
                 }
+                this.updateOriginTrackView();
                 this.updateCameraFollow();
                 break;
 
@@ -623,6 +626,7 @@ export class SceneManager {
             this.lastAppliedScaleValue = settings.scaleValue;
             this.applyViewScale(settings.scaleValue);
         }
+        this.updateOriginTrackView();
     }
 
     applyRoomSettings(room, force = false) {
@@ -646,6 +650,7 @@ export class SceneManager {
         this.roomGroup.scale.setScalar(scale);
         if (this.roomMesh) {
             this.roomMesh.visible = Boolean(room?.visible && meshUrl);
+            this.fitRoomMeshToFallback(this.roomMesh, room);
             this.applyRoomOpacity(this.roomMesh, Number(room?.opacity ?? 0.42));
         }
         this.updateFallbackRoom(room);
@@ -667,8 +672,12 @@ export class SceneManager {
                 if (meshUrl !== this.loadedRoomUrl) {
                     return;
                 }
-                this.roomMesh = gltf.scene;
+                this.roomMesh = new THREE.Group();
                 this.roomMesh.name = 'Room Mesh';
+                gltf.scene.name = 'Room Mesh Content';
+                this.roomMesh.userData.content = gltf.scene;
+                this.roomMesh.add(gltf.scene);
+                this.fitRoomMeshToFallback(this.roomMesh, this.state.room);
                 this.applyRoomOpacity(this.roomMesh, Number(this.state.room?.opacity ?? 0.42));
                 this.roomGroup.add(this.roomMesh);
                 this.applyRoomSettings(this.state.room, false);
@@ -678,6 +687,52 @@ export class SceneManager {
                 console.warn('Room mesh failed to load', meshUrl, error);
             }
         );
+    }
+
+    fitRoomMeshToFallback(wrapper, room) {
+        const content = wrapper?.userData?.content;
+        if (!content) {
+            return;
+        }
+
+        const fallbackSize = room?.fallback_size_m || [4, 4, 2.6];
+        const fitKey = fallbackSize.join(',');
+        if (wrapper.userData.fitKey === fitKey) {
+            return;
+        }
+
+        content.position.set(0, 0, 0);
+        content.scale.setScalar(1);
+        content.updateMatrixWorld(true);
+
+        const box = new THREE.Box3().setFromObject(content);
+        if (box.isEmpty()) {
+            return;
+        }
+
+        const meshSize = box.getSize(new THREE.Vector3());
+        const targetSize = new THREE.Vector3(
+            Math.max(Number(fallbackSize[0]) || 4, 0.001),
+            Math.max(Number(fallbackSize[1]) || 4, 0.001),
+            Math.max(Number(fallbackSize[2]) || 2.6, 0.001)
+        );
+        const safeMeshSize = new THREE.Vector3(
+            Math.max(meshSize.x, 0.001),
+            Math.max(meshSize.y, 0.001),
+            Math.max(meshSize.z, 0.001)
+        );
+        const fitScale = 0.92 * Math.min(
+            targetSize.x / safeMeshSize.x,
+            targetSize.y / safeMeshSize.y,
+            targetSize.z / safeMeshSize.z
+        );
+        const center = box.getCenter(new THREE.Vector3());
+        const targetCenter = new THREE.Vector3(0, 0, targetSize.z / 2);
+
+        content.scale.setScalar(fitScale);
+        content.position.copy(targetCenter).sub(center.multiplyScalar(fitScale));
+        wrapper.userData.fitKey = fitKey;
+        wrapper.userData.fitScale = fitScale;
     }
 
     updateFallbackRoom(room) {
@@ -724,6 +779,9 @@ export class SceneManager {
     }
 
     applyViewScale(scaleValue) {
+        if (this.state.settings.originTrackView) {
+            return;
+        }
         const focus = this.getCurrentFocusPoint();
         if (!focus) {
             return;
@@ -732,6 +790,7 @@ export class SceneManager {
     }
 
     updateCameraFollow() {
+        if (this.state.settings.originTrackView) return;
         if (!this.state.settings.autoZoom) return;
         const now = performance.now();
         if (now - this.lastAutoFitMs < AUTO_FIT_INTERVAL_MS) {
@@ -758,6 +817,14 @@ export class SceneManager {
 
     resetCamera() {
         if (!this.useCesium || !this.cesiumViewer) {
+            if (this.state.settings.sceneMode === 'airspace') {
+                this.camera.position.set(38, -54, 34);
+                this.camera.up.set(0, 0, 1);
+                this.camera.lookAt(0, 0, 8);
+                this.controls?.target.set(0, 0, 8);
+                this.controls?.update();
+                return;
+            }
             this.camera.position.set(6, -9, 5);
             this.camera.up.set(0, 0, 1);
             this.camera.lookAt(0, 0, 1);
@@ -824,12 +891,18 @@ export class SceneManager {
         if (this.state.settings.sceneMode === 'room') {
             return ROOM_SCALE_MIN_RANGE_M * Math.pow(ROOM_SCALE_MAX_RANGE_M / ROOM_SCALE_MIN_RANGE_M, t);
         }
+        if (this.state.settings.sceneMode === 'airspace') {
+            return AIRSPACE_SCALE_MIN_RANGE_M * Math.pow(AIRSPACE_SCALE_MAX_RANGE_M / AIRSPACE_SCALE_MIN_RANGE_M, t);
+        }
         return SCALE_MIN_RANGE_M * Math.pow(SCALE_MAX_RANGE_M / SCALE_MIN_RANGE_M, t);
     }
 
     lookAtLocalPoint(localPoint, rangeMeters) {
         if (!this.useCesium || !this.cesiumViewer) {
-            const range = Math.max(2.5, Math.min(Number(rangeMeters) || 8, 24));
+            const sceneMode = this.state.settings.sceneMode;
+            const maxRange = sceneMode === 'room' ? 24 : sceneMode === 'airspace' ? 220 : 10000;
+            const minRange = sceneMode === 'room' ? 2.5 : 8;
+            const range = Math.max(minRange, Math.min(Number(rangeMeters) || 8, maxRange));
             this.camera.position.set(localPoint.x + range * 0.7, localPoint.y - range, localPoint.z + range * 0.55);
             this.camera.up.set(0, 0, 1);
             this.camera.lookAt(localPoint.x, localPoint.y, localPoint.z);
@@ -870,6 +943,32 @@ export class SceneManager {
             },
             duration: 2.0
         });
+    }
+
+    updateOriginTrackView() {
+        if (!this.state.settings.originTrackView || this.useCesium) {
+            return;
+        }
+        const track = this.state.getActiveTrack() || this.state.getFollowingTrack() || this.firstTrack();
+        if (!track || !Array.isArray(track.state) || track.state.length < 3) {
+            return;
+        }
+        const target = new THREE.Vector3(track.state[0], track.state[1], track.state[2]);
+        if (target.length() < 0.1) {
+            return;
+        }
+        this.camera.position.set(0, 0, 0);
+        this.camera.up.set(0, 0, 1);
+        this.camera.lookAt(target);
+        this.controls?.target.copy(target);
+        this.controls?.update();
+    }
+
+    firstTrack() {
+        for (const track of this.state.tracks.values()) {
+            return track;
+        }
+        return null;
     }
 
     localToEcef(localPoint) {

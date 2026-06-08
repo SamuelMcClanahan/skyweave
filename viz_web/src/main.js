@@ -1,8 +1,8 @@
 // Main application entry point
-import { SceneManager } from './renderer/scene.js';
-import { WSClient } from './data/wsclient.js';
-import { UIManager } from './ui/ui-manager.js';
-import { VizState } from './data/state.js';
+import { SceneManager } from './renderer/scene.js?v=room-fit-demo2';
+import { WSClient } from './data/wsclient.js?v=room-fit-demo2';
+import { UIManager } from './ui/ui-manager.js?v=room-fit-demo2';
+import { VizState } from './data/state.js?v=room-fit-demo2';
 
 class SkyweaveViz {
     constructor() {

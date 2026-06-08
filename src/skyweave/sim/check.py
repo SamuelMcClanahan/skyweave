@@ -112,7 +112,7 @@ def run_sim_check(
         tri = triangulate_detections(aligned.ts_ns, aligned.detection_packets, scene.cameras, config.fusion.pixel_noise_px)
         stage_ms["triangulation"] = _elapsed_ms(stage_start)
         stage_start = time.perf_counter()
-        track = tracks.update(measurement, aligned.ts_ns)
+        track = tracks.update(measurements, aligned.ts_ns)
         stage_ms["kalman"] = _elapsed_ms(stage_start)
         if recorder:
             recorder.record_weavefield(scored.volume)

@@ -62,3 +62,35 @@ def test_track_manager_retires_stale_track_and_starts_new_id() -> None:
     assert next_throw.status == "candidate"
     assert next_throw.created_ts_ns == 30_000_000_000
     assert len(next_throw.trail) == 1
+
+
+def test_track_manager_rejects_large_mahalanobis_outlier() -> None:
+    manager = TrackManager(KalmanConfig(gate_mahalanobis_squared=11.345))
+
+    manager.update(_measurement(0, 0.0), 0)
+    manager.update(_measurement(1_000_000_000, 1.0), 1_000_000_000)
+    active = manager.update(_measurement(2_000_000_000, 2.0), 2_000_000_000)
+    assert active is not None
+
+    coasted = manager.update(_measurement(3_000_000_000, 100.0), 3_000_000_000)
+
+    assert coasted is not None
+    assert coasted.status == "coasting"
+    assert coasted.miss_count == 1
+    assert coasted.state[0] < 5.0
+
+
+def test_track_manager_selects_closest_plausible_candidate() -> None:
+    manager = TrackManager(KalmanConfig(gate_mahalanobis_squared=50.0))
+
+    manager.update(_measurement(0, 0.0), 0)
+    manager.update(_measurement(1_000_000_000, 1.0), 1_000_000_000)
+    manager.update(_measurement(2_000_000_000, 2.0), 2_000_000_000)
+
+    close = _measurement(3_000_000_000, 3.05)
+    far = _measurement(3_000_000_000, -2.0)
+    updated = manager.update([far, close], 3_000_000_000)
+
+    assert updated is not None
+    assert updated.status == "active"
+    assert abs(updated.state[0] - 3.05) < abs(updated.state[0] - -2.0)

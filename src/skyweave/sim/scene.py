@@ -7,6 +7,16 @@ import numpy as np
 from skyweave.config import SimulationConfig
 from skyweave.fusion.geom import CameraCalib, look_at_pose, make_intrinsics
 
+SCENE_CHOICES = (
+    "paper_airplane_arc",
+    "constant_velocity",
+    "s_curve",
+    "orbit",
+    "zigzag",
+    "fast_throw",
+    "pixel_plane_crossing",
+)
+
 
 @dataclass(frozen=True)
 class GroundTruthSample:
@@ -55,7 +65,7 @@ def _camera_positions(config: SimulationConfig) -> dict[int, np.ndarray]:
             1: np.array([-2.0, 0.9, 1.15], dtype=np.float64),
             2: np.array([2.0, 0.9, 1.15], dtype=np.float64),
         }
-    if layout != "room_perimeter":
+    if layout not in {"room_perimeter", "dispersed_perimeter"}:
         raise ValueError(f"unsupported simulation camera_layout {config.camera_layout!r}")
     if config.camera_count <= 0:
         raise ValueError("simulation camera_count must be positive")
@@ -101,17 +111,7 @@ def _build_truth(config: SimulationConfig) -> list[GroundTruthSample]:
     points = []
     for frame in range(config.frames):
         t = frame / max(config.frames - 1, 1)
-        if config.scene == "constant_velocity":
-            position = np.array([-1.1 + 2.2 * t, 0.1 + 0.8 * t, 1.15], dtype=np.float64)
-        else:
-            position = np.array(
-                [
-                    -1.2 + 2.4 * t,
-                    -0.2 + 1.55 * t,
-                    0.85 + 0.55 * np.sin(np.pi * t),
-                ],
-                dtype=np.float64,
-            )
+        position = _truth_position(config.scene, t)
         points.append(position)
 
     truth: list[GroundTruthSample] = []
@@ -129,3 +129,68 @@ def _build_truth(config: SimulationConfig) -> list[GroundTruthSample]:
             )
         )
     return truth
+
+
+def _truth_position(scene: str, t: float) -> np.ndarray:
+    if scene == "constant_velocity":
+        return np.array([-1.1 + 2.2 * t, 0.1 + 0.8 * t, 1.15], dtype=np.float64)
+    if scene in {"paper_airplane_arc", "real_charuco_room"}:
+        return np.array(
+            [
+                -1.2 + 2.4 * t,
+                -0.2 + 1.55 * t,
+                0.85 + 0.55 * np.sin(np.pi * t),
+            ],
+            dtype=np.float64,
+        )
+    if scene == "s_curve":
+        return np.array(
+            [
+                -1.35 + 2.7 * t,
+                0.55 * np.sin(2.0 * np.pi * (t - 0.15)),
+                1.15 + 0.22 * np.sin(np.pi * t),
+            ],
+            dtype=np.float64,
+        )
+    if scene == "orbit":
+        theta = 2.0 * np.pi * t
+        return np.array(
+            [
+                0.85 * np.cos(theta),
+                0.35 + 0.65 * np.sin(theta),
+                1.18 + 0.16 * np.sin(2.0 * theta),
+            ],
+            dtype=np.float64,
+        )
+    if scene == "zigzag":
+        segments = 5
+        phase = (t * segments) % 1.0
+        y0 = -0.55 if int(t * segments) % 2 == 0 else 0.55
+        y = y0 + (-2.0 * y0 * phase)
+        return np.array(
+            [
+                -1.25 + 2.5 * t,
+                y,
+                1.08 + 0.12 * np.sin(segments * np.pi * t),
+            ],
+            dtype=np.float64,
+        )
+    if scene == "fast_throw":
+        return np.array(
+            [
+                -1.45 + 2.9 * t,
+                -0.45 + 1.05 * t,
+                0.82 + 0.88 * np.sin(np.pi * t) - 0.18 * t,
+            ],
+            dtype=np.float64,
+        )
+    if scene == "pixel_plane_crossing":
+        return np.array(
+            [
+                -10.5 + 21.0 * t,
+                -4.0 + 8.0 * t + 0.55 * np.sin(2.0 * np.pi * t),
+                8.6 + 1.25 * np.sin(np.pi * t) + 0.18 * np.sin(4.0 * np.pi * t),
+            ],
+            dtype=np.float64,
+        )
+    raise ValueError(f"unsupported simulation scene {scene!r}; choose one of {', '.join(SCENE_CHOICES)}")

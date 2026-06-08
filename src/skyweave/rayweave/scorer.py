@@ -13,6 +13,10 @@ from skyweave.rayweave.dda import trace_ray_indices
 from skyweave.rayweave.grid import VoxelGrid
 from skyweave.rayweave.patches import decode_rle_u8
 
+PATCH_EVIDENCE_MODE = "patches"
+CENTROID_EVIDENCE_MODE = "centroids"
+EVIDENCE_MODE_CHOICES = (PATCH_EVIDENCE_MODE, CENTROID_EVIDENCE_MODE)
+
 
 @dataclass(frozen=True)
 class ScoredWeavefield:
@@ -59,10 +63,7 @@ class PythonNumpyScorerBackend:
         for packet in aligned.motion_packets:
             camera = self.cameras[packet.camera_id]
             score_grid = self.grid.zeros()
-            pixels = list(_iter_patch_pixels(packet.motion_patches))
-            if not pixels and packet.blobs:
-                blob = max(packet.blobs, key=lambda item: item.confidence)
-                pixels = [(blob.cx, blob.cy, blob.confidence)]
+            pixels = _packet_evidence_pixels(packet, self.config.evidence_mode)
             if not pixels:
                 camera_scores[packet.camera_id] = score_grid
                 continue
@@ -192,10 +193,7 @@ class NumbaScorerBackend:
         vs: list[float] = []
         weights: list[float] = []
         for packet in aligned.motion_packets:
-            pixels = list(_iter_patch_pixels(packet.motion_patches))
-            if not pixels and packet.blobs:
-                blob = max(packet.blobs, key=lambda item: item.confidence)
-                pixels = [(blob.cx, blob.cy, blob.confidence)]
+            pixels = _packet_evidence_pixels(packet, self.config.evidence_mode)
             if not pixels:
                 continue
 
@@ -220,11 +218,25 @@ def _build_backend(
     cameras: dict[int, CameraCalib],
     config: ScorerConfig,
 ) -> ScorerBackend:
+    if config.evidence_mode not in EVIDENCE_MODE_CHOICES:
+        raise ValueError(f"Unsupported Rayweave evidence mode: {config.evidence_mode!r}")
     if config.backend == "python_numpy":
         return PythonNumpyScorerBackend(grid, cameras, config)
     if config.backend == "numba":
         return NumbaScorerBackend(grid, cameras, config)
     raise ValueError(f"Unsupported Rayweave scorer backend: {config.backend!r}")
+
+
+def _packet_evidence_pixels(packet, evidence_mode: str) -> list[tuple[float, float, float]]:
+    if evidence_mode == CENTROID_EVIDENCE_MODE:
+        return [(blob.cx, blob.cy, max(float(blob.confidence), 1e-6)) for blob in packet.blobs]
+    if evidence_mode == PATCH_EVIDENCE_MODE:
+        pixels = list(_iter_patch_pixels(packet.motion_patches))
+        if not pixels and packet.blobs:
+            blob = max(packet.blobs, key=lambda item: item.confidence)
+            pixels = [(blob.cx, blob.cy, blob.confidence)]
+        return pixels
+    raise ValueError(f"Unsupported Rayweave evidence mode: {evidence_mode!r}")
 
 
 def _iter_patch_pixels(patches) -> list[tuple[float, float, float]]:
