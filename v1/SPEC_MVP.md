@@ -926,6 +926,58 @@ Acceptance for the first synthetic path:
   triangulation marker, track, and truth marker;
 - replaying the synthetic session reproduces the same Weavefield and track.
 
+### 7.12 Clutter and noise rejection
+
+Frame differencing fires on anything that moves: sensor noise, global
+brightness shifts, and — hardest of all — repetitive background motion such as
+rustling leaves, rain, water shimmer, or a flapping flag. Raising thresholds is
+the crude defense and it fails on the wrong axis: it rejects by *magnitude*, so a
+sunlit rustling canopy survives while a faint real target is lost. Rejection is
+layered across three places, each handling what the cheaper layer below it
+cannot.
+
+1. **Edge, per-blob temporal coherence (cheapest).** A blob is trusted only if
+   it *persists and moves plausibly* over the last `N` frames (this is the
+   §6.8 consistency filter). Sensor noise and one-frame flickers never form a
+   coherent track. This runs on the RV1106 (§9.6) and doubles as the primary
+   network-spam filter — a blob seen in 1 of 5 frames never costs uplink or
+   central compute.
+
+2. **Central, multi-camera consensus.** The Rayweave support gate (§7.5) already
+   rejects false motion in one camera that does not agree geometrically with the
+   others: a single camera's stray rays light a line, not a localized voxel.
+
+3. **Central, correlated-clutter rejection (the hard case).** When cameras are
+   close enough that background motion correlates across them, the leaves can
+   agree geometrically and hallucinate a phantom object — the support gate does
+   not save you. The discriminator is not camera agreement (they agree) but that
+   clutter is *stationary and recurrent in 3D and does not go anywhere*:
+
+   - **3D background subtraction.** Maintain a long-time-constant recurrence map
+     in voxel space (a slow exponential average of evidence per voxel). Score
+     *novelty*, not raw evidence:
+     `W_detection(v,t) = max(0, W_now(v,t) - W_background(v))`. Clutter lives in a
+     fixed voxel set, accumulates high background, and is subtracted to ~zero; a
+     transiting target lights fresh, low-background voxels and passes through.
+     This is background subtraction performed in 3D world space rather than 2D
+     image space, it is immune to how correlated the cameras are, and it reuses
+     the §7.6 Weavefield ring buffer at a slower time constant. The recurrence map
+     also *learns the static 3D clutter mask for free* over the first minutes of a
+     session.
+   - **Kinematic coherence.** Even leaked clutter does not translate: its position
+     random-walks about a fixed mean (net displacement ≈ 0, velocity incoherent).
+     Gate track promotion on a displacement-vs-dwell ratio and on the Kalman
+     filter's own normalized innovation (NIS) consistency over a window. Reuses
+     the tracker's existing statistics.
+
+4. **Appearance gate (V1, optional).** Birds and insects move and triangulate
+   like real targets; only *appearance* separates them. A small NPU classifier on
+   candidate crops (bird / cloud / drone) is the only layer that can make this
+   distinction, run on the RV1106 NPU as a later upgrade (§9.6).
+
+Score novelty and gate on kinematics by default; the background recurrence map
+and NIS gate are nearly free because they read machinery the system already has.
+
 ---
 
 ## 8. Calibration
@@ -1132,7 +1184,53 @@ Edge nodes should send:
 Raw SC3336 frames are not a V1 realtime requirement. At SC3336 resolutions, raw
 video exceeds 100M Ethernet by a large margin. H.264/H.265 can fit but may
 damage tiny point targets and add latency, so compressed video is a debug stream
-rather than the measurement stream.
+rather than the measurement stream. Instead of compressing frames, the edge node
+sends **only the full-resolution patches around motion** plus centroids — a few
+KB per frame — so the central node gets full angular precision exactly where the
+target is, without ever shipping a frame.
+
+### 9.2.1 V1 edge node (RV1106) — minimality and optimization
+
+The RV1106 edge node is the lowest-headroom part of the system: one Cortex-A7
+(no SMP), 256 MB DDR2L, a 100M uplink. The governing constraint is **DDR
+bandwidth, not CPU** — at these rates the A7's compute is nearly free, and the
+binding resource is how many times each frame is read or written. The whole edge
+design follows one principle: **the A7 touches as few pixels as possible; the
+fixed-function blocks (ISP, RGA, NPU, VENC) do the bulk pixel work via
+DMA-buffer handoff, never `memcpy`.**
+
+Design rules:
+
+- **Use the silicon, not the CPU.** ISP captures and emits NV12 (the Y plane *is*
+  the grayscale image — free, no `cvtColor`); the RGA 2D accelerator crops
+  full-res patches and downscales; the NPU classifies; VENC handles the optional
+  debug-video stream. The A7 runs only frame-diff + threshold (NEON) and
+  packetization.
+- **Detect coarse, sample fine.** Run motion detection on a ¼-resolution ISP
+  output stream (4× fewer pixels, 4× less DDR traffic — the decisive bandwidth
+  lever), then crop the **full-resolution** patch only where blobs are found.
+  Precision is preserved exactly where it matters.
+- **Lock the ISP 3A.** Run manual exposure/gain/white-balance, not auto.
+  Auto-exposure turns a passing cloud into a full-frame "motion" flood that
+  corrupts detection and saturates the uplink — a correctness and a bandwidth
+  requirement.
+- **No Python, no OpenCV, no general distro on the node.** Buildroot rootfs plus
+  one statically/minimally linked C/C++ daemon over RKMPI + librga (+ librknn for
+  the NPU). Everything OpenCV would do is done faster by RGA/ISP/NEON.
+- **Bounded bandwidth governor.** Always send centroids (a few bytes, never
+  dropped); fill a fixed per-frame byte budget with patches in descending blob
+  confidence; one frame = one UDP datagram, ≤ MTU to avoid fragmentation. Uplink
+  load stays bounded and predictable regardless of scene noise.
+- **Zero-copy, preallocated.** Pass dma-buf handles between ISP → RGA → NPU; the
+  A7 `mmap`s only the small ¼-res Y plane; no per-frame allocation.
+
+The C daemon is a **reimplementation of a frozen wire contract, not a port of the
+Python code.** The Python `MotionExtractor` is its reference oracle, validated by
+golden frame → packet fixtures. Budget check: with ¼-res detection, DDR sits at
+roughly ~20% of bus, the A7 frame-diff is well under 1% of the core, and RAM is
+comfortably under 256 MB (well under without the NPU model loaded). De-risk by
+bringing up one node and measuring real DDR bandwidth and A7 utilization at
+30 fps before fanning out.
 
 ### 9.3 Debug video path
 

@@ -9,7 +9,9 @@ __pycache__/
 venv/
 
 # Generated data and logs
-/data/
+/data/*
+!/data/golden/
+!/data/golden/*.json
 /archive/
 *.log
 *.jsonl
