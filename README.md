@@ -1,9 +1,5 @@
-Skyweave Main
+## Skyweave Main
 
-Umbrella workspace for comparing the original Skyweave MVP implementation with
-the rewrite.
-
-Layout
 
 # v1
 Current Skyweave implementation. This remains the reference implementation and
