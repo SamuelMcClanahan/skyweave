@@ -1,0 +1,214 @@
+// SkyWeave v2 wire schema (D7 freeze).
+//
+// Every field number here is the number RESERVED by the D0 contracts
+// (`v2/docs/DETECTION_CONTRACTS_D0.md` section 4/5/6 and the docstrings in
+// `v2/src/skyweave2/contracts/`). D0's rule: "the reviewed `.proto` lands in
+// D7 and must map 1:1 onto the field numbers reserved here." Nothing in this
+// file may renumber a reserved field; new messages take fresh numbers and are
+// recorded as D7 wire decisions in `v2/docs/D7_WIRE_REPORT.md`.
+//
+// nanopb constraints honored (the D8 C daemon encodes with nanopb):
+//   - no maps, no recursive types, no `Any`, no groups;
+//   - every string and every repeated field has a declared bound
+//     (`skyweave.options`), so nanopb can allocate statically;
+//   - scalar types match D0's type column exactly, including `float` where
+//     D0 says float (see the precision note on FrameEnvelope below).
+//
+// Datagram framing is NOT in this file: a 4-byte header (magic, wire
+// version, payload type) prefixes every UDP datagram and every TCP control
+// frame's body. See `skyweave2/transport/wire.py`.
+
+syntax = "proto3";
+
+package skyweave.v2;
+
+// ---------------------------------------------------------------------------
+// Enumerations
+// ---------------------------------------------------------------------------
+
+// D0 section 3. The string values in `contracts/enums.py` are the frozen
+// wire-stable names; these numbers are the D7 wire encoding of the same set,
+// in the order D0's table lists them. proto3 requires a zero value, which is
+// deliberately UNSPECIFIED: a datagram that omits the domain decodes to
+// UNSPECIFIED and is REJECTED, never silently defaulted to a real clock.
+enum ClockDomain {
+  CLOCK_DOMAIN_UNSPECIFIED = 0;
+  CLOCK_DOMAIN_SYNTHETIC = 1;
+  CLOCK_DOMAIN_NODE_MONO = 2;
+  CLOCK_DOMAIN_NODE_PTP = 3;
+  CLOCK_DOMAIN_JETSON_RX = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Measurement plane
+// ---------------------------------------------------------------------------
+
+// D0 section 4. Field numbers 1-15 are the D0 reservation, verbatim.
+//
+// PRECISION NOTE (D7 finding): D0's type column declares fields 6, 7, 8 and
+// 15 `float`, i.e. IEEE-754 binary32, while the pydantic model holds Python
+// doubles. Values that are not exactly representable in binary32 therefore
+// change on the wire. This file follows the frozen D0 declaration rather than
+// widening the field; `codec.py` documents the measured consequence and
+// `transport/report.py` reports it.
+message FrameEnvelope {
+  uint32 camera_id = 1;
+  string session_uuid = 2;           // per node boot (D0 section 3)
+  uint64 frame_seq = 3;              // per session
+  int64 capture_ts_ns = 4;           // EXPOSURE MIDPOINT (D0 decision)
+  ClockDomain clock_domain = 5;
+  float time_sync_error_ms = 6;      // honest, may be large
+  float exposure_us = 7;
+  float gain_db = 8;
+  uint32 full_width = 9;
+  uint32 full_height = 10;
+  uint32 proc_width = 11;            // detector grid (F2)
+  uint32 proc_height = 12;
+  string calibration_rev = 13;       // hash of estimator calibration
+  string detector_rev = 14;          // detector build/config hash
+  float line_readout_us = 15;        // rolling-shutter row time
+}
+
+// D0 field 8: "bbox | x0,y0,w,h | full-res px". Carried as a bounded
+// sub-message so nanopb allocates it inline; x/y are zigzag because a bbox
+// origin may sit off the left/top edge of the sensor grid.
+message BoundingBox {
+  sint32 x = 1;
+  sint32 y = 2;
+  uint32 w = 3;
+  uint32 h = 4;
+}
+
+// D0 section 4. Field numbers 1-13 are the D0 reservation, verbatim.
+//
+// Field 1 (`envelope`) is D0's "FrameEnvelope OR REFERENCE TO ONE". Inside an
+// ObservationPacket the envelope is carried ONCE at packet level and field 1
+// MUST be unset; a set field 1 inside a packet is a hard decode error, never
+// a silent override (see codec.decode_observation_packet). The field stays
+// declared here so a standalone Observation2D remains representable and so
+// number 1 can never be reused for anything else.
+message Observation2D {
+  FrameEnvelope envelope = 1;
+  uint32 obs_id = 2;
+  double u = 3;                      // full-res calibrated px (D0 section 2)
+  double v = 4;
+  double cov_uu = 5;                 // full-res px^2, never zero
+  double cov_uv = 6;
+  double cov_vv = 7;
+  BoundingBox bbox = 8;
+  uint32 area_px = 9;                // at proc resolution
+  uint32 persistence_count = 10;
+  float confidence = 11;             // detector-internal, not a probability
+  optional uint32 local_blob_id = 12;  // explicit presence: absent != 0
+  optional string evidence_ref = 13;   // droppable mask/crop id
+}
+
+// One capture event, one datagram (D0 section 10 "D7 opening"). The envelope
+// appears once; the observations reference it by position, not by copy.
+// `observations` is bounded (see skyweave.options) and measurement data NEVER
+// splits across datagrams: an event that does not fit the ceiling is a loud
+// encode failure, not a fragment.
+message ObservationPacket {
+  FrameEnvelope envelope = 1;
+  repeated Observation2D observations = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Evidence plane (separate, droppable channel, D0 T7 / working plan section 4)
+// ---------------------------------------------------------------------------
+
+enum EvidenceKind {
+  EVIDENCE_KIND_UNSPECIFIED = 0;
+  EVIDENCE_KIND_PATCH_Y8 = 1;        // packed 8-bit luma crop
+  EVIDENCE_KIND_MASK_RLE = 2;        // run-length foreground mask
+}
+
+// Optional evidence for one observation. Travels on its own socket so it can
+// be dropped under congestion without touching a measurement, and carries an
+// explicit expiry so a late patch is discarded rather than re-opening a
+// solved batch. Losing all of these must change no geometry input (T7/W3).
+message EvidencePacket {
+  string evidence_ref = 1;           // matches Observation2D.evidence_ref
+  uint32 camera_id = 2;
+  string session_uuid = 3;
+  uint64 frame_seq = 4;
+  int64 capture_ts_ns = 5;
+  int64 expiry_ts_ns = 6;            // evidence-drop rule: expire, never block
+  EvidenceKind kind = 7;
+  sint32 x0 = 8;                     // crop origin, full-res px
+  sint32 y0 = 9;
+  uint32 width = 10;
+  uint32 height = 11;
+  bytes payload = 12;
+}
+
+// ---------------------------------------------------------------------------
+// Health plane (low-rate, D7-assigned numbers)
+// ---------------------------------------------------------------------------
+
+// D0 section 1: "Quaternions (xyzw) exist only at the viz boundary and are
+// derived, never authoritative." The IMU quaternion below is exactly that:
+// mount-orientation telemetry, never an estimator input.
+message Quaternion {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double w = 4;
+}
+
+message HealthPacket {
+  uint32 camera_id = 1;
+  string session_uuid = 2;
+  int64 ts_ns = 3;
+  ClockDomain clock_domain = 4;
+  double fps = 5;
+  uint64 drops = 6;
+  double time_sync_error_ms = 7;
+  Quaternion imu_quaternion = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Control plane (TCP, length-prefixed, same protobuf) — Provisional (D0 s.10)
+// ---------------------------------------------------------------------------
+
+enum ControlType {
+  CONTROL_TYPE_UNSPECIFIED = 0;
+  CONTROL_TYPE_START = 1;
+  CONTROL_TYPE_STOP = 2;
+  CONTROL_TYPE_SET_CONFIG = 3;
+  CONTROL_TYPE_CALIBRATION_REVISION = 4;
+  CONTROL_TYPE_ACK = 5;
+}
+
+message CalibrationRevision {
+  string calibration_rev = 1;
+  string detector_rev = 2;
+}
+
+message NodeConfig {
+  uint32 proc_width = 1;
+  uint32 proc_height = 2;
+  double target_fps = 3;
+  uint32 max_observations_per_packet = 4;
+  bool evidence_enabled = 5;
+}
+
+message Ack {
+  uint64 control_seq = 1;            // the control_seq being acknowledged
+  bool accepted = 2;
+  string detail = 3;                 // labeled reason when accepted == false
+}
+
+// A discriminated wrapper rather than a `oneof`: nanopb allocates every
+// declared sub-message statically, and a C daemon switching on an enum is
+// simpler to audit than a synthetic union. Exactly one payload sub-message is
+// set for a given `type`; a mismatch is a loud decode error.
+message ControlMessage {
+  ControlType type = 1;
+  uint64 control_seq = 2;
+  string session_uuid = 3;
+  uint32 camera_id = 4;
+  CalibrationRevision calibration = 5;
+  NodeConfig config = 6;
+  Ack ack = 7;
+}

@@ -1,0 +1,47 @@
+You are conducting an independent technical architecture review of Skyweave
+v2, a low-cost distributed multi-camera flying-object localization system.
+
+Start by reading:
+
+1. v2/docs/SKYWEAVE_EXTERNAL_REVIEW_PACKET.md
+2. v2/docs/SKYWEAVE_PROJECT_GUIDE.md
+3. v2/docs/FOLLOWUP_DECISIONS_2026-07-17.md
+4. v2/docs/experiments/EXP-001_800FT_SYNTHETIC_FULL_STACK.md
+5. v2/docs/IMPLEMENTATION_FRAMEWORK.md
+6. v2/docs/RESEARCH_REPORT.md
+7. v2/docs/sources/manifest.yaml
+
+The two original human-authored notes are the design-intent authority:
+
+- /Users/samuelmccanahan/.codex/attachments/5ad1a766-dae6-42fc-9661-aeaad400c755/pasted-text.txt
+- /Users/samuelmccanahan/.codex/attachments/9e5b26d5-9a0b-4e4c-9857-4008295ad8b3/pasted-text.txt
+
+Review the proposed architecture and experiment plan. This is a read-only
+review unless I separately ask for changes. v2 is still pre-implementation;
+do not mistake the documentation or empty code placeholders for a working
+system. Treat v1 as characterization evidence rather than architectural
+authority.
+
+Do not merely summarize or agree with the plan. Look for incorrect math,
+hidden assumptions, physical limitations, broken ownership boundaries,
+double-counted evidence, incomplete uncertainty propagation, weak validation,
+and steps ordered before their dependencies. Independently check the range,
+baseline, pixel, orientation, timing, network, GMM2-memory, and voxel-memory
+calculations. Use primary or official sources when correcting factual claims.
+
+Return:
+
+1. an executive verdict;
+2. findings ordered by severity;
+3. an assumption audit labeled established, plausible, unsupported, or
+   contradicted;
+4. an independent geometry and accuracy audit;
+5. an architecture-boundary assessment;
+6. an implementation-sequence assessment;
+7. the five cheapest decisive experiments; and
+8. only the open questions that would materially change the design.
+
+For each finding, explain the evidence, impact, and smallest useful correction.
+Distinguish fatal limitations from solvable engineering risks and optional
+later improvements. Do not assume that more cameras, finer voxels, CUDA, a
+more complicated filter, or a classifier automatically fixes a weakness.

@@ -1,0 +1,45 @@
+{
+  "aligner_excluded": {},
+  "budgets": {
+    "packet_age_max_ms": 250.0,
+    "packet_age_p95_ms": 15.0,
+    "schedule_jitter_p95_ms": 10.0
+  },
+  "datagrams_received": 838,
+  "datagrams_sent": 838,
+  "deadline_exceeded": false,
+  "encode_failures": 0,
+  "loopback_transit": {
+    "count": 838,
+    "max_ms": 9.145625,
+    "min_ms": 0.094958,
+    "p50_ms": 0.286083,
+    "p95_ms": 0.5506937999999998,
+    "p99_ms": 1.3425009199999995
+  },
+  "observations_delivered": 838,
+  "observations_offered": 838,
+  "pacing_mode": "wall_clock",
+  "packet_age": {
+    "count": 838,
+    "max_ms": 21.906459,
+    "min_ms": 0.263,
+    "p50_ms": 3.8417079999999997,
+    "p95_ms": 5.317331149999999,
+    "p99_ms": 11.924727499999964
+  },
+  "rcvbuf_bytes": 4194304,
+  "rejected": {},
+  "replay_speed": 1.0,
+  "schedule_jitter": {
+    "count": 838,
+    "max_ms": 21.510167,
+    "min_ms": 0.019375,
+    "p50_ms": 3.5266875,
+    "p95_ms": 5.0171794499999995,
+    "p99_ms": 6.5035942900000006
+  },
+  "schema": "d7-wire-evidence/1",
+  "seed": 7,
+  "source": "gate-clip"
+}

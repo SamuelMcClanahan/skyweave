@@ -1,0 +1,381 @@
+catalog_version: 1
+catalog_date: "2026-07-17"
+purpose: "Research and documentation index for the human-directed Skyweave v2 rewrite"
+authority_note: "The two 2026-07-15 attached notes remain design authority for the fixed-camera v2 system. Samuel's skyweave_interceptor_notes(1).md rev 2 plus current conversation decisions are authority for the drone-system working document. These catalog entries are evidence and implementation references."
+
+entries:
+  - id: pixeltovoxelprojector
+    title: "ConsistentlyInconsistentYT/Pixeltovoxelprojector"
+    category: precedent
+    status: local-reference-restricted
+    local_path: v1/reference/pixel-to-voxel-projector
+    url: https://github.com/ConsistentlyInconsistentYT/Pixeltovoxelprojector/tree/011722ac4e7403de4dbf764b6877a6561a0cf45c
+    revision: 011722ac4e7403de4dbf764b6877a6561a0cf45c
+    license: "Apache-2.0 text plus licensor-added defense-entity use restriction; not standard Apache-2.0"
+    use: "Provenance and algorithm audit only. Independently implement adjacent-frame/GMM evidence, ray casting, DDA, and scaling; do not copy without legal review."
+
+  - id: voxel_projector_video
+    title: "Tracking faint objects with cheap cameras"
+    category: precedent
+    status: link-pinned
+    url: https://www.youtube.com/watch?v=m-b51C82-UE
+    use: "Context for the voxel inspiration; not an accuracy or reproducibility source."
+
+  - id: hartley_sturm
+    title: "Triangulation (Hartley and Sturm)"
+    category: geometry
+    status: link-pinned
+    url: https://users.cecs.anu.edu.au/~hartley/Papers/triangulation/triangulation.pdf
+    use: "Classical two-view triangulation and degeneracy reference."
+
+  - id: lee_civera
+    title: "Closed-Form Optimal Two-View Triangulation Based on Angular Errors"
+    category: geometry
+    status: link-pinned
+    url: https://openaccess.thecvf.com/content_ICCV_2019/papers/Lee_Closed-Form_Optimal_Two-View_Triangulation_Based_on_Angular_Errors_ICCV_2019_paper.pdf
+    use: "Bearing/angular-residual alternative to pixel-distance triangulation."
+
+  - id: triggs_bundle_adjustment
+    title: "Bundle Adjustment - A Modern Synthesis"
+    category: geometry
+    status: link-pinned
+    url: https://inria.hal.science/inria-00548290/file/Triggs-va99.pdf
+    use: "Joint camera-pose and trajectory calibration formulation."
+
+  - id: ceres_bundle_adjustment
+    title: "Ceres Solver bundle-adjustment tutorial"
+    category: geometry
+    status: link-pinned
+    url: https://ceres-solver.readthedocs.io/latest/nnls_tutorial.html#bundle-adjustment
+    use: "Practical implementation reference after the analytic solver is tested."
+
+  - id: mrcal_triangulation_uncertainty
+    title: "mrcal triangulation uncertainty analysis"
+    category: geometry
+    status: link-pinned
+    url: https://mrcal.secretsauce.net/triangulation.html
+    use: "Range-error growth, projected baseline, and uncertainty intuition."
+
+  - id: opencv_calib3d
+    title: "OpenCV calib3d reference"
+    category: calibration
+    status: link-pinned
+    url: https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html
+    use: "Camera model, calibration, projection, and triangulation API semantics."
+
+  - id: opencv_charuco
+    title: "OpenCV ChArUco calibration tutorial"
+    category: calibration
+    status: link-pinned
+    url: https://docs.opencv.org/4.x/da/d13/tutorial_aruco_calibration.html
+    use: "Intrinsics and board-observation capture procedure."
+
+  - id: opencv_triangulate_points
+    title: "OpenCV triangulation reference"
+    category: geometry
+    status: link-pinned
+    url: https://docs.opencv.org/4.x/d0/dbd/group__triangulation.html
+    use: "Independent API comparison for the continuous geometry oracle."
+
+  - id: visual_hull
+    title: "The visual hull concept (Laurentini)"
+    category: geometry
+    status: link-pinned
+    url: https://doi.org/10.1109/34.273735
+    use: "Silhouette/cone reasoning for extended targets; not a depth-sensor occupancy model."
+
+  - id: octomap
+    title: "OctoMap project"
+    category: voxel
+    status: link-pinned
+    url: https://octomap.github.io/
+    use: "Sparse occupancy data-structure ideas; do not copy its depth-ray free-space assumptions."
+
+  - id: voxel_hashing
+    title: "Voxel Hashing"
+    category: voxel
+    status: link-pinned
+    url: https://doi.org/10.1145/2461912.2461913
+    use: "Sparse allocation reference for future local/coarse-to-fine volumes."
+
+  - id: luckfox_ive_header
+    title: "Luckfox/Rockchip IVE API header"
+    category: rv1106
+    status: link-pinned
+    url: https://github.com/LuckfoxTECH/luckfox-pico/blob/824b817f889c2cbff1d48fcdb18ab494a68f69d1/media/ive/ive/include/rk_mpi_ive.h
+    revision: 824b817f889c2cbff1d48fcdb18ab494a68f69d1
+    use: "Pin RK_MPI_IVE_GMM2, RK_MPI_IVE_CCL, image formats, controls, and buffer contracts."
+
+  - id: luckfox_gmm_sample
+    title: "Luckfox/Rockchip GMM and GMM2 sample"
+    category: rv1106
+    status: link-pinned
+    url: https://github.com/LuckfoxTECH/luckfox-pico/blob/824b817f889c2cbff1d48fcdb18ab494a68f69d1/media/ive/ive/simulator/GMM.c
+    revision: 824b817f889c2cbff1d48fcdb18ab494a68f69d1
+    use: "Starting point for the exact-board GMM2 memory, warm-up, and mask benchmark."
+
+  - id: luckfox_ccl_sample
+    title: "Luckfox/Rockchip CCL sample"
+    category: rv1106
+    status: link-pinned
+    url: https://github.com/LuckfoxTECH/luckfox-pico/blob/824b817f889c2cbff1d48fcdb18ab494a68f69d1/media/ive/ive/simulator/CCL.c
+    revision: 824b817f889c2cbff1d48fcdb18ab494a68f69d1
+    use: "Connected-component extraction and blob metadata reference."
+
+  - id: luckfox_mpi_wiki
+    title: "Luckfox Pico Ultra MPI documentation"
+    category: rv1106
+    status: restricted-link
+    url: https://wiki.luckfox.com/Luckfox-Pico-Ultra/MPI/
+    use: "Board/image/toolchain setup; verify against the exact clone board and image."
+
+  - id: smartens_sc3336
+    title: "SmartSens SC3336 product listing"
+    category: sensor
+    status: restricted-link
+    url: https://www.smartsenstech.com/en/products_list?products_label=sc
+    use: "Official resolution, pixel pitch, shutter, and frame-rate facts; request the module datasheet."
+
+  - id: radxa_cubie_a7z_product
+    title: "Radxa Cubie A7Z product page"
+    category: companion-computer
+    status: restricted-link
+    url: https://radxa.com/products/cubie/a7z/
+    use: "Board dimensions, processor, memory, interfaces, and vendor-level capability claims for the drone companion-computer envelope."
+
+  - id: radxa_cubie_a7z_specs
+    title: "Radxa Cubie A7Z specifications"
+    category: companion-computer
+    status: restricted-link
+    url: https://docs.radxa.com/en/cubie/a7z
+    use: "Detailed hardware dimensions, power inputs, connectors, and operating constraints; verify against the purchased board revision."
+
+  - id: radxa_cubie_a7z_mipi_csi
+    title: "Radxa Cubie A7Z MIPI CSI documentation"
+    category: companion-computer
+    status: restricted-link
+    url: https://docs.radxa.com/en/cubie/a7z/hardware-use/mipi-csi
+    use: "Documented CSI connector and camera-module support; do not infer OV9281 driver compatibility from the connector alone."
+
+  - id: radxa_cubie_a7z_fan
+    title: "Radxa Cubie A7Z fan interface"
+    category: companion-computer
+    status: restricted-link
+    url: https://docs.radxa.com/en/cubie/a7z/hardware-use/fan
+    use: "Fan header and cooling integration reference for the ventilated Cubie tray."
+
+  - id: stauffer_grimson
+    title: "Adaptive background mixture models (Stauffer and Grimson)"
+    category: detection
+    status: link-pinned
+    url: https://doi.org/10.1109/CVPR.1999.784637
+    use: "Original adaptive background-mixture rationale."
+
+  - id: zivkovic_mog
+    title: "Efficient adaptive density estimation per image pixel (Zivkovic)"
+    category: detection
+    status: link-pinned
+    url: https://doi.org/10.1109/ICPR.2004.1333992
+    use: "Adaptive Gaussian-mixture details behind MOG2-like behavior."
+
+  - id: opencv_mog2
+    title: "OpenCV BackgroundSubtractorMOG2 reference"
+    category: detection
+    status: link-pinned
+    url: https://docs.opencv.org/4.x/d7/d7b/classcv_1_1BackgroundSubtractorMOG2.html
+    use: "Host-side behavior baseline; not a claim of bit parity with IVE GMM2."
+
+  - id: v4l2_buffer_timestamps
+    title: "V4L2 buffer timestamp flags"
+    category: timing
+    status: link-pinned
+    url: https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/buffer.html
+    use: "Exposure/start/end timestamp semantics and source flags."
+
+  - id: linux_ptp
+    title: "Linux PTP clock API"
+    category: timing
+    status: link-pinned
+    url: https://docs.kernel.org/driver-api/ptp.html
+    use: "PHC/PTP capabilities and limitations."
+
+  - id: linux_network_timestamping
+    title: "Linux network timestamping"
+    category: timing
+    status: link-pinned
+    url: https://docs.kernel.org/networking/timestamping.html
+    use: "Socket timestamp mechanics; receive time is not exposure time."
+
+  - id: linuxptp
+    title: "linuxptp project"
+    category: timing
+    status: link-pinned
+    url: https://linuxptp.org/
+    use: "Operational PTP tools and configuration reference."
+
+  - id: rfc3550
+    title: "RTP: A Transport Protocol for Real-Time Applications"
+    category: transport
+    status: link-pinned
+    url: https://www.rfc-editor.org/rfc/rfc3550.html
+    use: "Independent RTP timestamp domains and RTCP mapping."
+
+  - id: rfc8085
+    title: "UDP Usage Guidelines for Application Designers"
+    category: transport
+    status: link-pinned
+    url: https://www.rfc-editor.org/rfc/rfc8085.html
+    use: "Datagram sizing, loss, congestion, and fragmentation guidance."
+
+  - id: rolling_shutter_oth
+    title: "Rolling Shutter Camera Calibration (Oth et al.)"
+    category: timing
+    status: link-pinned
+    url: https://www.cv-foundation.org/openaccess/content_cvpr_2013/papers/Oth_Rolling_Shutter_Camera_2013_CVPR_paper.pdf
+    use: "Line-delay and motion interaction reference."
+
+  - id: temporal_spatial_calibration
+    title: "Joint temporal and spatial calibration (Furgale et al.)"
+    category: timing
+    status: link-pinned
+    url: https://doi.org/10.1109/IROS.2013.6696514
+    use: "Camera/clock calibration framing for later experiments."
+
+  - id: protobuf_proto3
+    title: "Protocol Buffers proto3 language guide"
+    category: schema
+    status: link-pinned
+    url: https://protobuf.dev/programming-guides/proto3/
+    use: "Canonical field, enum, optional, and compatibility semantics."
+
+  - id: protobuf_encoding
+    title: "Protocol Buffers encoding guide"
+    category: schema
+    status: link-pinned
+    url: https://protobuf.dev/programming-guides/encoding/
+    use: "Wire-size reasoning for bounded measurement datagrams."
+
+  - id: protobuf_best_practices
+    title: "Protocol Buffers best practices"
+    category: schema
+    status: link-pinned
+    url: https://protobuf.dev/best-practices/dos-donts/
+    use: "Schema evolution and field-number discipline."
+
+  - id: nanopb
+    title: "nanopb documentation"
+    category: schema
+    status: link-pinned
+    url: https://jpa.kapsi.fi/nanopb/docs/
+    use: "Potential bounded C implementation at the RV1106 edge; benchmark before choosing it."
+
+  - id: blender_manual
+    title: "Blender user manual"
+    category: simulation
+    status: link-pinned
+    url: https://docs.blender.org/manual/en/latest/
+    use: "Deterministic scene/render setup."
+
+  - id: blender_cameras
+    title: "Blender camera manual"
+    category: simulation
+    status: link-pinned
+    url: https://docs.blender.org/manual/en/latest/render/cameras.html
+    use: "Camera projection and lens settings used by the renderer."
+
+  - id: blender_camera_api
+    title: "Blender Python Camera API"
+    category: simulation
+    status: link-pinned
+    url: https://docs.blender.org/api/current/bpy.types.Camera.html
+    use: "Scripted camera pose/intrinsics export."
+
+  - id: blender_output
+    title: "Blender output properties"
+    category: simulation
+    status: link-pinned
+    url: https://docs.blender.org/manual/en/latest/render/output/properties/output.html
+    use: "EXR/PNG output and frame timing settings."
+
+  - id: blender_motion_blur
+    title: "Blender Cycles motion blur"
+    category: simulation
+    status: link-pinned
+    url: https://docs.blender.org/manual/en/latest/render/cycles/render_settings/motion_blur.html
+    use: "Controlled exposure/motion-blur injection; still not a sensor rolling-shutter model."
+
+  - id: isaac_camera
+    title: "NVIDIA Isaac Sim camera sensors"
+    category: simulation
+    status: later
+    url: https://docs.isaacsim.omniverse.nvidia.com/latest/sensors/isaacsim_sensors_camera.html
+    use: "Later independent rendered/ISP-like camera comparison."
+
+  - id: bno055_datasheet
+    title: "Bosch BNO055 datasheet"
+    category: field-validation
+    status: archive-candidate
+    url: https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bno055-ds000.pdf
+    use: "Orientation-prior and magnetic-environment limitations."
+
+  - id: f9p_product_summary
+    title: "u-blox ZED-F9P product summary"
+    category: field-validation
+    status: archive-candidate
+    url: https://content.u-blox.com/sites/default/files/ZED-F9P_ProductSummary_UBX-17005151.pdf
+    document_id: UBX-17005151
+    use: "RTK specification inputs to the camera-pose error budget."
+
+  - id: f9p_integration_manual
+    title: "u-blox ZED-F9P integration manual"
+    category: field-validation
+    status: archive-candidate
+    url: https://content.u-blox.com/sites/default/files/ZED-F9P_IntegrationManual_UBX-18010802.pdf
+    document_id: UBX-18010802
+    use: "Antenna, correction, configuration, timing, and lever-arm details."
+
+  - id: faa_adsb_quality
+    title: "FAA AC 20-165B ADS-B quality metrics"
+    category: field-validation
+    status: archive-candidate
+    url: https://www.faa.gov/documentLibrary/media/Advisory_Circular/AC_20-165B.pdf
+    use: "NACp/NIC interpretation when ADS-B is used as a weak validation factor."
+
+  - id: frpn_safe_midair_capture
+    title: "Towards Safe Mid-Air Drone Interception: Strategies for Tracking & Capture"
+    category: precedent
+    status: link-pinned
+    url: https://arxiv.org/abs/2405.13542v2
+    revision: v2
+    use: "Source-note precedent for tracking/capture research; do not import physical-contact or guidance requirements without separate safety and technical review."
+
+  - id: nimbro_mbzirc_2020
+    title: "Target Chase, Wall Building, and Fire Fighting: Autonomous UAVs of Team NimbRo at MBZIRC 2020"
+    category: precedent
+    status: link-pinned
+    url: https://arxiv.org/abs/2201.03844v1
+    revision: v1
+    use: "Source-note precedent for narrowed acquisition and onboard perception; verify each claimed lesson against the paper."
+
+  - id: bambu_a1_mini
+    title: "Bambu Lab A1 mini product page"
+    category: fabrication
+    status: restricted-link
+    url: https://us.store.bambulab.com/products/a1-mini
+    use: "Vendor source for the nominal 180 x 180 x 180 mm print envelope; verify the active slicer and printer profile."
+
+local_references:
+  - path: v1/docs/RV1106_EDGE_NODE.md
+    role: "Prior edge dataflow and resource-budget hypothesis"
+  - path: v1/docs/THROUGHPUT_30FPS_JETSON.md
+    role: "Prior voxel throughput and camera-bitmask optimization notes"
+  - path: v1/docs/CUDA_DETECTOR_DESIGN.md
+    role: "Prior back-projection and CUDA design hypotheses"
+  - path: v1/docs/conversations/2026-05-28-architecture-review.md
+    role: "Earlier architecture alternatives and calibration discussion"
+  - path: v1/docs/viz-data-contract.md
+    role: "Existing sparse visualizer vocabulary"
+  - path: v1/data/golden/peak_baselines.json
+    role: "Characterization fixture, not field ground truth"
+
+archive_checksums: {}

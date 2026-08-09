@@ -1,0 +1,3 @@
+[console_scripts]
+skyweave2-detect = skyweave2.detector.runner:main
+skyweave2-score = skyweave2.eval.scorecard:main

@@ -1,0 +1,59 @@
+# D6 fault campaign manifest. FROZEN 2026-08-08 (reviewed by Samuel).
+# One axis at a time; the combined recipe at the bottom is held out and
+# runs exactly once. Code reads values from here, never restates them.
+
+schema: d6-faults/1
+base_seed: 7
+
+tier1_image:            # regenerated from kept radiance via sensor model
+  read_noise_sigma_dn: [0.0, 1.0, 3.0]
+  shot_noise: [off, on]
+  blur_px: [0.0, 0.5, 1.5]
+  exposure_scale: [0.5, 1.0, 2.0]
+  brightness_step_dn: [0, 5, 20]        # step at t = 7.5 s (AE transient)
+
+tier2_detection:        # injected into the observation stream
+  false_blobs_per_camera_frame: [0.0, 0.1, 0.5, 2.0]
+  deleted_detections_pct: [0, 5, 20]
+  split_blobs_pct: [0, 5, 15]
+  merged_blobs_pct: [0, 5, 15]
+  centroid_bias_px:
+    constant: [0.0, 0.5, 2.0]
+    slow_varying: [0.0, 0.5, 2.0]       # sinusoid, period 5 s
+
+tier3_model:            # estimator calibration perturbed; truth untouched
+  rotation_err_deg: [0.0, 0.05, 0.1, 0.5, 1.0]
+  position_err_m: [0.0, 0.01, 0.1, 1.0]
+  focal_err_pct: [0.0, 0.1, 0.5]
+  principal_point_err_px: [0.0, 0.5, 2.0]
+  distortion_mismatch: [off, mild, measured_like]
+  rolling_readout_ms: [0.0, 5.0, 15.0, 30.0]   # per-row capture-time shift
+
+tier4_time_stream:      # at the aligner boundary
+  clock_offset_ms: [0.0, 0.5, 2.0, 10.0]
+  drift_ppm: [0.0, 10.0, 100.0]
+  jitter_ms_sigma: [0.0, 0.1, 1.0]
+  observation_loss_pct: [0, 1, 5, 20]
+  loss_mode: [random, burst]
+  reorder: [off, on]
+  duplication: [off, on]
+  lateness: [off, on]
+  node_restart_at_s: 7.5                # session UUID + frame_seq reset
+  camera_dropout: [none, cam0, cam1, cam2]   # second half of clip
+  time_sync_honesty: [honest, dishonest]      # dishonest claims 0.5 ms
+
+honesty_gates:
+  overconfidence_sigma: 5.0
+  overconfidence_tolerance: 0
+
+combined_holdout:       # frozen NOW, before any combined run; scored once
+  read_noise_sigma_dn: 1.0
+  blur_px: 0.5
+  false_blobs_per_camera_frame: 0.1
+  deleted_detections_pct: 5
+  rotation_err_deg: 0.05
+  position_err_m: 0.01
+  clock_offset_ms: 0.5
+  jitter_ms_sigma: 0.1
+  observation_loss_pct: 1
+  time_sync_honesty: honest

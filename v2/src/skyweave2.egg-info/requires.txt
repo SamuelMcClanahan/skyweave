@@ -1,0 +1,13 @@
+numpy>=1.26
+pydantic>=2.6
+msgpack>=1.0.7
+pyyaml>=6.0
+opencv-python-headless>=4.9
+protobuf>=5.27
+
+[dev]
+pytest>=8.0
+ruff>=0.4
+
+[proto]
+grpcio-tools>=1.60

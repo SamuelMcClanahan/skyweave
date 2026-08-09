@@ -1,0 +1,453 @@
+# Skyweave project guide
+
+This is the short, readable version of the current Skyweave plan. It is based
+on the original notes and the later research decisions. The old MVP is useful
+as a record of what was tried, but this guide describes the new v2 system.
+
+**Current priority as of 2026-07-20:** prove the complete pipeline with
+deterministic Blender data flowing through real nodes, real Ethernet, real
+packets, and the real Jetson. After that works under injected noise and faults,
+replace the simulated parts with real camera capture and measured field noise.
+
+## What it is
+
+Skyweave is a cheap, distributed system for detecting and tracking flying
+objects with several fixed cameras.
+
+Each camera watches part of the sky. The cameras have overlapping views and
+send small, timestamped observations to a Jetson. The Jetson combines those
+observations to estimate:
+
+- where the object is in 3D;
+- how it is moving; and
+- how certain that estimate is.
+
+The goal of the first system is not to identify or intercept an aircraft. It
+is to prove that a low-cost camera array can reliably say, "something moving
+is here, at this position, with this velocity." High-altitude tracking is a
+later, bearing-dominant operating regime; precise high-altitude depth is not a
+requirement for the first system.
+
+## How it works (detection)
+
+### 1. Each camera finds motion
+
+The RV1106 receives the camera's Y/luma image. We do not need color to find
+motion.
+
+The first MVP used a difference between consecutive frames. That mostly finds
+the leading and trailing edges of a moving object, so its centroid is not a
+good estimate of the object itself.
+
+The replacement is GMM2, an adaptive per-pixel background model similar in
+spirit to OpenCV MOG2:
+
+1. learn what each pixel normally looks like;
+2. compare new luma frames with that model;
+3. produce a foreground mask; and
+4. clean the mask with thresholding, morphology, connected components, and
+   short temporal persistence.
+
+GMM2 is not just one permanent reference frame. It is a background model that
+can adapt to gradual lighting and cloud changes. We will measure its actual
+warm-up, memory use, latency, and behavior on the clone board rather than
+assuming the hardware documentation is complete.
+
+### 2. The edge sends an observation
+
+The camera node sends a compact observation rather than a full video stream:
+
+- camera and frame identifiers;
+- capture timestamp and sequence number;
+- foreground centroid and 2D uncertainty;
+- bounding box, area, and optional mask or cropped luma evidence; and
+- calibration and firmware revisions.
+
+Optional crops are useful for debugging or a later classifier, but losing a
+crop must not lose the required measurement. Full frames stay in the recording
+and simulation paths, not on the normal real-time measurement path.
+
+### 3. The Jetson aligns time
+
+The Jetson groups observations by their capture event, not by packet arrival.
+It keeps the original PTS, sequence number, dequeue time, publish time, and
+receive time. It estimates clock offset and drift and carries the remaining
+time uncertainty into the measurement quality.
+
+This matters because a fast object can move a meaningful distance between two
+camera exposures. A received-at-the-same-time packet is not necessarily a
+captured-at-the-same-time observation.
+
+### 4. The Jetson searches for a 3D explanation
+
+A pixel gives a ray starting at its camera. A centroid gives one narrow ray;
+a whole foreground mask gives a cone or bundle of rays.
+
+There are two compatible ways to search:
+
+- **Direct geometry:** use this when the camera blobs are compact and their
+  correspondence is obvious.
+- **Voxel evidence:** use this when correspondence is uncertain, there are
+  several blobs, or a silhouette contains useful shape information.
+
+Voxel projection marks the places in 3D that are compatible with several
+camera observations. It produces a volume or several candidate regions, not a
+final position. We keep separate peaks instead of averaging unrelated peaks
+together.
+
+### How voxels and triangulation work together
+
+These are not two competing localization systems. They are two stages using
+the same camera evidence:
+
+- voxels search a large, uncertain 3D space and preserve multiple possible
+  explanations;
+- triangulation takes one selected explanation and solves for its continuous
+  position; and
+- the EKF uses that one refined measurement over time.
+
+For a clear, compact blob, we can skip the voxel search and triangulate
+directly. For multiple blobs, weak detections, or a large silhouette, voxel
+evidence helps find the right region first. We must not send both the voxel
+center and the refined point to the filter as independent measurements.
+
+### 5. Continuous refinement turns a candidate into a measurement
+
+For each voxel candidate, we project it back into the cameras and check which
+components or masks support it. Those supporting observations become the rays
+for a weighted multi-ray solve.
+
+The solve finds the continuous point closest to all selected rays, then
+refines it using the calibrated camera model and reprojection error. This lets
+the final estimate lie between voxel centers and accounts for pixel
+uncertainty, distortion, and bad-camera outliers.
+
+The output includes position, a conditional 3D covariance, a separate
+systematic-error bound, residuals, supporting cameras, triangulation angle,
+and a quality status such as tentative, confirmed, weak geometry, late, or
+rejected. The filter uses the conditional covariance for detector and timing
+noise under the current calibration. Calibration, mount, and other shared
+biases remain separately visible instead of being disguised as independent
+per-frame noise.
+
+The voxel result and the refined triangulation result are not two independent
+measurements. They came from the same pixels. The voxel stage proposes and
+associates; the continuous stage measures.
+
+### 6. The tracker maintains the target over time
+
+The first tracker is an EKF-capable six-state constant-velocity filter:
+
+```text
+[x, y, z, vx, vy, vz]
+```
+
+The refined-XYZ update is the linear case of that interface. Raw camera or
+turret bearings use the nonlinear EKF measurement model. The predicted state
+narrows the next voxel search and rejects measurements with implausible
+innovation/NIS. Geometric residual gates and robust refinement reject bad
+candidates before the filter; track confirmation and coast rules reject short
+false bursts. A fixed-lag or offline smoother can be added later for delayed
+packets or cleaner reconstructed trajectories.
+
+## Hardware Stack
+
+### Fixed camera node (first real target)
+
+- RV1106 clone board, approximately 128 MB DDR3L, with the vendor IVE/RKAIQ
+  camera stack
+- SC3336 rolling-shutter camera over two-lane MIPI CSI
+- BNO055 IMU for a rough orientation prior and mount-movement detection
+- 5 V / 3.5 A PoE splitter and outdoor Ethernet
+- PETG-CF sealed printed enclosure, TPU gaskets, waterproof coating, and a
+  Lexan lens window
+
+The BNO055 is not the final camera-pose reference. Its orientation accuracy is
+not sufficient by itself for a 5 m high-range localization claim.
+
+### Central node
+
+- Jetson Orin Nano Super
+- DC PoE switch, with the current design allowing eight PoE ports and SFP
+  adapters for the Jetson and router
+- short, reliable Ethernet runs for the first tests
+- 12 V SLA battery and step-up supply for field experiments
+- storage for recordings and replay manifests
+- optional Cudy AC12000 mini router for monitoring and operations
+
+The Jetson owns central time alignment, association, geometry, voxel scoring,
+tracking, recording, and the disposable visualizer. The edge node owns capture
+and bounded foreground proposal generation.
+
+### Calibration and later sensors
+
+- ChArUco board for camera intrinsics and distortion at the deployed mode
+- one ZED-F9P base and sequential rover measurements for static node
+  translations
+- optical control points or bundle adjustment for camera orientation and
+  antenna-to-camera lever arms
+- rotating global-shutter turret with an OV9281 (around 100 FPS), NEMA17 motor,
+  ESP32-S3 controller, and an encoder whose exact part number still needs to
+  be confirmed, only after fixed-camera tracking works
+
+## Implementation Steps
+
+Each step is one review unit. Finish its tests and evidence before letting the
+next step depend on it. Do not rewrite the whole MVP at once.
+
+Your immediate next three review units are Steps 1-3. Do not start the Blender
+scene until the analytic error budget has selected the exact scene and gate it
+is supposed to test.
+
+### Phase A: Define what the synthetic system means
+
+#### Step 1: Freeze the minimum contracts
+
+**Do:**
+
+- choose the ENU world frame and OpenCV camera frame;
+- define pixel centres, image sizes, crops, scaling, units, and transform
+  notation;
+- define synthetic capture time, replay time, node-local time, and packet
+  receive time;
+- define `FrameEnvelope`, `Observation2D`, localization result, and track IDs;
+- define conditional measurement covariance and a separate systematic bound.
+
+**Figure out:** what exact event a frame timestamp represents, what reference
+point a small target uses, and which fields must survive replay without live
+node state.
+
+**Done when:** hand-calculated transform, pixel, crop, timestamp, serialization,
+and reboot/session tests all pass.
+
+#### Step 2: Prove the geometry without images
+
+**Do:**
+
+- implement distortion-aware projection and unprojection;
+- generate exact rays for three or more synthetic cameras;
+- implement the deterministic all-ray initializer, cheirality checks,
+  reprojection refinement, and conditional covariance;
+- run Monte Carlo sweeps over baseline, centroid error, pose error, and timing
+  error.
+
+**Figure out:** which baseline and processing resolution can support the 800 ft
+goal, what centroid precision is required, and where depth becomes too weak to
+report as precise.
+
+**Done when:** exact cases reproduce truth, weak geometry is labeled, camera
+order does not change the result, and the error-budget report names the
+dominant terms.
+
+#### Step 3: Freeze one canonical EXP-001 scene
+
+**Do:** choose exact camera poses, useful baseline, FOV, render and detector
+resolutions, target size, target path, speed, frame rate, duration, background
+warm-up, target entry time, shared-FOV interval, and deterministic seed.
+
+**Figure out:** whether the named gate uses a 10 m or larger baseline, what
+processed-pixel centroid repeatability is required, and which point on the
+synthetic target is the declared tracking reference.
+
+**Done when:** one manifest fully reproduces the clean scene and defines range
+and cross-range RMSE/p95, velocity error, acquisition time, false-track rate,
+and conditional-covariance coverage. The 5 m goal applies only to that named
+case.
+
+### Phase B: Build the deterministic fake-camera pipeline
+
+#### Step 4: Generate Blender camera recordings
+
+**Do:** render one exact frame sequence for each virtual camera, derive the
+declared Y/luma input, and save independent truth sidecars containing camera
+pose, target state, exposure time, row timing, sequence, and renderer version.
+Start in Blender. Add or move cases to Isaac Sim only when it provides a
+specific sensor, physics, or scene capability that the Blender pipeline lacks.
+
+**Figure out:** the simplest Blender material, lighting, and background that
+produce a visible target without accidentally making the first detector test
+about photorealism.
+
+**Done when:** the same command and seed reproduce byte-stable metadata and
+equivalent frames, and the estimator cannot read the renderer's truth object.
+
+#### Step 5: Build the host foreground detector
+
+**Do:** start with a fixed-background sanity detector, then implement a
+MOG2/GMM2-like luma reference with warm-up, thresholding, morphology, connected
+components, and short persistence. Convert every component to `Observation2D`.
+
+**Figure out:** detector resolution, learning schedule, target-onset behavior,
+minimum uncertainty floor, and how centroid covariance is calibrated from
+repeatability rather than blob size alone.
+
+**Done when:** clean and negative recordings report detection recall, false
+proposals, centroid bias/repeatability, component count, latency, and memory.
+
+#### Step 6: Build localization, outlier rejection, and tracking
+
+**Do:**
+
+- align observations by their individual synthetic capture times;
+- generate direct pair/all-ray hypotheses;
+- add the small deterministic CPU voxel oracle for ambiguous masks/blobs;
+- continuously refine every accepted candidate;
+- apply support, reprojection, triangulation-angle, conditioning, robust-loss,
+  and temporal-persistence gates;
+- update the EKF and apply innovation/NIS gating;
+- use target-profile process noise and soft acceleration/turn-rate gates rather
+  than permanently assuming every target is a commercial aircraft;
+- implement tentative, confirmed, coast, reacquired, and deleted track states.
+
+**Figure out:** the first simultaneity rule at track birth, when an established
+track motion-compensates observations, and which voxel case must outperform
+direct hypotheses to justify the extra path.
+
+**Done when:** direct and voxel-seeded clean results agree after refinement,
+gross false candidates are rejected before the EKF, and deterministic replay
+produces identical track decisions.
+
+#### Step 7: Add controlled noise one layer at a time
+
+**Do:** add separate switches for image noise/blur/exposure, calibration bias,
+rolling shutter, false or missing blobs, clock offset/drift/jitter, packet
+loss/reorder/lateness, node restart, and camera dropout. Add combined held-out
+scenes only after individual sensitivities are understood.
+
+**Figure out:** which errors the detector, geometric gates, robust refinement,
+and EKF each reject; which errors instead create bias; and what failure must be
+reported rather than smoothed away.
+
+**Done when:** every injected error is visible in the manifest and report,
+uncertainty degrades honestly, outlier rejection has measured false-accept and
+false-reject rates, and no tested case silently emits a precise bad track.
+
+### Phase C: Put fake data through the real wiring
+
+#### Step 8: Define the common replay and packet path
+
+**Do:** implement `RecordedYFrameSource`, the reviewed protobuf observation,
+bounded UDP measurement packets, a reliable control/debug path, and one fusion
+engine shared by local replay and live ingest.
+
+**Figure out:** packet bounds, optional crop/mask expiry, local versus synthetic
+timestamp mapping, replay pacing, and the exact source boundary that later CSI
+capture will replace.
+
+**Done when:** encode/decode/replay is stable, optional evidence can disappear
+without losing geometry, and packet loss/reorder policies are deterministic.
+
+#### Step 9: Replay Blender frames through physical nodes
+
+**Do:** preload each camera's Y sequence onto its corresponding node, schedule
+the sequences from a common test start, run the edge observation path, send the
+real packets through the real switch, and run fusion on the Jetson. Keep truth
+available only to the evaluator.
+
+Run two modes:
+
+1. deterministic mode carries the saved synthetic capture times;
+2. wall-clock mode schedules frames against each node's local clock and tests
+   actual packet age, clock mapping, loss, and reorder.
+
+**Figure out:** whether synthetic frames can enter the actual IVE GMM2 buffer
+path, how much local storage is required, how nodes receive the start command,
+and whether wall-clock replay is repeatable enough for fault tests.
+
+**Done when:** the same saved dataset passes from physical nodes to Jetson and
+reproduces the local reference result within declared tolerances.
+
+#### Step 10: Complete the wired synthetic acceptance run
+
+**Do:** run clean, individually perturbed, combined-noise, and packet-fault
+scenes. Generate one report with detector, network, geometry, covariance,
+outlier, track, latency, and resource metrics.
+
+**Figure out:** which failures are architecture problems and which are merely
+bad simulated operating conditions. Do not tune on the held-out acceptance
+scenes.
+
+**Done when:** the named clean gate passes, failure cases degrade or reject
+honestly, wired replay is reproducible, and every track update can be traced
+back to its exact observations and configuration.
+
+### Phase D: Replace fake assumptions with measured reality
+
+#### Step 11: Adapt the edge to the real camera
+
+**Do:** replace `RecordedYFrameSource` with CSI/ISP capture, bind PTS to exposure
+with a coded LED or equivalent bench event, measure rolling-row timing, and
+benchmark actual IVE GMM2/CCL resolution, model count, memory, FPS, thermals,
+drops, and centroid behavior.
+
+**Figure out:** what PTS physically means, whether chrony/PTP is sufficient,
+which processing resolution fits, and how real masks differ from the host
+reference.
+
+**Done when:** real Y clips replay through the synthetic-tested downstream
+pipeline and the edge has a measured timing and resource budget.
+
+#### Step 12: Characterize real-world noise and calibration
+
+**Do:** collect long negative sky recordings, then test controlled real
+targets. Calibrate intrinsics with the final lens/window, survey translation
+with F9P, solve optical orientation, and measure pose stability across time and
+temperature on the intended PETG-CF mounts in the intended low-wind setting.
+
+**Figure out:** false alarms from clouds, birds, insects, glare, exposure, and
+camera movement; orientation stability; field ground truth; and which
+synthetic noise models need correction.
+
+**Done when:** the real-data report explains the gap from synthetic results and
+names the next measured bottleneck. Only then should the turret, classifier,
+CUDA backend, drone, or interception work enter the critical path.
+
+## Unknowns and Concerns
+
+These are genuine open questions, not details we should pretend are solved:
+
+- **Timestamp meaning:** does the RV1106 PTS correspond closely enough to
+  exposure time, and how much drift/jitter remains?
+- **GMM2 behavior:** what model count, learning schedule, memory footprint, and
+  false-alarm rate can the clone sustain?
+- **Camera pose:** can affordable surveying plus optical control points reach
+  the required orientation accuracy? F9P solves position better than it solves
+  camera attitude.
+- **800 ft accuracy:** how many pixels does the target occupy, what baseline is
+  practical, what processing resolution and centroid repeatability are real,
+  and how much error comes from calibration rather than pixels?
+- **Rolling shutter:** when does row timing matter enough to require a moving
+  target correction?
+- **Correspondence:** can several cameras support a wrong but plausible ghost?
+  Camera count must be combined with residual, geometry, and persistence.
+- **Voxel scaling:** what sparse block size, range representation, and score
+  precision fit the Orin's shared 8 GB memory without hurting accuracy?
+- **Weather and background:** clouds, rain, leaves, glare, darkness, and camera
+  motion may overwhelm a foreground model that looks good in clear synthetic
+  scenes.
+- **Object definition:** for a large silhouette, what point or extent are we
+  actually tracking across cameras?
+- **Mount stability:** PETG-CF and low-wind testing reduce risk, but the entire
+  camera/mount/lens chain still needs a measured orientation-stability budget
+  before field accuracy claims.
+- **Network behavior:** what packet size, loss rate, and clock policy are
+  acceptable over the intended outdoor Ethernet layout?
+- **Long-range depth:** high-altitude operation is bearing-dominant. Coarse
+  range may be reported only when measured geometry supports it.
+
+The synthetic pipeline first proves the architecture against controlled truth.
+The real-camera and field phases then turn these unknowns into measurements one
+at a time.
+
+## First definition of success
+
+The first convincing result is a deterministic Blender recording with three
+or more cameras at a named 800 ft geometry that is replayed by physical nodes,
+crosses the real Ethernet/UDP path, and is fused by the Jetson. It should
+report range/cross-range error, velocity error, conditional-covariance
+coverage, systematic sensitivities, outlier behavior, packet/timing faults,
+false tracks, acquisition time, and resource use.
+
+That result would prove the software pipeline. It would not yet prove field
+pose accuracy, all-weather operation, high-altitude performance, or turret
+interception.

@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skyweave2"
+version = "0.1.0"
+description = "Skyweave v2 rewrite: frozen detection contracts and geometry."
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pydantic>=2.6",
+  "msgpack>=1.0.7",
+  "pyyaml>=6.0",
+  # Required for D4 (finding F-D0-8): the detector REFUSES to run without
+  # cv2 — no silent pure-python fallback on the authoritative path.
+  "opencv-python-headless>=4.9",
+  # D7 wire freeze: the protobuf RUNTIME is a shipping dependency (it decodes
+  # every measurement datagram). The compiler is not — `proto/skyweave.proto`
+  # is compiled once into a checked-in module, see the `proto` extra below.
+  "protobuf>=5.27",
+]
+
+[project.scripts]
+skyweave2-score = "skyweave2.eval.scorecard:main"
+skyweave2-detect = "skyweave2.detector.runner:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.4",
+]
+# Regeneration only (`python -m skyweave2.transport.generate`). Deliberately
+# NOT in `dev`: the generated module is checked in, so the documented
+# `uv sync --extra dev` + `uv run pytest` path never needs a protoc toolchain.
+# Test W1 pins the .proto against the generated descriptor, so drift fails
+# loudly without this extra installed.
+proto = [
+  "grpcio-tools>=1.60",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# protoc output is machine-written and regenerated verbatim; linting it would
+# only ever produce edits that the next regeneration discards.
+extend-exclude = ["src/skyweave2/transport/proto/skyweave_pb2.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

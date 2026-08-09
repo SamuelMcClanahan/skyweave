@@ -1,0 +1,18 @@
+{
+  "config": "v1/configs/sim.yaml",
+  "description": "Deterministic subset of v1 sim-check RunSummary on configs/sim.yaml, source=packet. Latency fields excluded (wall-clock dependent).",
+  "schema_version": 1,
+  "source": "packet",
+  "summary": {
+    "dropped_packets": 0,
+    "false_positive_packets": 0,
+    "frames": 90,
+    "max_track_error_m": 0.0531603753604867,
+    "not_visible_packets": 3,
+    "passed": true,
+    "peak_rmse_m": 0.04418798704186124,
+    "scene": "paper_airplane_arc",
+    "track_rmse_m": 0.02932171213463404,
+    "voxel_size_m": 0.1
+  }
+}

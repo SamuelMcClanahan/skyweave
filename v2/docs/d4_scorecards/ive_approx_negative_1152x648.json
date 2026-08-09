@@ -1,0 +1,40 @@
+{
+  "clip": "../output/exp001_clips/negative/cam0",
+  "config": {
+    "background_frames": 90,
+    "diff_threshold_dn": 12.0,
+    "false_per_frame_max": 2.0,
+    "match_radius_px": 5.0,
+    "min_area_px": 2,
+    "occupancy_max_pct": 0.5,
+    "recall_min": 0.95,
+    "steady_state_tail_fraction": 0.25,
+    "warmup_band_fraction": 0.2
+  },
+  "detector": "ive_approx @ 1152x648",
+  "health": {
+    "component_count": 0.0,
+    "occupancy_pct": 0.0,
+    "steady_state_occupancy_pct": 0.0,
+    "warmup_frames": 90
+  },
+  "pass": {
+    "false_per_frame": true,
+    "occupancy": true,
+    "overall": true
+  },
+  "perf": {
+    "deterministic": false,
+    "fps": 18.694241486006074,
+    "latency_ms_p95": 77.21749360207465,
+    "peak_mem_mb": 640.466944
+  },
+  "quality": {
+    "centroid_err_px_mean": null,
+    "centroid_err_px_p95": null,
+    "eligible_frames": 0,
+    "false_per_frame": 0.0,
+    "recall": null
+  },
+  "schema": "skyweave2-scorecard/1"
+}

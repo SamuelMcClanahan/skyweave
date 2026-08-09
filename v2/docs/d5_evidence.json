@@ -1,0 +1,30 @@
+{
+  "gate/off": {
+    "batches": 283,
+    "candidate_recall": 0.9893617021276596,
+    "false_candidates_per_batch": 0.0,
+    "fusion_runtime_s": 0.5702035419817548,
+    "voxel_groups_total": 0
+  },
+  "gate/on": {
+    "batches": 283,
+    "candidate_recall": 0.9893617021276596,
+    "false_candidates_per_batch": 0.0,
+    "fusion_runtime_s": 3.2248416250222363,
+    "voxel_groups_total": 0
+  },
+  "multiblob/off": {
+    "batches": 59,
+    "candidate_recall": 1.0,
+    "false_candidates_per_batch": 0.03389830508474576,
+    "fusion_runtime_s": 0.18535120799788274,
+    "voxel_groups_total": 0
+  },
+  "multiblob/on": {
+    "batches": 59,
+    "candidate_recall": 1.0,
+    "false_candidates_per_batch": 0.03389830508474576,
+    "fusion_runtime_s": 0.8706702089984901,
+    "voxel_groups_total": 3
+  }
+}

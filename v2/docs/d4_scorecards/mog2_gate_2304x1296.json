@@ -1,0 +1,41 @@
+{
+  "clip": "../output/exp001_clips/gate/cam0",
+  "config": {
+    "background_frames": 90,
+    "diff_threshold_dn": 12.0,
+    "false_per_frame_max": 2.0,
+    "match_radius_px": 5.0,
+    "min_area_px": 2,
+    "occupancy_max_pct": 0.5,
+    "recall_min": 0.95,
+    "steady_state_tail_fraction": 0.25,
+    "warmup_band_fraction": 0.2
+  },
+  "detector": "mog2 @ 2304x1296",
+  "health": {
+    "component_count": 0.7861111111111111,
+    "occupancy_pct": 0.0012090747230319309,
+    "steady_state_occupancy_pct": 0.0,
+    "warmup_frames": 374
+  },
+  "pass": {
+    "false_per_frame": true,
+    "occupancy": true,
+    "overall": true,
+    "recall": true
+  },
+  "perf": {
+    "deterministic": false,
+    "fps": 31.641605080265844,
+    "latency_ms_p95": 40.97137528442545,
+    "peak_mem_mb": 270.778368
+  },
+  "quality": {
+    "centroid_err_px_mean": 0.12564621645061236,
+    "centroid_err_px_p95": 0.24774331750052195,
+    "eligible_frames": 283,
+    "false_per_frame": 0.002777777777777778,
+    "recall": 0.9964664310954063
+  },
+  "schema": "skyweave2-scorecard/1"
+}

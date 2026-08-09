@@ -1,0 +1,75 @@
+# EXP-001 canonical scene manifest. FROZEN 2026-08-05 (phase D2).
+# Any change requires a recorded decision in docs/DETECTION_CONTRACTS_D0.md
+# section 10. Sweeps explore around these values; only this scene gates.
+
+schema: exp001-scene/1
+
+world:
+  units: m
+  frame: enu
+
+target:
+  class: small
+  width_m: 0.75
+  reference: geometric_center          # D0 truth reference decision
+  trajectory: lateral_constant_velocity
+  speed_mps: 30.0
+  nominal_range_m: 243.84              # 800 ft
+
+cameras:
+  count: 3
+  baseline_m: 20.0
+  # D1 budget at 20 m (Modeled, seed 7, N=1000):
+  #   patch-refined: 1.95 / 2.93 / 3.90 m p95 at 0.50 / 0.75 / 1.00 px sigma
+  #   edge-only:     2.93 / 4.39 / 5.96 m p95  -> 1.00 px FAILS the 5 m gate
+  fov_h_deg: 60.0                      # PROVISIONAL: bench-measure a module (60-70 claimed) before first D3 render
+  distortion_model: brown_conrady
+  render_resolution: [2304, 1296]      # SC3336 native; corrects the older 2312x1304 figure
+  proc_resolution_primary: [1536, 864]
+  proc_resolution_sweep:
+    - [2304, 1296]
+    - [1536, 864]
+    - [1152, 648]
+
+timing:
+  fps: 30.0
+  duration_s: 15.0                     # 450 frames per camera, 1350 total (3 cameras)
+  warmup_s: 3.0                        # background only
+  target_entry_s: 3.0
+  shared_fov_min_s: 9.0
+  timestamp_event: exposure_midpoint   # D0 decision
+  exposure_us: 3000.0                  # PROVISIONAL (D3 amendment): ~0.75 px smear at gate speed
+
+determinism:
+  seed: 7
+  renderer: blender                    # exact version pinned at the first D3 render and added here
+
+acceptance:
+  # All Provisional. Clean case; calibration held fixed (biases are swept
+  # and reported separately as systematic sensitivities, per D0).
+  detection_recall_min: 0.95           # of eligible frames
+  # D5 AMENDMENT (2026-08-07): two-channel scoring per D0. Position and
+  # velocity gates score the RANDOM channel: residual about the estimated
+  # slowly-varying target-reference bias. The bias itself gets its own gate
+  # line below. Total error is still reported, never hidden.
+  range_p95_max_m: 5.0
+  cross_range_p95_max_m: 0.5           # random channel
+  systematic_bound_target_reference_max_m: 0.5   # estimated bias magnitude, own gate
+  centroid_sigma_budget_px: 1.0        # full-res, patch-refined path
+  centroid_sigma_tripwire_edge_only_px: 0.75
+  # Tripwire rule (Chosen): the design runs edge-only centroids. If D4
+  # measures centroid sigma above 0.75 px (full-res equivalent) at the
+  # primary proc resolution, the authoritative centroid switches to
+  # patch-refined. Decision by measurement, recorded here.
+  # D5.2 AMENDMENT (2026-08-08): velocity is unobservable at single-batch
+  # birth, so the RMSE gate scores the settled regime and a separate gate
+  # bounds how long settling may take. Transient stays in the report.
+  velocity_rmse_max_mps: 2.0           # random channel, settled regime (after convergence window)
+  velocity_convergence_window_batches: 15
+  velocity_settling_max_s: 1.0         # new gate: settling time bound
+  acquisition_max_s: 1.5               # from shared-FOV entry
+  duplicate_confirmed_tracks_max: 1
+  coverage_note: >
+    Report 1/2/3-sigma covariance coverage. At 3 cameras expect roughly
+    0.55/0.78/0.89, not Gaussian 0.68/0.95/0.997: the covariance scale is
+    estimated from 3 degrees of freedom (D1 hand-back finding).

@@ -1,0 +1,41 @@
+# nanopb field bounds for skyweave.proto (D7 freeze).
+#
+# nanopb is NOT a dependency of this phase (the brief: "schema compatibility
+# only"). This file exists so the bounds the Python ceiling arithmetic assumes
+# and the bounds the D8 C daemon will allocate from are ONE declaration.
+# `skyweave2.transport.wire.WireLimits` mirrors it and test W2 fails if the
+# two ever disagree.
+#
+# Sizes are nanopb max_size (buffer bytes INCLUDING the NUL terminator), so a
+# 36-character UUID declares 37. Counts are max_count (elements).
+
+# -- FrameEnvelope ----------------------------------------------------------
+skyweave.v2.FrameEnvelope.session_uuid    max_size:37
+skyweave.v2.FrameEnvelope.calibration_rev max_size:65
+skyweave.v2.FrameEnvelope.detector_rev    max_size:65
+
+# -- Observation2D ----------------------------------------------------------
+skyweave.v2.Observation2D.evidence_ref    max_size:65
+
+# -- ObservationPacket ------------------------------------------------------
+# One capture event per datagram; measurement data never splits. This count is
+# the largest that fits the 1200 B provisional ceiling at the worst case
+# (every string at its declared bound, every varint at its widest encoding).
+# DERIVED by `sizing.max_observations_under_ceiling()` and re-verified by test
+# W2 — never hand-tuned. Raising the ceiling or shortening a string bound is
+# the only way to raise it, and both are planning-session decisions.
+skyweave.v2.ObservationPacket.observations max_count:5
+
+# -- EvidencePacket ---------------------------------------------------------
+skyweave.v2.EvidencePacket.evidence_ref   max_size:65
+skyweave.v2.EvidencePacket.session_uuid   max_size:37
+skyweave.v2.EvidencePacket.payload        max_size:8192
+
+# -- HealthPacket -----------------------------------------------------------
+skyweave.v2.HealthPacket.session_uuid     max_size:37
+
+# -- Control plane ----------------------------------------------------------
+skyweave.v2.CalibrationRevision.calibration_rev max_size:65
+skyweave.v2.CalibrationRevision.detector_rev    max_size:65
+skyweave.v2.Ack.detail                          max_size:129
+skyweave.v2.ControlMessage.session_uuid         max_size:37
