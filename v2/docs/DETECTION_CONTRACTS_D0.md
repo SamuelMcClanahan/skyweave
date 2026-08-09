@@ -297,7 +297,16 @@ clean, fault manifest byte-unchanged, goldens intact.
 | --- | --- | --- |
 | Wire result | 325 tests pass; W4 parity exact (file vs socket vs 3-process rig); 0 of 39 Tier IV cells diverge from D6 policies; datagram p95 167 B under the 1200 B ceiling | Recorded |
 | Field numbers | ObservationPacket, BoundingBox, HealthPacket, EvidencePacket, ControlMessage numbers and enums as encoded in `v2/proto/skyweave.proto` + golden byte fixtures are hereby the reserved wire numbers (D0 reserved none for these); the .proto is now the authority for wire-level messages | Chosen |
-| Capacity limit | 1200 B admits at most 5 observations per capture event; the D4 detector has no per-frame cap, so a cluttered frame is loudly unsendable. Levers: raise ceiling toward MTU, shorten string bounds, allow splitting, or cap detector components. DECISION DEFERRED TO D8 planning (interacts with the edge byte governor) | Open |
+| Capacity limit | 1200 B admits at most 5 observations per capture event; the D4 detector has no per-frame cap, so a cluttered frame is loudly unsendable. Levers: raise ceiling toward MTU, shorten string bounds, allow splitting, or cap detector components. DECISION DEFERRED TO D8 planning (interacts with the edge byte governor) | Closed 2026-08-08, see D8 opening |
 | binary32 | Envelope float fields are binary32 on the wire per D0; exact round-trip assertions on float64 values will fail by design; widening would be a D0 change | Recorded |
 | Replay pacing | Multi-source replay requires wall-clock pacing with a shared epoch (PTP's job on real boards); accelerated replay bounded by the lateness window, rig pinned to 1x by a derived test | Recorded |
 | Acceptance drift note | Gate-clip numbers moved slightly vs D5.3 (e.g. range p95 0.396 -> 0.313) as a consequence of the D6.1 evidence-derived variance floor changing filter weighting; parity within D7 is exact, which is what this phase gates | Recorded |
+
+### D8 opening (2026-08-08)
+
+| Item | Decision | Label |
+| --- | --- | --- |
+| Datagram ceiling | Raised from 1200 B (Provisional) to 1472 B, the untagged-Ethernet MTU payload (1500 - 20 IP - 8 UDP). The D8/D9 path is a wired switch; MTU 1500 is guaranteed, so no fragmentation. Worst-case capacity by encoding: envelope + header 251 B, 163 B per observation -> 7 observations fit (251 + 7*163 = 1392, headroom 80 B) | Chosen |
+| Observation bound | `ObservationPacket.observations` max_count raised 5 -> 7 in `proto/skyweave.options`. Encoding of existing fixtures is unchanged (max_count is an allocation bound, not a wire value) | Chosen |
+| Detector per-frame cap | The detector gains a per-frame component cap of 7, keeping the top components by descending confidence; dropped components are counted in stats, never silent. The cap lives in the shared `DetectorConfig` so the host detector remains the oracle for D8 frame->packet fixtures, and it aligns with the edge byte governor (RV1106_EDGE_NODE.md section 8), which requires a fixed per-frame bound. Invariant: wire max_count >= detector cap | Chosen |
+| Rejected levers | String-bound shortening (forces golden fixture regeneration for capacity not yet needed) and event splitting across datagrams (adds reassembly and a partial-loss failure mode on lossy UDP, against the loud-failure rule) | Rejected |
