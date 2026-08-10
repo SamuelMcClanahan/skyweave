@@ -306,7 +306,15 @@ clean, fault manifest byte-unchanged, goldens intact.
 
 | Item | Decision | Label |
 | --- | --- | --- |
-| Datagram ceiling | Raised from 1200 B (Provisional) to 1472 B, the untagged-Ethernet MTU payload (1500 - 20 IP - 8 UDP). The D8/D9 path is a wired switch; MTU 1500 is guaranteed, so no fragmentation. Worst-case capacity by encoding: envelope + header 251 B, 163 B per observation -> 7 observations fit (251 + 7*163 = 1392, headroom 80 B) | Chosen |
+| Datagram ceiling | Raised from 1200 B (Provisional) to 1472 B, the untagged-Ethernet MTU payload (1500 - 20 IP - 8 UDP). The D8/D9 path is a wired switch; MTU 1500 is guaranteed, so no fragmentation. Worst-case capacity by encoding: envelope + header 251 B, 163 B per observation -> 7 observations fit (251 + 7*163 = 1392, headroom 80 B). CORRECTION 2026-08-09: that arithmetic omitted repeated-field tag/length overhead; the encoder-derived worst case is 1404 B, headroom 68 B (D8_EDGE_REPORT.md). 7 observations still fit; the decision stands | Chosen |
 | Observation bound | `ObservationPacket.observations` max_count raised 5 -> 7 in `proto/skyweave.options`. Encoding of existing fixtures is unchanged (max_count is an allocation bound, not a wire value) | Chosen |
 | Detector per-frame cap | The detector gains a per-frame component cap of 7, keeping the top components by descending confidence; dropped components are counted in stats, never silent. The cap lives in the shared `DetectorConfig` so the host detector remains the oracle for D8 frame->packet fixtures, and it aligns with the edge byte governor (RV1106_EDGE_NODE.md section 8), which requires a fixed per-frame bound. Invariant: wire max_count >= detector cap | Chosen |
 | Rejected levers | String-bound shortening (forces golden fixture regeneration for capacity not yet needed) and event splitting across datagrams (adds reassembly and a partial-loss failure mode on lossy UDP, against the loud-failure rule) | Rejected |
+
+### D8.0 amendment (2026-08-09)
+
+| Item | Decision | Label |
+| --- | --- | --- |
+| Wire confidence | Area-derived, Samuel's call after the D8.0 hand-back surfaced the runner/cap/daemon disagreement: `confidence = min(1.0, area_px / 50.0)` with `area_px` at proc resolution (the formula the pre-D8 runner carried). Defined in ONE place (`component_confidence()` in `detector/cap.py`); the runner emits it, the cap ranks by it, and the C daemon (`sw_pipeline.c`) mirrors it with integer-safe math. The E-series invariants stay: reported confidence == ranked confidence, and a fresh oracle run must reproduce the committed fixture bytes | Chosen |
+| Fixture regeneration | Sanctioned with this entry as the recorded reason: the confidence wire field changes value, so the D8 frame-to-packet fixtures and any packet-byte fixture carrying a non-saturated component regenerate from the host oracle. Golden manifest files (`golden/`) are NOT affected — this touches D8 fixtures only. The wire byte-identity gate (E2/E5) re-applies AFTER regeneration and stays absolute | Chosen |
+| Constant 1.0 | Superseded by this entry (it was the D8.0 hand-back's interim restoration, correct at the time: it made host and edge agree) | Rejected |

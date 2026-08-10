@@ -1,6 +1,6 @@
 """TransportConfig: the operational knobs of the wire path.
 
-The split is deliberate. Values that ARE the freeze — the 1200 B ceiling, the
+The split is deliberate. Values that ARE the freeze — the datagram ceiling, the
 magic bytes, the wire version, the declared field bounds — live in
 ``wire.py`` as constants, because a config field implies "tune me" and none of
 them may be tuned without a recorded decision. Everything here is

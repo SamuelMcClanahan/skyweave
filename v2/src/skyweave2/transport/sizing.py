@@ -1,4 +1,4 @@
-"""Worst-case datagram arithmetic for the 1200 B ceiling (W2).
+"""Worst-case datagram arithmetic for the measurement ceiling (W2, E1).
 
 "Verified against the worst case" has to mean the worst case the SCHEMA
 allows, not the worst case the current gate clip happens to produce. So the

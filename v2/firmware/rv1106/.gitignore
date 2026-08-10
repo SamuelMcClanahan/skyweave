@@ -1,0 +1,6 @@
+# Build trees. `build-host` is what the E-series builds on demand and
+# `build-board` is the container's output; both are derived and neither is a
+# deliverable — the deliverable is the source plus the pinned container.
+build-host/
+build-board/
+build-*/

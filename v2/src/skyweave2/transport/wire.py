@@ -10,8 +10,11 @@ allocates nothing for it, and an unknown schema version is rejected BEFORE any
 parsing. The same header prefixes the body of a TCP control frame, behind its
 length prefix.
 
-The 1200-byte ceiling is PROVISIONAL (D0 section 10, "D7 opening") and is a
-hard limit in both directions:
+The measurement ceiling is 1472 B (D0 section 10, "D8 opening"): the payload
+an untagged-Ethernet MTU carries, 1500 - 20 IP - 8 UDP. It replaces D7's
+Provisional 1200 B. The D8/D9 path is a wired switch where MTU 1500 is
+guaranteed, so a datagram at this ceiling never fragments. It is a hard limit
+in both directions:
 
 - encode side: a body that would exceed it raises :class:`DatagramTooLarge`.
   There is no truncating path and no fragmenting path — measurement data never
@@ -36,10 +39,15 @@ WIRE_VERSION = 1
 HEADER_FORMAT = ">2sBB"
 HEADER_LEN = struct.calcsize(HEADER_FORMAT)
 
-# Provisional ceiling for the measurement plane (D0 section 10). Includes the
-# 4-byte header: it is a ceiling on the DATAGRAM, which is what the network
-# carries, not on the protobuf body alone.
-DATAGRAM_CEILING_BYTES = 1200
+# Ceiling for the measurement plane (D0 section 10, "D8 opening" — Chosen).
+# Includes the 4-byte header: it is a ceiling on the DATAGRAM, which is what
+# the network carries, not on the protobuf body alone.
+#
+# 1472 = 1500 (untagged Ethernet MTU) - 20 (IPv4) - 8 (UDP). Raising it past
+# this point would buy capacity by fragmenting, which trades a loud encode
+# failure for a silent partial-loss failure mode on lossy UDP — the D8 opening
+# rejected exactly that lever.
+DATAGRAM_CEILING_BYTES = 1472
 
 # Evidence rides its own droppable channel and is explicitly allowed to exceed
 # the measurement ceiling (and therefore to IP-fragment): losing it may never
@@ -102,7 +110,7 @@ class TooManyObservations(WireError):
     """A capture event carried more observations than the declared bound.
 
     Separate from :class:`DatagramTooLarge` on purpose. A packet can sit well
-    under 1200 B and still exceed ``observations max_count`` when the
+    under the byte ceiling and still exceed ``observations max_count`` when the
     revision strings are short — and the D8 nanopb daemon allocates from the
     COUNT, so it would fail to decode a datagram this host was happy to send.
     Both bounds are enforced; neither is inferred from the other.
@@ -139,7 +147,10 @@ class WireLimits:
     evidence_payload_max_size: int = 8192
     ack_detail_max_size: int = 129
     # DERIVED from the ceiling, not chosen: see sizing.max_observations_under_ceiling.
-    observations_max_count: int = 5
+    # 7 at the 1472 B ceiling (D0 section 10, "D8 opening"). The detector's
+    # per-frame component cap must never exceed this — test E1 pins that
+    # direction, because the daemon allocates its packet from THIS number.
+    observations_max_count: int = 7
 
     def text_len(self, max_size: int) -> int:
         """Characters that fit in a nanopb buffer of ``max_size`` bytes."""

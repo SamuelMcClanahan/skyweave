@@ -3,7 +3,7 @@
 The pipeline per the D4 brief: luma frame -> background model update
 (warm-up schedule) -> foreground mask -> threshold (backend-internal) ->
 small morphology -> connected components -> component measurements ->
-short persistence -> Observation2D.
+short persistence -> per-frame cap (D8) -> Observation2D.
 
 Frozen-contract rules honored here:
 - centroids reported in FULL-resolution coordinates via the D0 scaling law
@@ -39,6 +39,11 @@ from skyweave2.contracts import (
     proc_to_full,
 )
 from skyweave2.detector.backends import make_backend
+from skyweave2.detector.cap import (
+    DETECTOR_CONFIDENCE,
+    DetectorStats,
+    apply_component_cap,
+)
 from skyweave2.detector.components import (
     MaskComponent,
     _require_cv2,
@@ -64,10 +69,28 @@ class FrameDetections:
     emitted: list[tuple[MaskComponent, int, int]]  # (component, persistence, blob_id)
     occupancy: float  # foreground fraction at proc resolution
     elapsed_s: float
+    # Components that passed persistence and were then removed by the
+    # per-frame cap (D8). Zero on every frame at or under the cap; never
+    # inferred from `len(emitted)`, because the cap and the persistence
+    # filter drop for different reasons and only one of them is a policy.
+    dropped_over_cap: int = 0
+
+    @property
+    def offered(self) -> int:
+        """Components that passed persistence, before the cap."""
+        return len(self.emitted) + self.dropped_over_cap
 
 
-def run_detector(clip_dir: str | Path, config: DetectorConfig) -> list[FrameDetections]:
-    """Run the configured backend over a clip; components at proc resolution."""
+def run_detector(
+    clip_dir: str | Path, config: DetectorConfig, stats: DetectorStats | None = None
+) -> list[FrameDetections]:
+    """Run the configured backend over a clip; components at proc resolution.
+
+    ``stats`` accumulates the cap bookkeeping across the clip when given.
+    The per-frame counts are on the returned rows either way, so the caller
+    can never end up with emitted components and no record of what the cap
+    removed.
+    """
     cv2 = _require_cv2()
     meta = read_clip_meta(clip_dir)
     backend = make_backend(config)
@@ -87,10 +110,23 @@ def run_detector(clip_dir: str | Path, config: DetectorConfig) -> list[FrameDete
             continue
         mask = open_mask(mask, config.open_radius_px)
         components = find_components(mask, config.min_area_px, config.max_area_px)
-        emitted = persistence.update(components)
+        # Persistence runs on ALL components: the cap decides what is SENT,
+        # never what the detector remembers. Capping first would make a
+        # crowded frame amnesiac about the blobs it dropped, and their
+        # persistence counts would restart the moment the crowd thinned.
+        capped = apply_component_cap(
+            persistence.update(components), config.max_components_per_frame
+        )
+        if stats is not None:
+            stats.record(capped)
         results.append(
             FrameDetections(
-                seq, components, emitted, float(mask.mean()), time.perf_counter() - start
+                seq,
+                components,
+                capped.kept,
+                float(mask.mean()),
+                time.perf_counter() - start,
+                dropped_over_cap=capped.dropped,
             )
         )
     return results
@@ -105,10 +141,11 @@ def detect_clip(
     clip_dir: str | Path,
     config: DetectorConfig,
     camera_id: int = 0,
+    stats: DetectorStats | None = None,
 ) -> tuple[list[Observation2D], list[FrameDetections]]:
     """Full pipeline: run the backend and emit frozen-contract observations."""
     meta = read_clip_meta(clip_dir)
-    results = run_detector(clip_dir, config)
+    results = run_detector(clip_dir, config, stats=stats)
     scale_x = meta.width / config.proc_width
     scale_y = meta.height / config.proc_height
     session = _session_uuid(json.dumps(meta.model_dump(), sort_keys=True), config, camera_id)
@@ -150,7 +187,9 @@ def detect_clip(
                     bbox_h=max(1, int(np.ceil(comp.bbox_h * scale_y))),
                     area_px=comp.area_px,
                     persistence_count=count,
-                    confidence=1.0,
+                    # The quantity the per-frame cap ranks by; see
+                    # detector/cap.py for why it is constant.
+                    confidence=DETECTOR_CONFIDENCE,
                     local_blob_id=blob_id,
                     evidence_ref=None,
                 )
@@ -221,7 +260,10 @@ def main(argv: list[str] | None = None) -> None:
         if args.config
         else DetectorConfig()
     )
-    observations, results = detect_clip(args.clip, config, camera_id=args.camera_id)
+    stats = DetectorStats()
+    observations, results = detect_clip(
+        args.clip, config, camera_id=args.camera_id, stats=stats
+    )
     with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
         for obs in observations:
             fh.write(json.dumps(obs.model_dump(mode="json"), sort_keys=True) + "\n")
@@ -229,6 +271,14 @@ def main(argv: list[str] | None = None) -> None:
     print(
         f"wrote {args.out}: {len(observations)} observations over "
         f"{emitted_frames}/{len(results)} frames ({config.backend.value})"
+    )
+    # Printed unconditionally, including the zero case: a cap that only
+    # announces itself when it bites reads as "no cap" the rest of the time.
+    print(
+        f"cap {config.max_components_per_frame}/frame: "
+        f"{stats.components_dropped_over_cap} component(s) dropped over "
+        f"{stats.frames_at_cap} frame(s); busiest frame offered "
+        f"{stats.max_components_offered}"
     )
 
 

@@ -1,0 +1,24 @@
+{
+  "camera_id": 0,
+  "capture_events": 39,
+  "detector": {
+    "components_dropped_over_cap": 0,
+    "components_emitted": 156,
+    "components_offered": 156,
+    "frames": 40,
+    "frames_at_cap": 0,
+    "max_components_offered": 4
+  },
+  "environment": {
+    "numpy": "2.2.6",
+    "opencv": "5.0.0",
+    "protobuf": "7.35.1",
+    "python": "3.10.20"
+  },
+  "injection_sha256": "705349c9f7a60238d27f34d4df1c55bf8b6ff4f1533367cf9491bc14cbfebe98",
+  "max_observations_per_event": 4,
+  "name": "sparse",
+  "observations": 156,
+  "packet_bytes_max": 350,
+  "session_uuid": "d8fixture-sparse-0000-0000-000000000"
+}

@@ -374,6 +374,24 @@ class Health:
     Not a D0 contract type — it carries no measurement and never reaches the
     estimator. The IMU quaternion is xyzw per D0 section 1, and is mount
     telemetry only: "derived, never authoritative".
+
+    ``drops`` semantics, assigned by D8 (the daemon is its first real
+    producer; before D8 only fixtures set it): the cumulative count of
+    MEASUREMENT ITEMS THE NODE DID NOT SEND since boot — frames dropped
+    before detection plus components removed by the per-frame cap
+    (``DetectorConfig.max_components_per_frame``). Monotonic within a
+    session; a reset means a reboot, which the ``session_uuid`` change
+    already announces (D0 section 3).
+
+    It is deliberately a TOTAL and not a breakdown. ``HealthPacket`` has one
+    counter field and adding another would be a wire change this phase is
+    not sanctioned to make (the D8 opening sanctions the capacity touch and
+    nothing else). The daemon keeps the causes separated in its own stats
+    and prints them; the composition is recorded in the D8 report as
+    finding D8-F2, with splitting the counter listed as a D9 lever. What
+    this field guarantees is the property that matters: a node that drops
+    measurements says so on the wire, every second, and the number never
+    stops at zero because nobody counted.
     """
 
     camera_id: int

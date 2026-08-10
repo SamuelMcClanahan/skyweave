@@ -1,0 +1,24 @@
+{
+  "camera_id": 0,
+  "capture_events": 283,
+  "detector": {
+    "components_dropped_over_cap": 0,
+    "components_emitted": 283,
+    "components_offered": 283,
+    "frames": 360,
+    "frames_at_cap": 0,
+    "max_components_offered": 1
+  },
+  "environment": {
+    "numpy": "2.2.6",
+    "opencv": "5.0.0",
+    "protobuf": "7.35.1",
+    "python": "3.10.20"
+  },
+  "injection_sha256": "df0d1573d40788e193c14d8ad3ca05110ce5b7a6ac7f096ef65c8a74ba1b1f64",
+  "max_observations_per_event": 1,
+  "name": "gate",
+  "observations": 283,
+  "packet_bytes_max": 161,
+  "session_uuid": "d8fixture-gate-0000-0000-00000000000"
+}

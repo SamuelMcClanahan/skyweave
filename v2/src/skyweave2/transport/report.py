@@ -430,8 +430,8 @@ def generate(seed: int, out_path: str, evidence_path: str | None,
     a("| Schema | `proto/skyweave.proto`, proto3, package `skyweave.v2` |")
     a(f"| Datagram header | {HEADER_LEN} B: magic `{MAGIC.decode()}`, "
       f"version {WIRE_VERSION}, payload type |")
-    a(f"| Measurement ceiling | {DATAGRAM_CEILING_BYTES} B per datagram, "
-      "Provisional (D0 section 10) |")
+    a(f"| Measurement ceiling | {DATAGRAM_CEILING_BYTES} B per datagram "
+      "(D0 section 10) |")
     a("| Measurement plane | UDP, one capture event per datagram, never "
       "retransmitted, never split |")
     a("| Evidence plane | separate UDP socket, droppable, explicit expiry |")
@@ -510,7 +510,8 @@ def generate(seed: int, out_path: str, evidence_path: str | None,
     a(f"| Worst-case datagram | {budget.total_bytes} |")
     a(f"| Headroom | {budget.headroom_bytes} |")
     a("")
-    a(f"**The 1200 B ceiling admits at most {derived_max} observations per")
+    a(f"**The {DATAGRAM_CEILING_BYTES} B ceiling admits at most {derived_max} "
+      "observations per")
     a("capture event** at the declared bounds. That number is derived by")
     a("encoding, not estimated, and `proto/skyweave.options` declares exactly")
     a("it, so the D8 nanopb daemon allocates the same bound this host enforces.")
@@ -752,7 +753,8 @@ def generate(seed: int, out_path: str, evidence_path: str | None,
     a("")
     a("### D7-F5 — a receive buffer sized at the ceiling truncates silently")
     a("")
-    a("`recv(1200)` on an oversized datagram returns 1200 bytes with no error")
+    a(f"`recv({DATAGRAM_CEILING_BYTES})` on an oversized datagram returns "
+      f"{DATAGRAM_CEILING_BYTES} bytes with no error")
     a("and no flag; the tail is gone and what remains often still parses. The")
     a("receiver therefore reads into a 65535 B buffer and REJECTS anything over")
     a("the ceiling. Demonstrated on this platform rather than assumed:")

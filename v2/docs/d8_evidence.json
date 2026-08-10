@@ -1,0 +1,163 @@
+{
+  "container": {
+    "base": "debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241",
+    "cmake": "cmake version 3.25.1",
+    "debian": "12.15",
+    "gcc": "8.3.0",
+    "git": "git version 2.39.5",
+    "luckfox_commit": "824b817f889c2cbff1d48fcdb18ab494a68f69d1",
+    "luckfox_repo": "https://github.com/LuckfoxTECH/luckfox-pico.git",
+    "toolchain": "arm-rockchip830-linux-uclibcgnueabihf"
+  },
+  "daemon": {
+    "path": "firmware/rv1106/build-host/skyweave-edge",
+    "sha256": "ddc4c6b378a3eded7f228b5d27ac1297cf5c143d942c03fbc4f9097906bb6ff9"
+  },
+  "fixtures": {
+    "clutter": {
+      "breaches": [],
+      "datagrams_byte_identical_to_oracle": true,
+      "detector": "soft",
+      "divergence": {
+        "candidate_events": 39,
+        "candidate_observations": 273,
+        "centroid_max_px": 0.0,
+        "centroid_mean_px": 0.0,
+        "centroid_p95_px": 0.0,
+        "common_events": 39,
+        "count_mismatch_events": 0,
+        "count_mismatch_fraction": 0.0,
+        "extra": 0,
+        "extra_per_event": 0.0,
+        "matched": 273,
+        "missed": 0,
+        "missed_fraction": 0.0,
+        "oracle_events": 39,
+        "oracle_observations": 273
+      },
+      "stats": {
+        "bytes_sent": 21007,
+        "camera_id": 0,
+        "capture_events": 39,
+        "components_dropped_over_cap": 83,
+        "components_emitted": 273,
+        "components_offered": 356,
+        "components_shed_by_detector": 0,
+        "control_frames_in": 0,
+        "control_frames_out": 0,
+        "control_rejected": 0,
+        "datagrams_sent": 39,
+        "detector": "soft-gmm2",
+        "events_unencodable": 0,
+        "frames_at_cap": 37,
+        "frames_detector_failed": 0,
+        "frames_in": 60,
+        "frames_scored": 40,
+        "frames_shed_by_detector": 0,
+        "health_drops_total": 83,
+        "health_sent": 1,
+        "max_components_offered": 10,
+        "max_components_per_frame": 7,
+        "observations_sent": 273,
+        "proc_height": 240,
+        "proc_width": 320,
+        "send_failures": 0,
+        "socket_bytes_sent": 21081,
+        "socket_datagrams_sent": 40,
+        "wire_observations_max_count": 7
+      }
+    },
+    "sparse": {
+      "breaches": [],
+      "datagrams_byte_identical_to_oracle": true,
+      "detector": "soft",
+      "divergence": {
+        "candidate_events": 39,
+        "candidate_observations": 156,
+        "centroid_max_px": 0.0,
+        "centroid_mean_px": 0.0,
+        "centroid_p95_px": 0.0,
+        "common_events": 39,
+        "count_mismatch_events": 0,
+        "count_mismatch_fraction": 0.0,
+        "extra": 0,
+        "extra_per_event": 0.0,
+        "matched": 156,
+        "missed": 0,
+        "missed_fraction": 0.0,
+        "oracle_events": 39,
+        "oracle_observations": 156
+      },
+      "stats": {
+        "bytes_sent": 13639,
+        "camera_id": 0,
+        "capture_events": 39,
+        "components_dropped_over_cap": 0,
+        "components_emitted": 156,
+        "components_offered": 156,
+        "components_shed_by_detector": 0,
+        "control_frames_in": 0,
+        "control_frames_out": 0,
+        "control_rejected": 0,
+        "datagrams_sent": 39,
+        "detector": "soft-gmm2",
+        "events_unencodable": 0,
+        "frames_at_cap": 0,
+        "frames_detector_failed": 0,
+        "frames_in": 60,
+        "frames_scored": 40,
+        "frames_shed_by_detector": 0,
+        "health_drops_total": 0,
+        "health_sent": 1,
+        "max_components_offered": 4,
+        "max_components_per_frame": 7,
+        "observations_sent": 156,
+        "proc_height": 240,
+        "proc_width": 320,
+        "send_failures": 0,
+        "socket_bytes_sent": 13711,
+        "socket_datagrams_sent": 40,
+        "wire_observations_max_count": 7
+      }
+    }
+  },
+  "schema": "d8-evidence/3",
+  "seed": 7,
+  "suites": {
+    "edge": {
+      "error": 0,
+      "failed": 0,
+      "passed": 84,
+      "returncode": 0,
+      "selector": "tests/edge",
+      "skipped": 0,
+      "summary": "84 passed in 10.78s"
+    },
+    "full": {
+      "error": 0,
+      "failed": 0,
+      "passed": 409,
+      "returncode": 0,
+      "selector": "tests",
+      "skipped": 1,
+      "summary": "409 passed, 1 skipped in 249.41s (0:04:09)"
+    }
+  },
+  "wire_identity": {
+    "clutter": {
+      "datagrams": 39,
+      "expected_datagrams": 39,
+      "identical": true
+    },
+    "gate": {
+      "datagrams": 283,
+      "expected_datagrams": 283,
+      "identical": true
+    },
+    "sparse": {
+      "datagrams": 39,
+      "expected_datagrams": 39,
+      "identical": true
+    }
+  }
+}

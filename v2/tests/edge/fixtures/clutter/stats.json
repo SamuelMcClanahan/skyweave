@@ -1,0 +1,24 @@
+{
+  "camera_id": 0,
+  "capture_events": 39,
+  "detector": {
+    "components_dropped_over_cap": 83,
+    "components_emitted": 273,
+    "components_offered": 356,
+    "frames": 40,
+    "frames_at_cap": 37,
+    "max_components_offered": 10
+  },
+  "environment": {
+    "numpy": "2.2.6",
+    "opencv": "5.0.0",
+    "protobuf": "7.35.1",
+    "python": "3.10.20"
+  },
+  "injection_sha256": "b8cf5cc9f6a744fbb6204a20e0e9fd7a3f2d08b430b38488725d92effea26c06",
+  "max_observations_per_event": 7,
+  "name": "clutter",
+  "observations": 273,
+  "packet_bytes_max": 540,
+  "session_uuid": "d8fixture-clutter-0000-0000-00000000"
+}

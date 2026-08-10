@@ -79,6 +79,22 @@ class DetectorConfig(BaseModel):
     persistence_frames: int = Field(default=2, ge=1)
     persistence_gate_px: float = Field(default=12.0, gt=0.0)  # at proc resolution
 
+    # Per-frame component cap (D0 section 10, "D8 opening" — Chosen). At most
+    # this many components become observations in one capture event; the rest
+    # are DROPPED and COUNTED (never silent, see DetectorStats).
+    #
+    # It exists because one capture event is one datagram that never splits:
+    # without a cap a cluttered frame is a loud encode failure and a lost
+    # measurement. The cap lives here, in the SHARED config, so the host
+    # detector stays the oracle for the D8 frame->packet fixtures and the edge
+    # byte governor (RV1106_EDGE_NODE.md section 8) reads the same number.
+    #
+    # Invariant, pinned by test E1: `WireLimits.observations_max_count >=
+    # max_components_per_frame`. The wire bound is what the nanopb daemon
+    # ALLOCATES from, so a cap above it would emit events the board cannot
+    # decode. Raising the cap is a ceiling decision, not a detector decision.
+    max_components_per_frame: int = Field(default=7, ge=1)
+
     # Centroid covariance floor, FULL-RESOLUTION px^2. Provisional default;
     # replaced by the Measured repeatability number this phase produces.
     centroid_cov_floor_px2: float = Field(default=0.25, gt=0.0)

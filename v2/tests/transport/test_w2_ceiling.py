@@ -1,4 +1,4 @@
-"""W2: the 1200 B ceiling, verified against the worst case the SCHEMA allows.
+"""W2: the datagram ceiling, verified against the worst case the SCHEMA allows.
 
 A too-big datagram must FAIL LOUDLY and never truncate. Three distinct
 truncation routes exist and each is tested separately, because each one fails
@@ -392,12 +392,11 @@ def test_options_parser_reads_the_file_not_the_defaults(tmp_path):
     from skyweave2.transport.wire import _OPTIONS_PATH
 
     shifted = tmp_path / "shifted.options"
-    shifted.write_text(
-        _OPTIONS_PATH.read_text(encoding="utf-8").replace(
-            "observations max_count:5", "observations max_count:3"
-        ),
-        encoding="utf-8",
-    )
+    original = _OPTIONS_PATH.read_text(encoding="utf-8")
+    declared = f"observations max_count:{WIRE_LIMITS.observations_max_count}"
+    assert declared in original, "the .options file no longer declares this bound"
+    shifted.write_text(original.replace(declared, "observations max_count:3"),
+                       encoding="utf-8")
     assert declared_limits_from_options(shifted).observations_max_count == 3
 
 

@@ -74,6 +74,17 @@ An agent must not start D8.1 until Samuel confirms the flashed node.
    eyeballed via the optional debug stream. Not scored, no PTS claims.
    Full CSI/ISP/PTS characterization is deferred (C2/C3 remain parked).
 
+## D8.0a amendment (2026-08-09, after the D8.0 hand-back)
+
+Adopt the area-derived wire confidence per the "D8.0 amendment" entry in
+the D0 decisions log: `min(1.0, area_px / 50.0)`, defined once in
+`component_confidence()`, mirrored integer-safe in `sw_pipeline.c`,
+D8 fixtures regenerated from the host oracle (the log entry is the
+recorded reason), E2/E5 byte-identity re-applied after regeneration.
+The two hand-back tests (reported == ranked; fresh oracle reproduces
+committed bytes) must pass unchanged in form. Full suite + ruff green,
+adversarial review before hand-back, as always.
+
 ## Tests (E-series)
 
 E1 capacity: cap + max_count + ceiling constants agree, invariant holds,

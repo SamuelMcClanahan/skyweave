@@ -19,12 +19,17 @@ skyweave.v2.Observation2D.evidence_ref    max_size:65
 
 # -- ObservationPacket ------------------------------------------------------
 # One capture event per datagram; measurement data never splits. This count is
-# the largest that fits the 1200 B provisional ceiling at the worst case
-# (every string at its declared bound, every varint at its widest encoding).
+# the largest that fits the 1472 B ceiling at the worst case (every string at
+# its declared bound, every varint at its widest encoding).
 # DERIVED by `sizing.max_observations_under_ceiling()` and re-verified by test
 # W2 — never hand-tuned. Raising the ceiling or shortening a string bound is
 # the only way to raise it, and both are planning-session decisions.
-skyweave.v2.ObservationPacket.observations max_count:5
+#
+# D8 opening (2026-08-08): raised 5 -> 7 with the ceiling 1200 -> 1472 B.
+# max_count is an ALLOCATION bound, not a wire value, so no encoded byte
+# changes and every golden fixture stands. The D8 detector cap (7) is checked
+# against this number by test E1: wire max_count >= detector cap, always.
+skyweave.v2.ObservationPacket.observations max_count:7
 
 # -- EvidencePacket ---------------------------------------------------------
 skyweave.v2.EvidencePacket.evidence_ref   max_size:65
