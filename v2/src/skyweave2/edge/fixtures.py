@@ -237,7 +237,12 @@ class FixtureBuild:
     stats: DetectorStats
     packets: list[bytes]
     injection_sha256: str
-    seed: int = SCENE_SEED
+    # The seed that produced this fixture's PIXELS, or None when no seed did.
+    # The gate fixture's clip is a render artifact, so recording a seed for it
+    # would assert a determinism input it does not have — the standing rule is
+    # that the artifact records the seed it was built with, and "none" is an
+    # honest answer where "7" is a false one.
+    seed: int | None = SCENE_SEED
 
 
 def _environment() -> dict[str, str]:
@@ -276,7 +281,7 @@ def build_fixture(
     config: DetectorConfig,
     camera_id: int = 0,
     profile: PtsProfile | None = None,
-    seed: int = SCENE_SEED,
+    seed: int | None = SCENE_SEED,
 ) -> FixtureBuild:
     """Run the oracle over a clip and encode every capture event."""
     stats = DetectorStats()
@@ -615,7 +620,9 @@ def _regenerate(root: Path, include_gate: bool, seed: int = SCENE_SEED) -> None:
             "artifact. Re-run with --no-gate to regenerate the synthetic "
             "fixtures alone, or restore the golden clips first."
         )
-    gate_build = build_fixture("gate", GATE_CLIPS / "cam0", gate_config())
+    # seed=None: the gate clip is a machine-local render artifact, so no seed
+    # of ours produced its pixels and the fixture must not claim one.
+    gate_build = build_fixture("gate", GATE_CLIPS / "cam0", gate_config(), seed=None)
     write_fixture(gate_build, root / "gate")
     print(
         f"gate: {len(gate_build.observations)} observations, "

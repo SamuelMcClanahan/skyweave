@@ -20,5 +20,6 @@
   "name": "gate",
   "observations": 283,
   "packet_bytes_max": 161,
+  "seed": null,
   "session_uuid": "d8fixture-gate-0000-0000-00000000000"
 }

@@ -127,6 +127,194 @@ def test_the_portable_detector_is_currently_byte_exact(replays, name):
 
 
 # ---------------------------------------------------------------------------
+# The saturated branch of the confidence, which no committed fixture reaches
+# ---------------------------------------------------------------------------
+
+_SAT_FULL_WIDTH = 640
+_SAT_FULL_HEIGHT = 480
+_SAT_FRAMES = 30
+_SAT_WARMUP = 10
+
+# Blob widths, at FULL resolution, for the two clips below. Chosen to place
+# the resulting proc-resolution AREAS where each clip needs them; nothing else
+# about the detector is touched (anti-tuning).
+#
+# STRADDLE: components from 38 px to 91 px, including 49, 50 and 51 — below
+# the saturation area, exactly on it, and well above it. Five movers against a
+# cap of seven, so the cap stays inert and every component reaches the wire
+# where its bytes can be compared.
+_STRADDLE_SIGMAS_PX = (6.0, 6.3, 6.6, 6.9, 8.0)
+# CROWDED: nine movers, all comfortably saturated, against a cap of seven.
+_CROWDED_SIGMAS_PX = (8.0, 8.6, 9.2, 9.8, 10.4, 11.0, 11.6, 12.2, 12.8)
+
+
+def _fat_clip(out_dir, sigmas, source):
+    """Slow movers wide enough to saturate the confidence, on a fixed seed.
+
+    Neither of the clips built from this is a committed fixture. They cover
+    BRANCHES the three committed fixtures cannot reach (their busiest
+    component is 40 px against a 50 px saturation area), and a fourth and
+    fifth committed fixture would put tolerance-table rows in the report that
+    nothing declares. Seeded for the same reason every artifact-producing path
+    in this project is: a flaky pixel here would surface as a wire-identity
+    failure, which is the most expensive thing in the suite to misread.
+    """
+    import numpy as np
+
+    from skyweave2.eval.clips import write_clip
+
+    v_grid, u_grid = np.meshgrid(
+        np.arange(_SAT_FULL_HEIGHT, dtype=np.float64),
+        np.arange(_SAT_FULL_WIDTH, dtype=np.float64),
+        indexing="ij",
+    )
+    frames = []
+    for seq in range(_SAT_FRAMES):
+        rng = np.random.default_rng(np.random.SeedSequence([7, seq, 0x5A7]))
+        image = 96.0 + rng.normal(
+            0.0, 2.0, size=(_SAT_FULL_HEIGHT, _SAT_FULL_WIDTH)
+        )
+        if seq >= _SAT_WARMUP:
+            for index, sigma in enumerate(sigmas):
+                cu = 60.0 + 110.0 * (index % 5) + 2.0 * (seq - _SAT_WARMUP)
+                cv = 110.0 + 150.0 * (index // 5)
+                image += 90.0 * np.exp(
+                    -0.5
+                    * (
+                        ((u_grid - cu) / sigma) ** 2 + ((v_grid - cv) / sigma) ** 2
+                    )
+                )
+        frames.append(np.clip(np.rint(image), 0, 255).astype("uint8"))
+    write_clip(frames, out_dir, fps=30.0, source=source)
+    return out_dir
+
+
+def _saturating_config(revision):
+    from skyweave2.detector.config import Backend, DetectorConfig
+
+    # Shipped defaults except geometry and warm-up, exactly as the committed
+    # fixtures' configs are (anti-tuning): no threshold is touched to make the
+    # components big, only the rendered blobs are.
+    return DetectorConfig(
+        backend=Backend.IVE_APPROX,
+        proc_width=320,
+        proc_height=240,
+        warmup_frames=_SAT_WARMUP,
+        fps=30.0,
+        detector_rev=revision,
+        calibration_rev="d8-fixture-cal",
+    )
+
+
+def _replay_against_oracle(name, sigmas, edge_build_dir, tmp_path):
+    """Build a clip, run the oracle and the daemon over it, return both."""
+    from skyweave2.edge import fixtures as edge_fixtures
+
+    clip = _fat_clip(tmp_path / name, sigmas, f"e5 {name} clip")
+    config = _saturating_config(f"d8-{name}/1")
+    build = edge_fixtures.build_fixture(name, clip, config, seed=None)
+    stream = tmp_path / f"{name}.swij"
+    stream.write_bytes(
+        build_injection_stream(clip, config, build.session_uuid, profile=PtsProfile())
+    )
+    run = daemon.run_daemon_on_stream(
+        stream, config, tmp_path / f"{name}-run", build_dir=edge_build_dir
+    )
+    assert run.returncode == 0, run.stderr
+    return build, run
+
+
+def test_the_daemon_matches_the_oracle_across_the_saturation_boundary(
+    edge_build_dir, tmp_path
+):
+    """Host/edge byte identity ON the boundary, not merely past it.
+
+    `component_confidence` is `min(1.0, area_px / 50.0)` on the host and an
+    integer `area_px >= 50` short-circuit in `sw_pipeline.c`. Below 50 both
+    sides run the same double division and the committed replays cover that
+    on hundreds of observations. At and above 50 they are different
+    expressions, and no committed fixture goes there.
+
+    The first version of this test used one fat mover and produced areas of
+    70-90 px. That covers the clamp but pins nothing: the daemon's `50` could
+    be changed to any value in 41..69 and the whole suite stayed green,
+    because no area in that window was ever fed to it. The adversarial review
+    caught it. This clip straddles instead — 38 px to 91 px, including 49, 50
+    and 51 — so the constant itself is what the byte gate holds down, and the
+    assertions below fail if the clip ever drifts out of that band.
+
+    Exactly 50 px is deliberately included even though it cannot discriminate
+    `>` from `>=`: at 50 both expressions produce a bit-identical 1.0. It is
+    there so a reader can see the boundary is exercised rather than inferred.
+    """
+    build, run = _replay_against_oracle(
+        "straddle", _STRADDLE_SIGMAS_PX, edge_build_dir, tmp_path
+    )
+    areas = sorted(obs.area_px for obs in build.observations)
+    assert areas, "no observations"
+    assert areas[0] < 50 <= areas[-1], (
+        f"the clip no longer straddles the saturation point (areas "
+        f"{areas[0]}..{areas[-1]}); it has stopped pinning the constant"
+    )
+    assert {49, 50, 51} <= set(areas), (
+        f"the clip no longer lands on the saturation boundary (areas "
+        f"{sorted(set(areas))}); an off-by-a-few threshold would go unnoticed"
+    )
+    assert all(
+        obs.confidence == 1.0 for obs in build.observations if obs.area_px >= 50
+    )
+    assert run.stats["components_dropped_over_cap"] == 0, (
+        "the cap bit on the straddle clip, so the components below saturation "
+        "are being dropped instead of compared"
+    )
+    assert run.packets == build.packets, (
+        "the daemon and the host oracle disagree on a clip that crosses the "
+        "saturation point; below it they agree, so this is the integer "
+        "short-circuit in sw_pipeline.c against Python's min()"
+    )
+
+
+def test_the_daemon_matches_the_oracle_when_saturated_components_compete(
+    edge_build_dir, tmp_path
+):
+    """The cap's `-area_px` level, which the amendment left uncovered.
+
+    `rank_key`/`compare_ranked` rank on confidence first and area second.
+    Before the amendment confidence was constant, so level 2 decided every
+    capped frame and the clutter fixture exercised it. After the amendment
+    confidence is injective in area BELOW saturation, so level 1 ties if and
+    only if level 2 does — and level 2's comparison stops being the deciding
+    one anywhere the suite looks. It becomes decisive again only when several
+    SATURATED components compete for the cap, which nothing else here builds:
+    clutter exceeds the cap but never saturates, and the straddle clip
+    saturates but never exceeds the cap.
+
+    That regime is not exotic. It is what a crowded frame at the deployment
+    resolution looks like, and it sits inside the absolute byte gate, so the C
+    comparator getting it wrong would be a silent host/edge divergence. Nine
+    fat movers against a cap of seven put it under test.
+    """
+    build, run = _replay_against_oracle(
+        "crowded", _CROWDED_SIGMAS_PX, edge_build_dir, tmp_path
+    )
+    assert all(obs.confidence == 1.0 for obs in build.observations), (
+        "some component failed to saturate, so confidence is still doing the "
+        "deciding and the area level remains untested"
+    )
+    assert run.stats["components_dropped_over_cap"] > 0, (
+        "the cap never bit, so nothing competed and compare_ranked's second "
+        "level was never reached"
+    )
+    assert run.stats["frames_at_cap"] > 0
+    assert run.stats["max_components_offered"] > build.config.max_components_per_frame
+    assert run.packets == build.packets, (
+        "the daemon and the host oracle kept DIFFERENT saturated components "
+        "at the cap; confidence ties at 1.0 for all of them, so this is the "
+        "area tie-break in compare_ranked disagreeing with rank_key"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cap, counters and health behaviour through the real daemon
 # ---------------------------------------------------------------------------
 
@@ -308,6 +496,50 @@ def test_the_board_tolerance_is_declared_before_any_board_exists():
         "missed_fraction", "extra_per_event", "count_mismatch_fraction",
     ):
         assert getattr(board, field) >= getattr(host, field), field
+
+
+def test_the_committed_report_is_the_one_the_generator_writes():
+    """The report is a BUILD PRODUCT, and nothing checked that it was rebuilt.
+
+    D8.0a rewrote the generator to describe the amendment and the committed
+    `D8_EDGE_REPORT.md` went on asserting the superseded constant — the code
+    said one thing, the shipped deliverable said the opposite, and the suite
+    stayed green. That is D8-F6 again, one level up: the same class of
+    divergence, this time between a generator and its artifact rather than
+    between two implementations of a value.
+
+    Deterministic to assert, because `generate` promises byte-identity for
+    identical inputs and reads only in-repo files — no clock, no environment,
+    no toolchain. Both inputs (the committed fixtures and the evidence file)
+    are in the repo, so this either passes everywhere or fails everywhere.
+
+    It does NOT check that the EVIDENCE is fresh — only `measure` can do that,
+    and it needs a built daemon. What it guarantees is that the document in
+    the repo is the document this code produces from the evidence in the repo.
+    """
+    import json
+    from pathlib import Path
+
+    from skyweave2.edge import report as report_module
+
+    docs = Path(__file__).resolve().parents[2] / "docs"
+    committed = docs / "D8_EDGE_REPORT.md"
+    if not committed.exists():
+        pytest.skip("D8_EDGE_REPORT.md has not been written yet")
+    evidence_path = docs / "d8_evidence.json"
+    evidence = (
+        json.loads(evidence_path.read_text(encoding="utf-8"))
+        if evidence_path.exists()
+        else None
+    )
+    assert committed.read_text(encoding="utf-8") == report_module.generate(evidence), (
+        "docs/D8_EDGE_REPORT.md is not what the generator writes. Re-run:\n"
+        "  uv run python -m skyweave2.edge.report measure --out docs/d8_evidence.json\n"
+        "  uv run python -m skyweave2.edge.report generate "
+        "--evidence docs/d8_evidence.json --out docs/D8_EDGE_REPORT.md\n"
+        "(measure first, and with a freshly built daemon: it is what refreshes "
+        "the suite counts and the binary's SHA-256.)"
+    )
 
 
 def test_the_declared_tolerances_are_the_ones_the_report_quotes():

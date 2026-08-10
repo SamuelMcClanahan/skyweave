@@ -20,5 +20,6 @@
   "name": "sparse",
   "observations": 156,
   "packet_bytes_max": 350,
+  "seed": 7,
   "session_uuid": "d8fixture-sparse-0000-0000-000000000"
 }

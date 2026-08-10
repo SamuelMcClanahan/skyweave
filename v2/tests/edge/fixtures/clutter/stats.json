@@ -20,5 +20,6 @@
   "name": "clutter",
   "observations": 273,
   "packet_bytes_max": 540,
+  "seed": 7,
   "session_uuid": "d8fixture-clutter-0000-0000-00000000"
 }

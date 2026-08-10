@@ -13,13 +13,14 @@ Three properties this module exists to guarantee:
    the D8 frame->packet fixtures instead of predicting a different frame.
 
 2. **The ranking is declared, not emergent.** The D8 opening says "keeping
-   the top components by descending confidence". The D4 detector has NO
-   confidence model — ``runner.detect_clip`` emits ``confidence = 1.0`` for
-   every observation — so a bare confidence sort is a total tie and the
-   survivors would be whatever order the components arrived in. The full
-   ranking key is therefore written down here (:func:`rank_key`) and tested,
-   with the tie-breakers in priority order. See finding D8-F1 in the report:
-   the tie-breaker is doing the real work today, and that is a statement
+   the top components by descending confidence". The D8.0 amendment says
+   what that confidence IS: :func:`component_confidence`, area-derived and
+   saturating. A bare confidence sort would still be a partial order — every
+   component at or above :data:`CONFIDENCE_SATURATION_AREA_PX` ties at 1.0 —
+   so the full ranking key is written down here (:func:`rank_key`) and
+   tested, with the tie-breakers in priority order. See finding D8-F1 in the
+   report: confidence is a monotone function of area, so the SELECTION the
+   cap makes is the same one area alone would make, and that is a statement
    about the detector, not about this cap.
 
 3. **Nothing is silent.** :func:`apply_component_cap` returns the drop count
@@ -40,11 +41,15 @@ from dataclasses import dataclass
 
 from skyweave2.detector.components import MaskComponent
 
-# The confidence the D4 detector assigns to every component. Stated as a
-# constant here, and asserted against `runner`'s emitted observations by test
-# E1, so that "rank by confidence" cannot silently become meaningful (or
-# silently stop being meaningful) without the ranking being revisited.
-DETECTOR_CONFIDENCE = 1.0
+# The component area, at PROC resolution, at which the wire confidence
+# saturates. `confidence = min(1.0, area_px / 50.0)`: the D0 "D8.0 amendment"
+# entry, Samuel's call after the D8.0 hand-back surfaced the runner/cap/daemon
+# disagreement. Fifty proc-resolution pixels is the area the pre-D8 runner
+# already treated as "as much evidence as this detector can offer"; adopting
+# the formula it carried keeps the number a recorded decision rather than a
+# fresh invention. It is a saturation point, not a threshold — nothing is
+# dropped at 49 px and nothing is promoted at 51.
+CONFIDENCE_SATURATION_AREA_PX = 50.0
 
 # (component, persistence_count, local_blob_id) as `PersistenceFilter.update`
 # returns it.
@@ -54,19 +59,32 @@ Emitted = tuple[MaskComponent, int, int]
 def component_confidence(component: MaskComponent, persistence_count: int) -> float:
     """The detector's confidence in one component, 0..1.
 
-    Constant by construction: the D4 detector is a background-model +
-    connected-components pipeline with no appearance model and no
-    likelihood, so it has nothing to be more or less confident about. The
-    NPU appearance gate (RV1106_EDGE_NODE.md section 9, phase 2) is what
-    would make this a real number.
+    ``min(1.0, area_px / CONFIDENCE_SATURATION_AREA_PX)``, per the D0 "D8.0
+    amendment" entry. Area is the only evidence a background model plus
+    connected components has: there is no appearance model and no
+    likelihood, so this is a monotone restatement of "how much of the frame
+    said something happened", not a probability. It is not calibrated and
+    the Jetson must not treat it as one; the NPU appearance gate
+    (RV1106_EDGE_NODE.md section 9, phase 2) is what would make it a real
+    number.
 
-    It is a function rather than a literal so the cap's ranking has ONE
-    place to change when that day comes, and so the tests can assert that
-    what the runner puts on the wire and what the cap ranks by are the same
-    quantity.
+    ``persistence_count`` is deliberately NOT in the formula. It is already
+    on the wire as its own field, and folding it in would double-count the
+    same evidence in a value the fusion side may later weight by.
+
+    THE definition, singular. The runner reports what this returns, the cap
+    ranks by what this returns, and ``sw_pipeline.c`` mirrors it — the D8.0
+    hand-back found those three disagreeing (D8-F6), and one function is the
+    only arrangement in which they cannot.
+
+    ``area_px`` is at PROC resolution, so the value is resolution-dependent
+    by construction: the same object at 1536x864 and at 1152x648 does not
+    get the same confidence. That is honest for a per-node quantity — it
+    says how much evidence THIS node saw — and it is one more reason the
+    number is not a probability.
     """
-    del component, persistence_count  # no evidence to condition on yet
-    return DETECTOR_CONFIDENCE
+    del persistence_count  # already its own wire field; see above
+    return min(1.0, component.area_px / CONFIDENCE_SATURATION_AREA_PX)
 
 
 def rank_key(item: Emitted) -> tuple[float, float, float, float]:
@@ -74,15 +92,19 @@ def rank_key(item: Emitted) -> tuple[float, float, float, float]:
 
     Priority order, each level only reached when the level above ties:
 
-    1. ``-confidence`` — the D8 opening's rule, and the only level that will
-       matter once a confidence model exists.
-    2. ``-area_px`` — the largest blob at proc resolution. Under a constant
-       confidence this is the level that actually decides, and it is the
-       right proxy: area is the evidence the detector does have, a bigger
-       foreground region is a better-conditioned centroid, and it matches
-       the edge byte governor's "descending blob confidence" intent
+    1. ``-confidence`` — the D8 opening's rule, now an actual quantity
+       (:func:`component_confidence`) rather than a constant.
+    2. ``-area_px`` — the largest blob at proc resolution. Today's
+       confidence is a monotone non-decreasing function of exactly this, so
+       levels 1 and 2 never disagree and level 2 is what separates the
+       components that saturate at 1.0. The SELECTION is therefore the one
+       area alone would make (D8-F1) — which is the right one to make: area
+       is the evidence the detector does have, a bigger foreground region is
+       a better-conditioned centroid, and it matches the edge byte
+       governor's "descending blob confidence" intent
        (RV1106_EDGE_NODE.md section 8) as closely as a model-free detector
-       can.
+       can. When a real confidence model lands, level 1 starts disagreeing
+       with level 2 and outranks it, which is the point of the order.
     3. ``centroid_v`` then 4. ``centroid_u`` — raster order, purely to make
        the choice TOTAL. Without them two equal-area blobs would be ordered
        by list position, which is stable in CPython and meaningless as a
@@ -177,7 +199,7 @@ class DetectorStats:
 
 
 __all__ = [
-    "DETECTOR_CONFIDENCE",
+    "CONFIDENCE_SATURATION_AREA_PX",
     "CapResult",
     "DetectorStats",
     "apply_component_cap",

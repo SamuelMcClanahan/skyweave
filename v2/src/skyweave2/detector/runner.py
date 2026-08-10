@@ -40,9 +40,9 @@ from skyweave2.contracts import (
 )
 from skyweave2.detector.backends import make_backend
 from skyweave2.detector.cap import (
-    DETECTOR_CONFIDENCE,
     DetectorStats,
     apply_component_cap,
+    component_confidence,
 )
 from skyweave2.detector.components import (
     MaskComponent,
@@ -187,9 +187,10 @@ def detect_clip(
                     bbox_h=max(1, int(np.ceil(comp.bbox_h * scale_y))),
                     area_px=comp.area_px,
                     persistence_count=count,
-                    # The quantity the per-frame cap ranks by; see
-                    # detector/cap.py for why it is constant.
-                    confidence=DETECTOR_CONFIDENCE,
+                    # CALLED, not restated: the quantity the per-frame cap
+                    # ranks by and the quantity the Jetson receives are one
+                    # function call, which is the whole fix for D8-F6.
+                    confidence=component_confidence(comp, count),
                     local_blob_id=blob_id,
                     evidence_ref=None,
                 )

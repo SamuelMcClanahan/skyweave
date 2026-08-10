@@ -354,9 +354,12 @@ static int soft_open(soft_state_t *state)
 }
 
 /* "Worse" in the cap's sense: smaller area first, then later in raster
- * order. Deliberately the same order `cap.py::rank_key` uses below the
- * (constant) confidence level, so the component list and the cap agree
- * about which components matter. */
+ * order. Deliberately the same order `cap.py::rank_key` produces: its
+ * confidence level is a monotone non-decreasing function of area
+ * (`min(1.0, area_px / 50.0)`), so ranking by area and raster order is the
+ * same ranking, and the component list and the cap agree about which
+ * components matter. If confidence ever stops being a function of area, this
+ * shedding order has to be revisited with it. */
 static bool rank_worse_than(const sw_component_t *a, const sw_component_t *b)
 {
     if (a->area_px != b->area_px) {

@@ -31,6 +31,7 @@ import subprocess
 from dataclasses import asdict
 from pathlib import Path
 
+from skyweave2.detector import cap
 from skyweave2.detector.config import DetectorConfig
 from skyweave2.edge import daemon, fixtures, tolerance
 from skyweave2.edge.injection import PtsProfile, build_injection_stream
@@ -251,6 +252,25 @@ def generate(evidence: dict | None) -> str:
     measured = (evidence or {}).get("fixtures", {})
     container = (evidence or {}).get("container")
 
+    # Read out of the committed fixtures, not typed in. Section 9's D8-F7
+    # makes claims about these artifacts ("all N observations", "none of them
+    # saturates"), and review finding 8 is what happens to a claim that is a
+    # literal in this generator: it keeps asserting itself after the thing it
+    # describes has moved.
+    committed = [
+        observation
+        for name in fixture_stats
+        if (fixtures.FIXTURE_ROOT / name / "observations.swob").exists()
+        for observation in _load_fixture_observations(name)
+    ]
+    committed_count = len(committed)
+    committed_max_area = max((obs.area_px for obs in committed), default=0)
+    committed_saturated = sum(
+        1
+        for obs in committed
+        if obs.area_px >= cap.CONFIDENCE_SATURATION_AREA_PX
+    )
+
     a("# D8 edge report — real RV1106 in the loop")
     a("")
     a("**Labels.** Everything on the host path — the capacity arithmetic, the")
@@ -335,7 +355,14 @@ def generate(evidence: dict | None) -> str:
     a("")
 
     # ---------------------------------------------------------------- 3
-    a("## 3. The capacity decision, implemented")
+    a("## 3. The recorded decisions, implemented")
+    a("")
+    a("Two entries in the D0 decisions log are implemented by this phase and")
+    a("nothing else is: the \"D8 opening\" capacity decision, and the \"D8.0")
+    a("amendment\" that says what the `confidence` field carries. Both are")
+    a("sanctioned in writing before the code moved; neither is an edit.")
+    a("")
+    a("### 3.1 Capacity (the D8 opening entry)")
     a("")
     budget = sizing.worst_case_budget()
     a("| Item | Before (D7) | After (D8) |")
@@ -379,6 +406,64 @@ def generate(evidence: dict | None) -> str:
     a("bound, not a wire value, so raising it moved no encoded byte. The D7")
     a("`wire_golden/*.hex` files are untouched and still gate W1.")
     a("")
+    a("### 3.2 Wire confidence (the D8.0 amendment)")
+    a("")
+    a("The D8.0 hand-back surfaced three components of the system putting")
+    a("different numbers in one wire field (finding D8-F6). The amendment")
+    a("settles which number:")
+    a("")
+    a(f"    confidence = min(1.0, area_px / "
+      f"{cap.CONFIDENCE_SATURATION_AREA_PX!r})   # area_px at PROC resolution")
+    a("")
+    a("| Item | Value |")
+    a("| --- | --- |")
+    a("| Definition | `detector/cap.py::component_confidence`, once |")
+    a("| Reported by | `detector/runner.py`, by CALLING it |")
+    a("| Ranked by | `detector/cap.py::rank_key`, level 1 |")
+    a("| Mirrored in | `firmware/rv1106/src/sw_pipeline.c`, integer-safe |")
+    a(f"| Saturates at | {cap.CONFIDENCE_SATURATION_AREA_PX:g} px, proc "
+      "resolution |")
+    a("")
+    a("It is not a probability and the Jetson must not read it as one. A")
+    a("background model plus connected components has no appearance model; area")
+    a("is the only evidence it holds, so this is a monotone restatement of how")
+    a("much of the frame said something happened. It is also resolution-")
+    a("dependent by construction — the same object at 1536x864 and at 1152x648")
+    a("does not get the same number — which is honest for a per-node quantity")
+    a("and one more reason not to calibrate anything on it. The NPU appearance")
+    a("gate (node design section 9, phase 2) is what would make it real.")
+    a("")
+    a("`persistence_count` is deliberately absent from the formula: it is")
+    a("already its own wire field, and folding it in would double-count the")
+    a("same evidence inside a value the fusion side may later weight by.")
+    a("")
+    a("**Integer-safe** in `sw_pipeline.c` means three specific things, because")
+    a("this value sits inside an ABSOLUTE byte gate and one ULP is a failure:")
+    a("the saturation test is an integer comparison (`area_px >= 50`), which no")
+    a("rounding mode or evaluation width can reach; `(double)area_px` is exact")
+    a("for every `uint32_t`; and the division happens in double and is narrowed")
+    a("to binary32 exactly once, at the wire field — the same two roundings, in")
+    a("the same order, as Python's double division followed by protobuf's")
+    a("`float` store.")
+    a("")
+    a("Only the middle one is load-bearing TODAY, and the report says so rather")
+    a("than implying three necessities. Checked exhaustively: an all-float form")
+    a("agrees bit-for-bit with this one over every area the clamp admits, and")
+    a("the two first diverge at 2^24 + 1 — where it is the operand conversion")
+    a("that loses, which the clamp puts out of reach. The shape above is")
+    a("correctness by construction, not a measured difference, and that is the")
+    a("point: the divisor and the saturation area are decisions, and decisions")
+    a("move. The adversarial review caught the first draft of this passage")
+    a("asserting the stronger claim (10c, finding 4).")
+    a("")
+    a("**Fixtures regenerated**, with the log entry as the recorded reason: the")
+    a(f"field's VALUE changed on {committed_count - committed_saturated} of the "
+      f"{committed_count} committed observations —")
+    a("everything below the saturation area, which after the amendment is")
+    a("where the value stops being 1.0. The `golden/` manifests are not")
+    a("affected — this touches D8 fixtures only — and the byte-identity gate")
+    a("re-applies AFTER regeneration, unchanged and still absolute (section 4).")
+    a("")
 
     # ---------------------------------------------------------------- 4
     a("## 4. Wire byte-identity (the absolute gate)")
@@ -387,6 +472,13 @@ def generate(evidence: dict | None) -> str:
     a("byte-identical to the host codec. Both encoders are handed the same")
     a("`observations.swob` bytes — a JSON fixture would have let a reader's")
     a("rounding masquerade as an encoder's disagreement.")
+    a("")
+    a("These are the POST-AMENDMENT fixtures (section 3.2). The gate is the")
+    a("same gate: regenerating the inputs does not soften it, and the max")
+    a("datagram column below is unchanged from before the regeneration because")
+    a("`confidence` is a fixed-width `float` — a different value in it costs")
+    a("the same five bytes, so the capacity arithmetic in section 3.1 is")
+    a("untouched by the amendment.")
     a("")
     a("| Fixture | Capture events | Observations | Max obs/event | Max datagram B | "
       "nanopb == host codec |")
@@ -608,29 +700,36 @@ def generate(evidence: dict | None) -> str:
     # ---------------------------------------------------------------- 9
     a("## 9. Findings")
     a("")
-    a("### D8-F1 — the cap ranks by a confidence the detector does not have")
+    a("### D8-F1 — the cap ranks by confidence, and confidence is area")
     a("")
     a("The D8 opening says the cap keeps \"the top components by descending")
-    a("confidence\". The D4 detector has no confidence model: it is a")
-    a("background model plus connected components, and every observation it")
-    a("emits carries `confidence = 1.0`. A bare confidence sort is therefore a")
-    a("total tie, and the survivors would be whatever order the components")
-    a("arrived in.")
+    a("confidence\". After the D8.0 amendment (section 3.2) there IS a")
+    a("confidence to rank by — but it is `min(1.0, area_px / 50.0)`, a")
+    a("monotone non-decreasing function of area, so \"top by confidence\" and")
+    a("\"top by area\" are the same selection. The finding survives the")
+    a("amendment; only its wording changed.")
     a("")
-    a("The full ranking key is written down instead (`detector/cap.py`), with")
-    a("the tie-breakers in priority order: `-confidence`, then `-area_px`,")
-    a("then raster order. Area is the level that actually decides today; it is")
-    a("the evidence the detector does have, a larger foreground region is a")
-    a("better-conditioned centroid, and it matches the edge byte governor's")
-    a("intent as closely as a model-free detector can. Raster order exists")
-    a("only to make the choice TOTAL, so the C daemon does not have to")
-    a("reproduce an accident of Python's sort.")
+    a("Two consequences follow from the monotonicity, and both are load-")
+    a("bearing. Every component at or above 50 px ties at 1.0, so the")
+    a("confidence sort is a PARTIAL order and the key needs its lower levels:")
+    a("`-confidence`, then `-area_px`, then raster order (`detector/cap.py`).")
+    a("Area is what separates the saturated components and it is the right")
+    a("thing to separate them by — a larger foreground region is a better-")
+    a("conditioned centroid, and it matches the edge byte governor's intent as")
+    a("closely as a model-free detector can. Raster order exists only to make")
+    a("the choice TOTAL, so the C daemon does not have to reproduce an accident")
+    a("of Python's sort. And because levels 1 and 2 can tie but never")
+    a("disagree, the daemon's separate component-shedding order")
+    a("(`sw_detect_soft.c::rank_worse_than`, area and raster only, used when a")
+    a("frame offers more than 254 regions) is the same ranking; a confidence")
+    a("model that stops being a function of area has to revisit that too.")
     a("")
     a("Consequence if shipped: the cap's selection is deterministic and")
-    a("area-driven, not confidence-driven, and it will stay that way until the")
-    a("NPU appearance gate (phase 2 of the node design) gives `confidence`")
-    a("something to mean. Anyone reading \"top by confidence\" in the decisions")
-    a("log should read this finding first.")
+    a("area-driven, and it will stay that way until the NPU appearance gate")
+    a("(phase 2 of the node design) gives `confidence` an independent meaning.")
+    a("Anyone reading \"top by confidence\" in the decisions log should read")
+    a("this finding first, and anyone tempted to read the wire field as a")
+    a("detection probability should read section 3.2.")
     a("")
     a("### D8-F2 — the health plane has one drop counter and three causes")
     a("")
@@ -739,6 +838,79 @@ def generate(evidence: dict | None) -> str:
     a("the C daemon, a fixture regeneration with a recorded reason, and D8-F1 —")
     a("and a decision, not an edit.")
     a("")
+    a("**Closed by the D8.0 amendment.** It was wanted, the decision was taken")
+    a("and recorded, and the four-part change is exactly what shipped: section")
+    a("3.2 for the formula and the mirror, this section's D8-F1 for the")
+    a("ranking, and regenerated fixtures with the log entry as the reason. The")
+    a("interim constant is Rejected in the log rather than deleted from it. The")
+    a("two tests named above are unchanged and still the gate.")
+    a("")
+    a("### D8-F7 — the amendment moved a wire value, and added a branch")
+    a("")
+    a("Three things worth writing down about implementing D8.0a, because two")
+    a("of them are the sort of thing a green suite hides.")
+    a("")
+    a("**The selection did not change.** Confidence is monotone in area")
+    a("(D8-F1), so the components the cap keeps are exactly the ones it kept")
+    a("before. What the D8.0a regeneration moved was the `confidence` field on")
+    a(f"the {committed_count - committed_saturated} committed observations "
+      "below the saturation area — above it")
+    a("the value was 1.0 before the amendment and is 1.0 after — and nothing")
+    a("else: same components, same `obs_id`s, same centroids, same datagram")
+    a("sizes, same counters. That is a claim, so it is a test: E1 pins that")
+    a("the cap's survivors are the ones an area-only ranking would pick, and")
+    a("it fails the day a confidence model stops being a function of area —")
+    a("which is the day the cap starts selecting differently and the fusion")
+    a("side needs to hear about it.")
+    a("")
+    if committed_saturated == 0:
+        a("**No committed fixture reaches the saturated branch.** The busiest")
+        a(f"component in any of the three is {committed_max_area} px against a "
+          f"{cap.CONFIDENCE_SATURATION_AREA_PX:g} px")
+        a(f"saturation point, so every one of those {committed_count} "
+          "observations exercises the")
+        a("division and none exercises the clamp. Below saturation the host and")
+        a("the daemon run the same double division; AT and above it they run")
+        a("different expressions — Python's `min()` against an integer short-")
+        a("circuit. An untested branch inside an absolute byte gate is the shape")
+        a("of D8-F6 again, so E5 grew two clips of fat movers, and asserts on")
+        a("both that the daemon's datagrams are byte-identical to the oracle's:")
+        a("")
+        a("- one that STRADDLES the saturation point (components from 38 px to")
+        a("  91 px, including 49, 50 and 51), so the threshold constant is")
+        a("  pinned rather than merely exceeded. The first version of this test")
+        a("  produced 70-90 px only, which left the daemon's `50` free to be")
+        a("  any value in 41..69 with the whole suite green — the review caught")
+        a("  it, and the boundary assertions are now part of the test;")
+        a("- one CROWDED with saturated movers, so more components than the cap")
+        a("  admits all tie at confidence 1.0 and the ranking's `-area_px` level")
+        a("  is what decides. Nothing else in the suite reaches that: the")
+        a("  clutter fixture exceeds the cap but never saturates, and a single")
+        a("  fat mover saturates but never exceeds the cap, so the C")
+        a("  comparator's second level had no test that could fail.")
+        a("")
+        a("Neither is a committed fixture. They cover branches, and a fourth and")
+        a("fifth fixture would add tolerance-table rows nothing declares.")
+    else:
+        a(f"**{committed_saturated} of {committed_count} committed observations "
+          "now reach the saturated**")
+        a(f"**branch** (busiest component {committed_max_area} px against a "
+          f"{cap.CONFIDENCE_SATURATION_AREA_PX:g} px saturation")
+        a("point). When this report was first written none did, and E5's")
+        a("dedicated saturation clip was added for exactly that reason; it")
+        a("stays, because a fixture that happens to cover a branch today is not")
+        a("a test that it is covered.")
+    a("")
+    a("**The regeneration surfaced a stale honesty wart.** The committed")
+    a("fixtures predated the `--seed` work (review finding 13 below), so")
+    a("regenerating them added a `seed` field to every `stats.json` — including")
+    a("the gate fixture's, whose pixels are a machine-local render artifact that")
+    a("no seed of ours produced. `\"seed\": 7` there would have been a")
+    a("determinism claim with nothing behind it, so the gate fixture records")
+    a("`null` and `FixtureBuild.seed` is now `int | None`. Small, but it is the")
+    a("exact failure mode the label discipline exists to prevent, and it was")
+    a("introduced BY this regeneration rather than found in it.")
+    a("")
 
     # ---------------------------------------------------------------- 10
     a("## 10. E-series status")
@@ -762,10 +934,13 @@ def generate(evidence: dict | None) -> str:
     a("| E1 | cap + max_count + ceiling agree; invariant holds in Python AND at "
       "daemon startup; cluttered frame emits the top 7 with drops counted; a "
       "full event is encodable at the schema worst case; goldens unmoved; the "
-      f"wire confidence is the one the cap ranks by | {e_status} |")
-    a("| E2 | nanopb byte-identity against the host codec on every fixture and "
-      "on the adversarial cases, both directions, unknown-field tolerance | "
+      "wire confidence is the declared area formula, is the one the cap ranks "
+      "by, and selects what area alone would select | "
       f"{e_status} |")
+    a("| E2 | nanopb byte-identity against the host codec on every fixture and "
+      "on the adversarial cases, both directions, unknown-field tolerance; "
+      "the committed stats files match the schema the writer writes and the "
+      f"counters this report publishes | {e_status} |")
     a("| E3 | injection determinism within a process, across processes, and "
       "against the committed digest; Ethernet and storage replay produce the "
       f"same datagrams | {e_status} |")
@@ -773,7 +948,9 @@ def generate(evidence: dict | None) -> str:
       f"at both ends; the known-lie path flagged in the artifact | {e_status} |")
     a("| E5 | host fixture replay under the DECLARED tolerance, plus the "
       "byte-exactness result, cap/health behaviour, health decode on the "
-      f"unchanged host stack, and the packet-log cross-check | {e_status} |")
+      "unchanged host stack, the packet-log cross-check, host/edge identity "
+      "across the saturation boundary and with saturated components "
+      f"competing for the cap, and report freshness | {e_status} |")
     a("| E6 | board fixture replay through the unchanged v2 stack, toleranced "
       "scorecard | board-gated (D8.2) |")
     a("| E7 | health packets at 1 Hz with real drop counters, on the node | "
@@ -829,7 +1006,7 @@ def generate(evidence: dict | None) -> str:
     a("")
 
     # ---------------------------------------------------------------- 10b
-    a("## 10b. Adversarial review before hand-back")
+    a("## 10b. Adversarial review before the D8.0 hand-back")
     a("")
     a("Five lenses over the whole D8.0 diff — silent loss, encode/decode")
     a("asymmetry, C correctness and memory, tests that cannot fail, and")
@@ -913,6 +1090,97 @@ def generate(evidence: dict | None) -> str:
     a("arithmetically impossible at the declared bounds.")
     a("")
 
+    # ---------------------------------------------------------------- 10c
+    a("## 10c. Adversarial review before the D8.0a hand-back")
+    a("")
+    a("The same shape, over the amendment's diff: five lenses — host/edge")
+    a("numerical identity, honesty and labels, tests that cannot fail, scope")
+    a("and blast radius, and C correctness and fixture integrity — each")
+    a("candidate finding handed to an independent skeptic told to REFUTE it,")
+    a("with a compiler and the suite available to settle it.")
+    a("")
+    a("**17 candidates, 7 refuted, 10 confirmed — 6 distinct defects, all")
+    a("fixed before hand-back.** (Four filings were the same un-regenerated")
+    a("report and two were the same quantifier.)")
+    a("")
+    a("| # | Found | Fix |")
+    a("| --- | --- | --- |")
+    a("| 1 | The generator was rewritten for the amendment and its ARTIFACT was "
+      "not re-run, so this document went on asserting the superseded constant "
+      "while the code beside it did the opposite — and `cap.py`'s own comment "
+      "pointed the reader at a D8-F1 that contradicted it. The evidence file "
+      "was stale too, so `generate` alone would have re-emitted PASS (84 "
+      "tests) and a byte-identity verdict measured with the pre-amendment "
+      "binary against the pre-regeneration fixtures | rebuild, `measure`, "
+      "`generate`, both artifacts committed with the code; plus an E5 test "
+      "asserting the committed report IS `generate(committed evidence)`, "
+      "which is deterministic because the generator promises byte-identity "
+      "for identical inputs |")
+    a("| 2 | The new E5 saturation clip produced components of 70-90 px, so it "
+      "proved the clamp is reachable and pinned nothing: the daemon's `50` "
+      "could be set to ANY value in 41..69 with the whole suite green | the "
+      "clip now STRADDLES the point (38..91 px, including 49, 50 and 51) and "
+      "asserts it still does. Verified by mutation: 41, 48, 49 and 69 all now "
+      "fail. 51 still passes, and correctly — at exactly 50 both expressions "
+      "produce a bit-identical 1.0, so `>` versus `>=` is untestable by "
+      "construction, which the test says out loud |")
+    a("| 3 | The amendment silently REMOVED coverage. Confidence is injective "
+      "in area below saturation, so the cap comparator's `-area_px` level "
+      "stopped being the deciding one anywhere the suite looked; it decides "
+      "again only when several SATURATED components compete for the cap, and "
+      "nothing built that — clutter exceeds the cap without saturating, the "
+      "saturation clip saturates without exceeding it | a second clip: nine "
+      "fat movers against the cap of seven, all at confidence 1.0. Verified "
+      "by mutation: reversing the C comparator's area level fails this test "
+      "and NOTHING else in the suite |")
+    a("| 4 | `sw_pipeline.c`'s stated reason for dividing in double — that "
+      "dividing in float \"would land on a different bit pattern for some "
+      "areas\" — is false for every area the clamp admits | reworded to say "
+      "what is true: the two agree bit-for-bit over 0..49 and first diverge "
+      "at 2^24+1, where it is the operand conversion that loses. The double "
+      "form is kept because it mirrors the host's SHAPE, not because it "
+      "changes a byte today |")
+    a("| 5 | D8-F7 said the regeneration moved the field on \"all N\" "
+      "observations while section 3.2 derived the saturation-aware count from "
+      "the same fixtures — the literal-claim failure mode the new counter "
+      "block was added to prevent, in the paragraph that introduced it | both "
+      "places derive it identically now |")
+    a("| 6 | `stats.json` is the one committed artifact nothing derives, and "
+      "this report prints four of its numbers: a wholly falsified stats file "
+      "passed the entire suite, and `gate/stats.json` was read by no test at "
+      "all. The regeneration exposed it by ADDING a `seed` key — the "
+      "committed files had drifted from their own writer | two clip-free "
+      "tests: the committed schema must match what `write_fixture` actually "
+      "writes (keys only — values are machine-specific), and the four "
+      "published counters must equal what the byte-gated `observations.swob` "
+      "and `packets.hex` say |")
+    a("")
+    a("Findings 2, 3 and 6 are TEST-STRENGTH defects and 3 is the one worth")
+    a("carrying forward: an amendment can DELETE coverage without touching a")
+    a("test, by making one branch of a comparator unreachable from every")
+    a("fixture. Nothing goes red when that happens. It was found by mutating")
+    a("the C source and re-running the suite, which is the only method that")
+    a("finds it.")
+    a("")
+    a("Three of the seven refutations are worth naming:")
+    a("")
+    a("- the wire `confidence` has no tolerance axis, but it does not need")
+    a("  one: `Observation2D.confidence` is `ge=0.0, le=1.0` in the frozen D0")
+    a("  contract, and every board path decodes through that validator before")
+    a("  any tolerance comparison is reachable, so an out-of-range confidence")
+    a("  dies loudly upstream rather than being measured;")
+    a("- the \"integer-safe\" rationale was filed as arithmetically false in")
+    a("  full. It is not: the integer comparison is exactly equivalent to its")
+    a("  float form over all 2^32, and the skeptic extended the check to every")
+    a("  candidate saturation constant from 2 to 65536. Only the one sentence")
+    a("  in finding 4 was wrong;")
+    a("- E2's decode-direction test does not assert `conf`. True, and left")
+    a("  alone: it asserts 12 of 25 fields and `conf` is not singled out, so")
+    a("  this is a pre-existing breadth gap in that test rather than anything")
+    a("  D8.0a introduced. Recorded here as a D9 lever, not patched in a")
+    a("  phase that has no claim on it.")
+    a("")
+
     # ---------------------------------------------------------------- 11
     a("## 11. Out of scope, confirmed untouched")
     a("")
@@ -923,8 +1191,14 @@ def generate(evidence: dict | None) -> str:
     a("session (conversion-gain PTC, CFA check, sky footage) lands in")
     a("`D3_SENSOR_NOTES.md`, not here.")
     a("")
-    a("The one contract touch is the sanctioned capacity decision, exactly as")
-    a("the D0 \"D8 opening\" entry authorised it.")
+    a("Two decisions were implemented and both were written down before the")
+    a("code moved: the capacity touch, exactly as the D0 \"D8 opening\" entry")
+    a("authorised it, and the wire confidence, exactly as the \"D8.0")
+    a("amendment\" entry authorised it. Nothing under")
+    a("`v2/src/skyweave2/contracts/` changed for either — the amendment moves a")
+    a("VALUE the detector puts in an existing field, not the field, its type or")
+    a("its bounds — and the fixture regeneration it required is D8 fixtures")
+    a("only, with `golden/` untouched.")
     a("")
 
     return "\n".join(lines) + "\n"

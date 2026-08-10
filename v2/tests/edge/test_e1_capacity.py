@@ -23,7 +23,7 @@ import subprocess
 import pytest
 
 from skyweave2.detector.cap import (
-    DETECTOR_CONFIDENCE,
+    CONFIDENCE_SATURATION_AREA_PX,
     DetectorStats,
     apply_component_cap,
     component_confidence,
@@ -40,7 +40,13 @@ from skyweave2.transport.wire import (
     TooManyObservations,
     declared_limits_from_options,
 )
-from tests.edge.conftest import load_config, load_events, load_stats
+from tests.edge.conftest import (
+    COMMITTED_FIXTURES,
+    load_config,
+    load_events,
+    load_observations,
+    load_stats,
+)
 
 # ---------------------------------------------------------------------------
 # The three numbers agree, and the count is derived
@@ -162,12 +168,100 @@ def test_the_ranking_is_total_so_the_choice_is_never_positional():
     assert [comp.centroid_u for comp, _, _ in result.kept] == [1.0, 0.0]
 
 
-def test_confidence_is_the_first_rank_level_even_though_it_is_constant():
-    """If a confidence model ever appears, it must outrank area immediately."""
-    small_confident = (_component(1, 0.0, 0.0), 2, 0)
+def test_confidence_is_the_declared_area_formula():
+    """The D0 "D8.0 amendment" entry, transcribed: `min(1.0, area_px / 50.0)`.
+
+    Written as the arithmetic and checked at the saturation boundary, not as
+    a table of blessed outputs, so a re-interpretation of the formula (a
+    threshold instead of a ramp, a different divisor, a persistence term)
+    fails here rather than in a fixture diff nobody reads.
+    """
+    assert CONFIDENCE_SATURATION_AREA_PX == 50.0
+    for area in (1, 2, 12, 25, 49, 50, 51, 100, 10_000):
+        expected = min(1.0, area / 50.0)
+        assert component_confidence(_component(area, 0.0, 0.0), 2) == expected, area
+    # The boundary, spelled out: it saturates AT 50, not after it.
+    assert component_confidence(_component(49, 0.0, 0.0), 2) == 0.98
+    assert component_confidence(_component(50, 0.0, 0.0), 2) == 1.0
+    assert component_confidence(_component(51, 0.0, 0.0), 2) == 1.0
+
+
+def test_confidence_never_saturates_past_one_and_never_reaches_zero():
+    """Two bounds with teeth.
+
+    Above 1.0 would be a value the D0 contract's 0..1 field does not admit.
+    Exactly 0.0 is worse and less obvious: `confidence` is a proto3 scalar
+    with implicit presence, so a zero would be OMITTED from the encoding
+    entirely — an observation that silently loses a field rather than one
+    that carries a small number. `min_area_px >= 1` is what makes that
+    unreachable, so the smallest legal component is the case tested.
+    """
+    assert component_confidence(_component(10_000_000, 0.0, 0.0), 2) == 1.0
+    smallest = DetectorConfig().min_area_px
+    assert smallest >= 1
+    assert component_confidence(_component(smallest, 0.0, 0.0), 2) > 0.0
+
+
+def test_persistence_does_not_enter_the_confidence():
+    """It is already its own wire field; folding it in would double-count it
+    in a value the fusion side may later weight by."""
+    component = _component(12, 0.0, 0.0)
+    assert component_confidence(component, 2) == component_confidence(component, 900)
+
+
+def test_confidence_is_the_first_rank_level_and_never_contradicts_area():
+    """D8-F1, made checkable.
+
+    Confidence is the first level of `rank_key` and is now an actual
+    quantity. It is also a monotone non-decreasing function of area, which is
+    the second level — so the two can tie but can never DISAGREE, and the
+    cap's selection is the one area alone would make. That is the claim the
+    report makes and the claim the C daemon's component-shedding order
+    (`sw_detect_soft.c::rank_worse_than`, which sorts by area alone) depends
+    on being true.
+    """
+    small = (_component(10, 0.0, 0.0), 2, 0)
     big = (_component(100, 1.0, 0.0), 2, 1)
-    assert rank_key(small_confident)[0] == rank_key(big)[0] == -DETECTOR_CONFIDENCE
-    assert rank_key(big) < rank_key(small_confident)  # area decides today
+    assert rank_key(small)[0] == -component_confidence(*small[:2])
+    assert rank_key(big)[0] == -component_confidence(*big[:2])
+    assert rank_key(big) < rank_key(small)
+
+    # Monotone, and the tie above saturation is real: 60 and 100 px are both
+    # confidence 1.0 and are separated by area, not by confidence.
+    areas = [1, 2, 12, 25, 49, 50, 51, 60, 100, 1000]
+    confidences = [component_confidence(_component(a, 0.0, 0.0), 2) for a in areas]
+    assert confidences == sorted(confidences)
+    assert component_confidence(_component(60, 0.0, 0.0), 2) == component_confidence(
+        _component(100, 0.0, 0.0), 2
+    )
+    saturated = [(_component(100, 0.0, 0.0), 2, 0), (_component(60, 1.0, 0.0), 2, 1)]
+    assert rank_key(saturated[0]) < rank_key(saturated[1]), "area must break the tie"
+
+
+def test_the_amendment_did_not_change_which_components_the_cap_keeps():
+    """The regeneration moved a wire VALUE, not a selection.
+
+    This is the property that makes the D8.0a fixture regeneration a
+    confidence-field change and nothing else, and it is worth pinning: if a
+    future confidence model stops being a function of area, this test fails
+    and the person changing it has to state that the cap now selects
+    differently — which is a fusion-visible change, not a field edit.
+    """
+    areas = [3, 61, 12, 61, 7, 200, 12, 49, 50, 51, 4, 88]
+    emitted = [
+        (_component(area, float(index % 5), float(index)), 2, index)
+        for index, area in enumerate(areas)
+    ]
+    # Areas above and below the saturation point, and duplicates, so both the
+    # "confidence decides" and the "confidence ties, area decides" halves of
+    # the ranking are exercised at once.
+    assert any(area >= 50 for area in areas) and any(area < 50 for area in areas)
+    by_area = sorted(
+        emitted,
+        key=lambda item: (-item[0].area_px, item[0].centroid_v, item[0].centroid_u),
+    )[:7]
+    kept = apply_component_cap(emitted, 7).kept
+    assert {blob for _, _, blob in kept} == {blob for _, _, blob in by_area}
 
 
 def test_cap_of_zero_is_refused_not_silently_treated_as_unlimited():
@@ -202,6 +296,40 @@ def test_the_confidence_on_the_wire_is_the_one_the_cap_ranks_by(scene_clips):
             "RANKS BY; the cap would be selecting on a different quantity than "
             "the one the Jetson receives"
         )
+
+
+def test_the_committed_confidence_is_the_declared_function_of_the_committed_area():
+    """The two hand-back tests above compare the detector against ITSELF.
+
+    Both would still pass if `component_confidence` regressed to a constant
+    and the fixtures were regenerated to match: reported would equal ranked,
+    and a fresh oracle would reproduce the (new) committed bytes. This is the
+    check that reads the committed artifact on its own terms — every
+    observation's `confidence` against its own `area_px`, through the
+    formula the D0 amendment names — and it needs no toolchain and no clip.
+
+    The non-vacuity assertion is the other half: the fixtures must carry more
+    than one distinct confidence, or a constant would satisfy the formula on
+    a fixture where every component happened to be the same size.
+    """
+    distinct = set()
+    for name in COMMITTED_FIXTURES:
+        observations = load_observations(name)
+        assert observations, name
+        for observation in observations:
+            expected = codec.to_float32(
+                min(1.0, observation.area_px / CONFIDENCE_SATURATION_AREA_PX)
+            )
+            assert observation.confidence == expected, (
+                f"{name} obs {observation.obs_id} @ frame "
+                f"{observation.envelope.frame_seq}: confidence "
+                f"{observation.confidence} is not min(1, {observation.area_px}/50)"
+            )
+            distinct.add(observation.confidence)
+    assert len(distinct) > 1, (
+        "every committed observation carries the same confidence, so the "
+        "formula check above would also pass for a constant"
+    )
 
 
 def test_the_committed_fixtures_still_match_a_fresh_oracle_run(scene_clips):

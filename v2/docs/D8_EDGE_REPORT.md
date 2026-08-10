@@ -72,7 +72,14 @@ Two build notes, both recorded because the next person will hit them:
   first attempt succeeds. It is an emulation artifact, not a compiler bug
   and not a property of this source.
 
-## 3. The capacity decision, implemented
+## 3. The recorded decisions, implemented
+
+Two entries in the D0 decisions log are implemented by this phase and
+nothing else is: the "D8 opening" capacity decision, and the "D8.0
+amendment" that says what the `confidence` field carries. Both are
+sanctioned in writing before the code moved; neither is an edit.
+
+### 3.1 Capacity (the D8 opening entry)
 
 | Item | Before (D7) | After (D8) |
 | --- | --- | --- |
@@ -111,12 +118,74 @@ discovering it on a cluttered frame.
 bound, not a wire value, so raising it moved no encoded byte. The D7
 `wire_golden/*.hex` files are untouched and still gate W1.
 
+### 3.2 Wire confidence (the D8.0 amendment)
+
+The D8.0 hand-back surfaced three components of the system putting
+different numbers in one wire field (finding D8-F6). The amendment
+settles which number:
+
+    confidence = min(1.0, area_px / 50.0)   # area_px at PROC resolution
+
+| Item | Value |
+| --- | --- |
+| Definition | `detector/cap.py::component_confidence`, once |
+| Reported by | `detector/runner.py`, by CALLING it |
+| Ranked by | `detector/cap.py::rank_key`, level 1 |
+| Mirrored in | `firmware/rv1106/src/sw_pipeline.c`, integer-safe |
+| Saturates at | 50 px, proc resolution |
+
+It is not a probability and the Jetson must not read it as one. A
+background model plus connected components has no appearance model; area
+is the only evidence it holds, so this is a monotone restatement of how
+much of the frame said something happened. It is also resolution-
+dependent by construction — the same object at 1536x864 and at 1152x648
+does not get the same number — which is honest for a per-node quantity
+and one more reason not to calibrate anything on it. The NPU appearance
+gate (node design section 9, phase 2) is what would make it real.
+
+`persistence_count` is deliberately absent from the formula: it is
+already its own wire field, and folding it in would double-count the
+same evidence inside a value the fusion side may later weight by.
+
+**Integer-safe** in `sw_pipeline.c` means three specific things, because
+this value sits inside an ABSOLUTE byte gate and one ULP is a failure:
+the saturation test is an integer comparison (`area_px >= 50`), which no
+rounding mode or evaluation width can reach; `(double)area_px` is exact
+for every `uint32_t`; and the division happens in double and is narrowed
+to binary32 exactly once, at the wire field — the same two roundings, in
+the same order, as Python's double division followed by protobuf's
+`float` store.
+
+Only the middle one is load-bearing TODAY, and the report says so rather
+than implying three necessities. Checked exhaustively: an all-float form
+agrees bit-for-bit with this one over every area the clamp admits, and
+the two first diverge at 2^24 + 1 — where it is the operand conversion
+that loses, which the clamp puts out of reach. The shape above is
+correctness by construction, not a measured difference, and that is the
+point: the divisor and the saturation area are decisions, and decisions
+move. The adversarial review caught the first draft of this passage
+asserting the stronger claim (10c, finding 4).
+
+**Fixtures regenerated**, with the log entry as the recorded reason: the
+field's VALUE changed on 712 of the 712 committed observations —
+everything below the saturation area, which after the amendment is
+where the value stops being 1.0. The `golden/` manifests are not
+affected — this touches D8 fixtures only — and the byte-identity gate
+re-applies AFTER regeneration, unchanged and still absolute (section 4).
+
 ## 4. Wire byte-identity (the absolute gate)
 
 For identical observation inputs, the daemon's nanopb encoding must be
 byte-identical to the host codec. Both encoders are handed the same
 `observations.swob` bytes — a JSON fixture would have let a reader's
 rounding masquerade as an encoder's disagreement.
+
+These are the POST-AMENDMENT fixtures (section 3.2). The gate is the
+same gate: regenerating the inputs does not soften it, and the max
+datagram column below is unchanged from before the regeneration because
+`confidence` is a fixed-width `float` — a different value in it costs
+the same five bytes, so the capacity arithmetic in section 3.1 is
+untouched by the amendment.
 
 | Fixture | Capture events | Observations | Max obs/event | Max datagram B | nanopb == host codec |
 | --- | --- | --- | --- | --- | --- |
@@ -268,29 +337,36 @@ run-to-run bounds) is board-gated and runs with this section.
 
 ## 9. Findings
 
-### D8-F1 — the cap ranks by a confidence the detector does not have
+### D8-F1 — the cap ranks by confidence, and confidence is area
 
 The D8 opening says the cap keeps "the top components by descending
-confidence". The D4 detector has no confidence model: it is a
-background model plus connected components, and every observation it
-emits carries `confidence = 1.0`. A bare confidence sort is therefore a
-total tie, and the survivors would be whatever order the components
-arrived in.
+confidence". After the D8.0 amendment (section 3.2) there IS a
+confidence to rank by — but it is `min(1.0, area_px / 50.0)`, a
+monotone non-decreasing function of area, so "top by confidence" and
+"top by area" are the same selection. The finding survives the
+amendment; only its wording changed.
 
-The full ranking key is written down instead (`detector/cap.py`), with
-the tie-breakers in priority order: `-confidence`, then `-area_px`,
-then raster order. Area is the level that actually decides today; it is
-the evidence the detector does have, a larger foreground region is a
-better-conditioned centroid, and it matches the edge byte governor's
-intent as closely as a model-free detector can. Raster order exists
-only to make the choice TOTAL, so the C daemon does not have to
-reproduce an accident of Python's sort.
+Two consequences follow from the monotonicity, and both are load-
+bearing. Every component at or above 50 px ties at 1.0, so the
+confidence sort is a PARTIAL order and the key needs its lower levels:
+`-confidence`, then `-area_px`, then raster order (`detector/cap.py`).
+Area is what separates the saturated components and it is the right
+thing to separate them by — a larger foreground region is a better-
+conditioned centroid, and it matches the edge byte governor's intent as
+closely as a model-free detector can. Raster order exists only to make
+the choice TOTAL, so the C daemon does not have to reproduce an accident
+of Python's sort. And because levels 1 and 2 can tie but never
+disagree, the daemon's separate component-shedding order
+(`sw_detect_soft.c::rank_worse_than`, area and raster only, used when a
+frame offers more than 254 regions) is the same ranking; a confidence
+model that stops being a function of area has to revisit that too.
 
 Consequence if shipped: the cap's selection is deterministic and
-area-driven, not confidence-driven, and it will stay that way until the
-NPU appearance gate (phase 2 of the node design) gives `confidence`
-something to mean. Anyone reading "top by confidence" in the decisions
-log should read this finding first.
+area-driven, and it will stay that way until the NPU appearance gate
+(phase 2 of the node design) gives `confidence` an independent meaning.
+Anyone reading "top by confidence" in the decisions log should read
+this finding first, and anyone tempted to read the wire field as a
+detection probability should read section 3.2.
 
 ### D8-F2 — the health plane has one drop counter and three causes
 
@@ -398,17 +474,77 @@ area-derived confidence IS wanted, it is a four-part change — `cap.py`,
 the C daemon, a fixture regeneration with a recorded reason, and D8-F1 —
 and a decision, not an edit.
 
+**Closed by the D8.0 amendment.** It was wanted, the decision was taken
+and recorded, and the four-part change is exactly what shipped: section
+3.2 for the formula and the mirror, this section's D8-F1 for the
+ranking, and regenerated fixtures with the log entry as the reason. The
+interim constant is Rejected in the log rather than deleted from it. The
+two tests named above are unchanged and still the gate.
+
+### D8-F7 — the amendment moved a wire value, and added a branch
+
+Three things worth writing down about implementing D8.0a, because two
+of them are the sort of thing a green suite hides.
+
+**The selection did not change.** Confidence is monotone in area
+(D8-F1), so the components the cap keeps are exactly the ones it kept
+before. What the D8.0a regeneration moved was the `confidence` field on
+the 712 committed observations below the saturation area — above it
+the value was 1.0 before the amendment and is 1.0 after — and nothing
+else: same components, same `obs_id`s, same centroids, same datagram
+sizes, same counters. That is a claim, so it is a test: E1 pins that
+the cap's survivors are the ones an area-only ranking would pick, and
+it fails the day a confidence model stops being a function of area —
+which is the day the cap starts selecting differently and the fusion
+side needs to hear about it.
+
+**No committed fixture reaches the saturated branch.** The busiest
+component in any of the three is 40 px against a 50 px
+saturation point, so every one of those 712 observations exercises the
+division and none exercises the clamp. Below saturation the host and
+the daemon run the same double division; AT and above it they run
+different expressions — Python's `min()` against an integer short-
+circuit. An untested branch inside an absolute byte gate is the shape
+of D8-F6 again, so E5 grew two clips of fat movers, and asserts on
+both that the daemon's datagrams are byte-identical to the oracle's:
+
+- one that STRADDLES the saturation point (components from 38 px to
+  91 px, including 49, 50 and 51), so the threshold constant is
+  pinned rather than merely exceeded. The first version of this test
+  produced 70-90 px only, which left the daemon's `50` free to be
+  any value in 41..69 with the whole suite green — the review caught
+  it, and the boundary assertions are now part of the test;
+- one CROWDED with saturated movers, so more components than the cap
+  admits all tie at confidence 1.0 and the ranking's `-area_px` level
+  is what decides. Nothing else in the suite reaches that: the
+  clutter fixture exceeds the cap but never saturates, and a single
+  fat mover saturates but never exceeds the cap, so the C
+  comparator's second level had no test that could fail.
+
+Neither is a committed fixture. They cover branches, and a fourth and
+fifth fixture would add tolerance-table rows nothing declares.
+
+**The regeneration surfaced a stale honesty wart.** The committed
+fixtures predated the `--seed` work (review finding 13 below), so
+regenerating them added a `seed` field to every `stats.json` — including
+the gate fixture's, whose pixels are a machine-local render artifact that
+no seed of ours produced. `"seed": 7` there would have been a
+determinism claim with nothing behind it, so the gate fixture records
+`null` and `FixtureBuild.seed` is now `int | None`. Small, but it is the
+exact failure mode the label discipline exists to prevent, and it was
+introduced BY this regeneration rather than found in it.
+
 ## 10. E-series status
 
-E1-E5 run as one suite (`tests/edge`): **PASS (84 tests)**
+E1-E5 run as one suite (`tests/edge`): **PASS (94 tests)**
 
 | Test | Content | Status |
 | --- | --- | --- |
-| E1 | cap + max_count + ceiling agree; invariant holds in Python AND at daemon startup; cluttered frame emits the top 7 with drops counted; a full event is encodable at the schema worst case; goldens unmoved; the wire confidence is the one the cap ranks by | PASS (84 tests) |
-| E2 | nanopb byte-identity against the host codec on every fixture and on the adversarial cases, both directions, unknown-field tolerance | PASS (84 tests) |
-| E3 | injection determinism within a process, across processes, and against the committed digest; Ethernet and storage replay produce the same datagrams | PASS (84 tests) |
-| E4 | fabricated-PTS honesty end to end; a board clock domain refused at both ends; the known-lie path flagged in the artifact | PASS (84 tests) |
-| E5 | host fixture replay under the DECLARED tolerance, plus the byte-exactness result, cap/health behaviour, health decode on the unchanged host stack, and the packet-log cross-check | PASS (84 tests) |
+| E1 | cap + max_count + ceiling agree; invariant holds in Python AND at daemon startup; cluttered frame emits the top 7 with drops counted; a full event is encodable at the schema worst case; goldens unmoved; the wire confidence is the declared area formula, is the one the cap ranks by, and selects what area alone would select | PASS (94 tests) |
+| E2 | nanopb byte-identity against the host codec on every fixture and on the adversarial cases, both directions, unknown-field tolerance; the committed stats files match the schema the writer writes and the counters this report publishes | PASS (94 tests) |
+| E3 | injection determinism within a process, across processes, and against the committed digest; Ethernet and storage replay produce the same datagrams | PASS (94 tests) |
+| E4 | fabricated-PTS honesty end to end; a board clock domain refused at both ends; the known-lie path flagged in the artifact | PASS (94 tests) |
+| E5 | host fixture replay under the DECLARED tolerance, plus the byte-exactness result, cap/health behaviour, health decode on the unchanged host stack, the packet-log cross-check, host/edge identity across the saturation boundary and with saturated components competing for the cap, and report freshness | PASS (94 tests) |
 | E6 | board fixture replay through the unchanged v2 stack, toleranced scorecard | board-gated (D8.2) |
 | E7 | health packets at 1 Hz with real drop counters, on the node | board-gated (D8.2) |
 | E8 | benchmark reproducibility: two runs, same config, within declared run-to-run bounds | board-gated (D8.1) |
@@ -422,8 +558,8 @@ machine that generated this report:
 
 | Suite | Result |
 | --- | --- |
-| E-series (`tests/edge`) alone | 84 passed in 10.78s |
-| Whole suite (`tests`) | 409 passed, 1 skipped in 249.41s (0:04:09) |
+| E-series (`tests/edge`) alone | 94 passed in 10.90s |
+| Whole suite (`tests`) | 419 passed, 1 skipped in 247.73s (0:04:07) |
 | Whole suite before D8 (recorded at the start of this phase) | 325 passed, 1 skipped |
 
 Both rows are the tail of an actual `uv run pytest -q`, recorded by
@@ -454,7 +590,7 @@ indexing. That is a planning-session decision, not an edit: either
 re-measure and confirm the budget, or record a new loaded-host figure
 and re-derive the rig speed from it.
 
-## 10b. Adversarial review before hand-back
+## 10b. Adversarial review before the D8.0 hand-back
 
 Five lenses over the whole D8.0 diff — silent loss, encode/decode
 asymmetry, C correctness and memory, tests that cannot fail, and
@@ -495,6 +631,52 @@ not exist (a test's deliberate perturbation, misattributed), and a
 claimed in-contract overflow in the portable detector's label plane is
 arithmetically impossible at the declared bounds.
 
+## 10c. Adversarial review before the D8.0a hand-back
+
+The same shape, over the amendment's diff: five lenses — host/edge
+numerical identity, honesty and labels, tests that cannot fail, scope
+and blast radius, and C correctness and fixture integrity — each
+candidate finding handed to an independent skeptic told to REFUTE it,
+with a compiler and the suite available to settle it.
+
+**17 candidates, 7 refuted, 10 confirmed — 6 distinct defects, all
+fixed before hand-back.** (Four filings were the same un-regenerated
+report and two were the same quantifier.)
+
+| # | Found | Fix |
+| --- | --- | --- |
+| 1 | The generator was rewritten for the amendment and its ARTIFACT was not re-run, so this document went on asserting the superseded constant while the code beside it did the opposite — and `cap.py`'s own comment pointed the reader at a D8-F1 that contradicted it. The evidence file was stale too, so `generate` alone would have re-emitted PASS (84 tests) and a byte-identity verdict measured with the pre-amendment binary against the pre-regeneration fixtures | rebuild, `measure`, `generate`, both artifacts committed with the code; plus an E5 test asserting the committed report IS `generate(committed evidence)`, which is deterministic because the generator promises byte-identity for identical inputs |
+| 2 | The new E5 saturation clip produced components of 70-90 px, so it proved the clamp is reachable and pinned nothing: the daemon's `50` could be set to ANY value in 41..69 with the whole suite green | the clip now STRADDLES the point (38..91 px, including 49, 50 and 51) and asserts it still does. Verified by mutation: 41, 48, 49 and 69 all now fail. 51 still passes, and correctly — at exactly 50 both expressions produce a bit-identical 1.0, so `>` versus `>=` is untestable by construction, which the test says out loud |
+| 3 | The amendment silently REMOVED coverage. Confidence is injective in area below saturation, so the cap comparator's `-area_px` level stopped being the deciding one anywhere the suite looked; it decides again only when several SATURATED components compete for the cap, and nothing built that — clutter exceeds the cap without saturating, the saturation clip saturates without exceeding it | a second clip: nine fat movers against the cap of seven, all at confidence 1.0. Verified by mutation: reversing the C comparator's area level fails this test and NOTHING else in the suite |
+| 4 | `sw_pipeline.c`'s stated reason for dividing in double — that dividing in float "would land on a different bit pattern for some areas" — is false for every area the clamp admits | reworded to say what is true: the two agree bit-for-bit over 0..49 and first diverge at 2^24+1, where it is the operand conversion that loses. The double form is kept because it mirrors the host's SHAPE, not because it changes a byte today |
+| 5 | D8-F7 said the regeneration moved the field on "all N" observations while section 3.2 derived the saturation-aware count from the same fixtures — the literal-claim failure mode the new counter block was added to prevent, in the paragraph that introduced it | both places derive it identically now |
+| 6 | `stats.json` is the one committed artifact nothing derives, and this report prints four of its numbers: a wholly falsified stats file passed the entire suite, and `gate/stats.json` was read by no test at all. The regeneration exposed it by ADDING a `seed` key — the committed files had drifted from their own writer | two clip-free tests: the committed schema must match what `write_fixture` actually writes (keys only — values are machine-specific), and the four published counters must equal what the byte-gated `observations.swob` and `packets.hex` say |
+
+Findings 2, 3 and 6 are TEST-STRENGTH defects and 3 is the one worth
+carrying forward: an amendment can DELETE coverage without touching a
+test, by making one branch of a comparator unreachable from every
+fixture. Nothing goes red when that happens. It was found by mutating
+the C source and re-running the suite, which is the only method that
+finds it.
+
+Three of the seven refutations are worth naming:
+
+- the wire `confidence` has no tolerance axis, but it does not need
+  one: `Observation2D.confidence` is `ge=0.0, le=1.0` in the frozen D0
+  contract, and every board path decodes through that validator before
+  any tolerance comparison is reachable, so an out-of-range confidence
+  dies loudly upstream rather than being measured;
+- the "integer-safe" rationale was filed as arithmetically false in
+  full. It is not: the integer comparison is exactly equivalent to its
+  float form over all 2^32, and the skeptic extended the check to every
+  candidate saturation constant from 2 to 65536. Only the one sentence
+  in finding 4 was wrong;
+- E2's decode-direction test does not assert `conf`. True, and left
+  alone: it asserts 12 of 25 fields and `conf` is not singled out, so
+  this is a pre-existing breadth gap in that test rather than anything
+  D8.0a introduced. Recorded here as a D9 lever, not patched in a
+  phase that has no claim on it.
+
 ## 11. Out of scope, confirmed untouched
 
 No engine, threshold or fusion change. No NPU classifier. No RTSP/VENC
@@ -504,6 +686,12 @@ declared a smoke test with no PTS claim. `v1/` untouched. The bench
 session (conversion-gain PTC, CFA check, sky footage) lands in
 `D3_SENSOR_NOTES.md`, not here.
 
-The one contract touch is the sanctioned capacity decision, exactly as
-the D0 "D8 opening" entry authorised it.
+Two decisions were implemented and both were written down before the
+code moved: the capacity touch, exactly as the D0 "D8 opening" entry
+authorised it, and the wire confidence, exactly as the "D8.0
+amendment" entry authorised it. Nothing under
+`v2/src/skyweave2/contracts/` changed for either — the amendment moves a
+VALUE the detector puts in an existing field, not the field, its type or
+its bounds — and the fixture regeneration it required is D8 fixtures
+only, with `golden/` untouched.
 

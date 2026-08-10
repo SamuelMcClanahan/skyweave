@@ -75,6 +75,65 @@ def test_the_jsonl_twin_describes_the_same_observations():
             ), f"{name} obs {recorded['obs_id']}"
 
 
+def test_the_committed_stats_have_the_schema_write_fixture_actually_writes(tmp_path):
+    """`stats.json` is the one committed artifact nothing else derives.
+
+    It is provenance, and `report.py` prints four of its numbers straight into
+    the report's fixture table — so a stats file that has drifted from its
+    writer publishes fiction with a measured-looking table around it. The
+    D8.0a regeneration is what surfaced this: the committed files predated the
+    `--seed` work, so regenerating them ADDED a key, which means the repo had
+    been carrying stats files their own `write_fixture` could not produce and
+    no test said so.
+
+    Keys only, never values: `environment` pins library versions and
+    `session_uuid` is per fixture, so comparing values would fail on a machine
+    the fixtures are fine on. The writer is driven for real (through the
+    adversarial wire-cases build, which needs no clip and no detector) rather
+    than transcribed here, so the expected schema cannot drift from the code.
+    """
+    import json
+
+    written = json.loads(
+        (
+            fixtures.write_fixture(fixtures.build_wire_cases(), tmp_path / "probe")
+            / "stats.json"
+        ).read_text(encoding="utf-8")
+    )
+    for name in COMMITTED_FIXTURES:
+        committed = json.loads(
+            (fixtures.FIXTURE_ROOT / name / "stats.json").read_text(encoding="utf-8")
+        )
+        assert sorted(committed) == sorted(written), f"{name}: stats.json schema"
+        assert sorted(committed["detector"]) == sorted(written["detector"]), name
+        assert sorted(committed["environment"]) == sorted(written["environment"]), name
+
+
+def test_the_committed_stats_counters_agree_with_the_byte_gated_artifacts():
+    """Make the report's fixture table derived rather than trusted.
+
+    Every number here is recomputable from `observations.swob` and
+    `packets.hex`, which ARE the absolute byte gate, so this costs nothing and
+    turns four published figures into checked ones. Without it a wholly
+    falsified `stats.json` passes the entire suite — and `gate/stats.json`, in
+    particular, is read by no other test at all.
+    """
+    from tests.edge.conftest import load_packets, load_stats
+
+    for name in COMMITTED_FIXTURES:
+        events = load_events(name)
+        observations = load_observations(name)
+        packets = load_packets(name)
+        stats = load_stats(name)
+        assert stats["capture_events"] == len(events), name
+        assert stats["observations"] == len(observations), name
+        assert stats["max_observations_per_event"] == max(
+            len(event) for _, event in events
+        ), name
+        assert stats["packet_bytes_max"] == max(len(p) for p in packets), name
+        assert stats["detector"]["components_emitted"] == len(observations), name
+
+
 def test_committed_packets_are_what_the_host_codec_produces():
     """The Python half of the byte gate, which runs without a C toolchain."""
     from tests.edge.conftest import load_packets

@@ -7,18 +7,53 @@
 #include "sw_common.h"
 
 /* The detector's confidence in a component, mirroring
- * `detector/cap.py::component_confidence`: constant, because a background
- * model plus connected components has no appearance model and nothing to be
- * more or less confident about. The NPU appearance gate (phase 2) is what
- * would make this a real number. It is a function here for the same reason
- * it is one there: the cap's ranking must have ONE place to change. */
-#define SW_DETECTOR_CONFIDENCE 1.0f
+ * `detector/cap.py::component_confidence`: `min(1.0, area_px / 50.0)` with
+ * `area_px` at PROC resolution, per the D0 "D8.0 amendment" entry. Area is
+ * the only evidence a background model plus connected components has; the
+ * NPU appearance gate (phase 2) is what would make this a real number. It is
+ * a function here for the same reason it is one there: the value the cap
+ * ranks by and the value that goes on the wire must have ONE definition.
+ *
+ * INTEGER-SAFE, in three specific senses, because this value sits inside the
+ * absolute byte-identity gate (E2/E5) where a one-ULP difference from the
+ * host is a failed gate:
+ *
+ *   1. the saturation test is an INTEGER comparison. `area_px >= 50` says
+ *      what it means — the clamp is a property of the integer area — and no
+ *      rounding mode, FP evaluation width or compiler flag can reach it.
+ *   2. `(double)area_px` is EXACT for every uint32_t (53-bit mantissa), so
+ *      the dividend is the same real number on both sides. This is the one
+ *      that is genuinely load-bearing above 2^24, where `(float)area_px`
+ *      is not exact.
+ *   3. the division happens in DOUBLE and is narrowed once, at the
+ *      assignment to the `float` wire field — the same two roundings, in the
+ *      same order, that Python's double division plus protobuf's binary32
+ *      store performs.
+ *
+ * 1 and 3 are construction, not differences you can measure here, and saying
+ * so is the honest version. Checked exhaustively: `(float)a >= 50.0f` agrees
+ * with `a >= 50u` over all 2^32, and `(float)a / 50.0f` agrees bit-for-bit
+ * with `(float)((double)a / 50.0)` over the whole 0..49 the clamp admits —
+ * the two first diverge at a = 2^24 + 1, which is reason 2's territory and
+ * which the clamp puts out of reach. An all-float form would therefore also
+ * be correct today. This one is written because it mirrors the host's SHAPE
+ * rather than its current output, and so stays right if the divisor or the
+ * saturation area ever moves.
+ *
+ * Returns double, not float, for the reason spelled out at the ranking
+ * comparator below: the CAP must rank on the unnarrowed value the host ranks
+ * on. That, too, cannot move a byte today — area breaks any tie the
+ * narrowing could create — and is written for the same reason. */
+#define SW_CONFIDENCE_SATURATION_AREA_PX 50.0
+#define SW_CONFIDENCE_SATURATION_AREA_INT 50u
 
-static float component_confidence(const sw_component_t *component, int persistence)
+static double component_confidence(const sw_component_t *component, int persistence)
 {
-    SW_UNUSED(component);
-    SW_UNUSED(persistence);
-    return SW_DETECTOR_CONFIDENCE;
+    SW_UNUSED(persistence); /* already its own wire field; see cap.py */
+    if (component->area_px >= SW_CONFIDENCE_SATURATION_AREA_INT) {
+        return 1.0;
+    }
+    return (double)component->area_px / SW_CONFIDENCE_SATURATION_AREA_PX;
 }
 
 void sw_pipeline_init(sw_pipeline_t *pipeline, const sw_detector_config_t *config)
@@ -148,16 +183,23 @@ static int persistence_update(sw_pipeline_t *pipeline, const sw_component_t *com
 }
 
 /* Cap ranking, mirroring `detector/cap.py::rank_key`:
- *   1. -confidence   (the D8 opening's rule)
- *   2. -area_px      (the level that actually decides under a constant
- *                     confidence: area is the evidence the detector has)
+ *   1. -confidence   (the D8 opening's rule, now an actual quantity)
+ *   2. -area_px      (today's confidence is a monotone function of area, so
+ *                     this level never contradicts level 1; it is what
+ *                     separates the components that saturate at 1.0)
  *   3. centroid_v then 4. centroid_u  (raster order, purely to make the
  *                     choice TOTAL — without them two equal-area blobs
  *                     would be ordered by list position, which is an
- *                     accident of the host's sort and not a rule). */
+ *                     accident of the host's sort and not a rule).
+ *
+ * `confidence` is the UNNARROWED double for the same reason the host ranks
+ * on a Python float: ranking on the binary32 wire value could tie two
+ * components the host separates. Level 2 would break that tie identically
+ * today, but only because area happens to be the thing confidence is made
+ * of, and this comparator must not depend on that staying true. */
 typedef struct {
     int index;
-    float confidence;
+    double confidence;
     uint32_t area_px;
     double centroid_v;
     double centroid_u;
@@ -260,7 +302,10 @@ void sw_pipeline_frame(sw_pipeline_t *pipeline, const sw_component_t *components
         }
         obs->area_px = c->area_px;
         obs->persistence_count = (uint32_t)emitted[i].persistence;
-        obs->confidence = component_confidence(c, emitted[i].persistence);
+        /* The one narrowing, here: the host's double goes through binary32
+         * at the protobuf boundary, so this side must round exactly once
+         * too. */
+        obs->confidence = (float)component_confidence(c, emitted[i].persistence);
         obs->has_local_blob_id = true;
         obs->local_blob_id = emitted[i].blob_id;
         /* The measurement path carries no patches, so evidence_ref stays

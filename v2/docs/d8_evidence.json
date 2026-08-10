@@ -10,8 +10,8 @@
     "toolchain": "arm-rockchip830-linux-uclibcgnueabihf"
   },
   "daemon": {
-    "path": "firmware/rv1106/build-host/skyweave-edge",
-    "sha256": "ddc4c6b378a3eded7f228b5d27ac1297cf5c143d942c03fbc4f9097906bb6ff9"
+    "path": "/Users/samuelmccanahan/Desktop/los proyectos/skyweave-main/v2/firmware/rv1106/build-host/skyweave-edge",
+    "sha256": "db05568658af0db360f09e9bc56fe9e3f921802e8243a12f0e3e74320c6c94bb"
   },
   "fixtures": {
     "clutter": {
@@ -127,20 +127,20 @@
     "edge": {
       "error": 0,
       "failed": 0,
-      "passed": 84,
+      "passed": 94,
       "returncode": 0,
       "selector": "tests/edge",
       "skipped": 0,
-      "summary": "84 passed in 10.78s"
+      "summary": "94 passed in 10.90s"
     },
     "full": {
       "error": 0,
       "failed": 0,
-      "passed": 409,
+      "passed": 419,
       "returncode": 0,
       "selector": "tests",
       "skipped": 1,
-      "summary": "409 passed, 1 skipped in 249.41s (0:04:09)"
+      "summary": "419 passed, 1 skipped in 247.73s (0:04:07)"
     }
   },
   "wire_identity": {
