@@ -232,7 +232,15 @@ class InjectionFrame:
     luma: np.ndarray  # (H, W) uint8 at PROC resolution
 
 
-def _encode_session(session: InjectionSession) -> bytes:
+def encode_session_header(session: InjectionSession) -> bytes:
+    """The SWIJ session header for one run.
+
+    Public because a stream is not always a file. ``--inject-listen`` takes the
+    same bytes down a socket, and a soak generates frames for an hour rather
+    than materialising 80 GB of them, so a caller needs to emit the three
+    record kinds itself. :func:`build_injection_stream` is that caller too, so
+    the file path and the socket path cannot drift apart.
+    """
     _check_domain(session.clock_domain)
     uuid_bytes = session.session_uuid.encode("utf-8")
     cal_bytes = session.calibration_rev.encode("utf-8")
@@ -283,7 +291,8 @@ _DOMAIN_TO_WIRE = {
 _WIRE_TO_DOMAIN = {value: key for key, value in _DOMAIN_TO_WIRE.items()}
 
 
-def _encode_frame(frame: InjectionFrame) -> bytes:
+def encode_frame_record(frame: InjectionFrame) -> bytes:
+    """One SWIF frame record, header and payload."""
     if frame.luma.dtype != np.uint8 or frame.luma.ndim != 2:
         raise InjectionStreamError(
             f"injected frame {frame.frame_seq}: expected 2-D uint8 luma, got "
@@ -304,6 +313,13 @@ def _encode_frame(frame: InjectionFrame) -> bytes:
         )
         + payload
     )
+
+
+def encode_trailer(frame_count: int) -> bytes:
+    """The SWIE trailer. Its count is checked by the daemon against what it
+    actually read, so a stream that stops early is an error and not a short
+    clip — which is the whole reason the trailer exists."""
+    return struct.pack(_END_FIXED, END_MAGIC, frame_count)
 
 
 def _resize_to_proc(frame: np.ndarray, proc_width: int, proc_height: int) -> np.ndarray:
@@ -359,7 +375,7 @@ def build_injection_stream(
         detector_rev=config.detector_rev,
         declaration_overridden=not profile.is_honest,
     )
-    chunks = [_encode_session(session)]
+    chunks = [encode_session_header(session)]
     written = 0
     for seq, frame in iter_frames(clip_dir):
         if seq >= count:
@@ -370,7 +386,7 @@ def build_injection_stream(
         scene_ts_ns = int(round(seq / fps * 1e9))
         capture_ts_ns, declared_ms = fabricate_pts(scene_ts_ns, profile, camera_id, seq)
         chunks.append(
-            _encode_frame(
+            encode_frame_record(
                 InjectionFrame(
                     frame_seq=seq,
                     capture_ts_ns=capture_ts_ns,
@@ -380,7 +396,7 @@ def build_injection_stream(
             )
         )
         written += 1
-    chunks.append(struct.pack(_END_FIXED, END_MAGIC, written))
+    chunks.append(encode_trailer(written))
     return b"".join(chunks)
 
 

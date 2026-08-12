@@ -21,11 +21,19 @@ byte-identical for identical fixtures, declarations and evidence file.
 | Sub-phase | Status |
 | --- | --- |
 | D8.0 host-side: capacity, daemon, injection harness, fixtures, E1-E5 | **complete on this host** |
+| D8.1-prep (board-free): benchmark and provisioning harness, declared run-to-run bounds | **complete on this host** |
+| D8.1-prep: the flashable image set | image built, 11 files hashed (see 2.1) |
 | D8.1 board bring-up: benchmark, soak, deployment resolution | **not started — needs a flashed node** |
 | D8.2 board validation: fixture replay, toleranced scorecard, health | **not started — gated on D8.1** |
 
 The brief bars an agent from starting D8.1 until Samuel confirms the
-flashed node. Nothing below claims a board number.
+flashed node, and that gate still holds. Its 2026-08-10 amendment
+sanctions three items that have no board dependency — the image build,
+the harness, and the declared bounds — and those are the two rows in the
+middle. The image build gets its own row because building the TOOLING
+and running it to completion are different claims, and one row would
+have let the stronger one stand in for the weaker. Nothing below claims
+a board number.
 
 ## 2. Build provenance
 
@@ -42,7 +50,7 @@ flashed node. Nothing below claims a board number.
 | Debian | `12.15` |
 | nanopb | 0.4.9, vendored under `firmware/rv1106/third_party/nanopb/` |
 | Generated protobuf sources | `firmware/rv1106/proto/skyweave.pb.{c,h}`, checked in, bounds from `proto/skyweave.options` verbatim |
-| Board image | **Pending** — recorded in D8.1 when a node is flashed |
+| Board image | see 2.1 |
 
 The image is `linux/amd64` because the Luckfox toolchain binaries are
 x86_64 ELF. On Apple Silicon it runs under emulation; the Linux PC runs
@@ -71,6 +79,100 @@ Two build notes, both recorded because the next person will hit them:
   of times and announces every retry. On the native Linux mirror the
   first attempt succeeds. It is an emulation artifact, not a compiler bug
   and not a property of this source.
+
+### 2.1 The flashable image set (D8.1-prep item 1)
+
+Built by `scripts/build-image.sh` in a SECOND pinned container,
+`skyweave-image-build:d8.1`, at the SAME SDK commit as the daemon image.
+Two images because they need different things: the daemon build needs a
+toolchain and three media SDKs, the image build needs the whole SDK and
+the Debian packages its README asks for. Splitting them keeps
+`skyweave-edge-build:d8.0` — the tag this report already quotes for the
+binary D8.0 measured — exactly as it was.
+
+The daemon is deliberately NOT baked into the rootfs. The amendment
+allows hand-start until D8.2, and an image that carried the binary would
+have to be rebuilt whenever the binary moved, which is the wrong
+property for a provenance record during bring-up.
+
+**Why the script sweeps object files: an emulated-Mac attempt, and a
+retry loop that was not enough.** The daemon build is twelve files, so
+`build-board.sh` can retry the whole thing when the emulated `cc1` dies.
+An image build is u-boot, a kernel and a Buildroot rootfs — five orders
+of magnitude more compiler invocations — and the crash leaves a build
+output that EXISTS and is newer than its source. Make then treats it as
+up to date and never rebuilds it, so the next attempt walks past the
+damage and dies at the LINK instead: that attempt ended with `undefined
+reference to stdio_devices`, from a `common/stdio.o` whose compile had
+been interrupted several attempts earlier.
+
+So `build-image.sh` checks the magic number of every object, archive and
+module the failed attempt touched and deletes the ones that are not what
+they claim to be, before retrying. On that Mac it removed 23 and then 53
+truncated outputs between successive u-boot attempts — an observation
+about emulation on that host, not a property of the SDK. On a native x86
+Linux host there is nothing for it to clean up.
+
+**The build below is not that attempt.** The attempt above was
+stopped; what follows is read out of a manifest committed by a build
+that ran to `complete` — a different run, on a machine this
+record does not name. The stage counts, the byte counts and the hashes
+are that run's, and nothing above them describes it.
+
+| Item | Value |
+| --- | --- |
+| Image build container | `skyweave-image-build:d8.1` |
+| Board config | `BoardConfig-SD_CARD-Buildroot-RV1106_Luckfox_Pico_Pro_Max-IPC.mk` |
+| SDK commit | `824b817f889c2cbff1d48fcdb18ab494a68f69d1` |
+| Chip | `rv1106` |
+| Boot medium | `sd_card` |
+| Rootfs | `buildroot` |
+| Buildroot defconfig | `luckfox_pico_defconfig` |
+| Kernel defconfig | `luckfox_rv1106_linux_defconfig` |
+| Kernel DTS | `rv1106g-luckfox-pico-pro-max.dts` |
+| U-Boot defconfig | `luckfox_rv1106_uboot_defconfig` |
+| Toolchain | `arm-rockchip830-linux-uclibcgnueabihf` |
+| Partitions | `32K(env),512K@32K(idblock),256K(uboot),32M(boot),256M(userdata),-(rootfs)` |
+| Sensor IQ files | `sc4336_OT01_40IRC_F16.json sc3336_CMK-OT2119-PC1_30IRC-F16.json mis5001_CMK-OT2115-PC1_30IRC-F16.json` |
+| Build host | NOT-MEASURED — the manifest carries no host block; `build-image.sh` has no `uname`, `arch` or binfmt probe, and `provenance` describes the CONTAINER, which is identical native or emulated (D8-F14) |
+| Daemon baked into the rootfs | no |
+| Build status | complete |
+
+Stages, in the order `build.sh all` runs them (`save` is omitted: it
+stamps a copy with the wall clock, and this project does not put
+wall-clock values in artifacts). More than one attempt means a
+compile or link step died and the retry resumed after the
+magic-number sweep; on the emulated path that was `cc1`, and the
+script cannot tell that case from any other (D8-F13):
+
+| Stage | Status | Attempts |
+| --- | --- | --- |
+| uboot | ok | 1 |
+| kernel | ok | 1 |
+| rootfs | ok | 1 |
+| media | ok | 1 |
+| app | ok | 1 |
+| firmware | ok | 1 |
+
+Every file the build produced, with the SHA-256 the brief asks
+for. The images themselves are gitignored — they are derived and
+large; this table is the record:
+
+| Image file | Bytes | SHA-256 |
+| --- | --- | --- |
+| `boot.img` | 3724800 | `88153ce6533edb1f87ce161ef9f9aa5c5870d9e55bc3833b222958214cd53751` |
+| `download.bin` | 268736 | `6f6b2e8adaa191efc5b858f994c16a1c44ba273032bb32074deeeed921c6cccb` |
+| `env.img` | 32768 | `5b60412eb56d854a8ca49f2881dee3523fddceacf958bd4ca1659fed6bfc4b60` |
+| `idblock.img` | 188416 | `7823eab4e9b911a69a972f11e4c47a2eaa51ab8209ecb6b33b486fd5d1bc14d5` |
+| `rootfs.img` | 208422912 | `8c1cb040db5b7c871ed5ae6ad71aff61939f545958b05715a346d8369cacdf71` |
+| `sd_update.img` | 511705088 | `9c88bf53e1f08eeaf256aabea97c008fb576ce7cf6110715b5c6a6a62eb96b64` |
+| `sd_update.txt` | 917 | `62da1666897c0bfb43a32b220362795dca3cc34d0112d91568e3ec9a58850130` |
+| `tftp_update.txt` | 878 | `a8df3eeaed92b900c48f455ba536c8ebad06bff9db619ec6d9ceeb9963ef1ab5` |
+| `uboot.img` | 262144 | `9e252dbe4269ca759065767d32a255195ce0a700e1a023c06bd36a610c518e91` |
+| `update.img` | 14752330 | `7170039bec8e4d76a5659384ff01f816573fcd714287c0252aa7c9f2253c9caa` |
+| `userdata.img` | 9999360 | `0ac0e0536c3d90b2a414896284980983f4a7e980233d28fbc7a456b47db9a646` |
+
+Total: 11 files, 749358349 B.
 
 ## 3. The recorded decisions, implemented
 
@@ -309,19 +411,46 @@ ceiling is what picks the deployment resolution; the intersection
 argument and the choice become a decisions-log entry (label: Chosen,
 benchmark numbers Measured).
 
-| Resolution | Sustained fps | Peak RSS | DDR bandwidth | A7 utilisation | Thermals | Verdict |
-| --- | --- | --- | --- | --- | --- | --- |
-| 2304x1296 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
-| 1536x864 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
-| 1152x648 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+Two different absences appear in the table below and they are not the
+same claim. PENDING means no board has run this yet. NOT-MEASURED means
+the quantity has no reading on the machine that would run it — the
+brief's own word for the stubbed collectors, and the harness emits it as
+a marker rather than a zero.
+
+The source mode is a column rather than a footnote: three of the four
+sources are injection sources, so "injected" does not identify the
+run, and the byte rate the DETECTOR was fed is a different number from
+the one the link carried whenever the source loops.
+
+| Resolution | Source mode | Source byte rate | Sustained fps | Peak RSS | DDR bandwidth | A7 utilisation | Thermals | Verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2304x1296 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 1536x864 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 1152x648 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
 
 | Soak | Value |
 | --- | --- |
 | Resolution | PENDING |
+| Source mode | PENDING |
 | Duration | 1 h (declared) |
 | Frames | PENDING |
 | Drops | PENDING |
 | Thermal drift | PENDING |
+
+Two DECLARED SYSTEMATICS travel with any row whose source mode is
+`inject-ram`. They are quoted here from the constants the harness
+writes into every run record, not retyped: a declaration that exists
+only in code is not a declaration, and one that exists only in prose is
+not enforced.
+
+> RAM-loop source: the clip is resident in DDR and re-read by the detector, so the DDR traffic profile differs from real ISP writes. Declared systematic (D0 decisions log, 'D8.1 opening', F8 resolution); recorded beside every result and never folded into any bound.
+
+> RAM-loop scene: the clip wraps, so the movers return to their frame-0 positions and the background model meets pixels it has already seen. frame_seq stays continuous across every wrap and capture_ts_ns advances by a per-pass stride the harness declares, so warm-up runs exactly once and no timestamp repeats. The clip is built with movers present from frame 0 — a clip shorter than the plan's warm-up would otherwise be pure background — so the detector's warm-up window contains movers, unlike a file-source sweep that warms on a moverless lead-in. Declared systematic; recorded beside every result and never folded into any bound.
+
+Both are recorded beside every result and folded into NO bound. They
+appear in no tolerance table and in no bound row, because a systematic
+absorbed into a tolerance stops being visible and starts being
+permission — the two-error-channel rule, applied to a source.
 
 The intersection argument, stated now so the choice cannot be made by
 whichever number is prettiest later: the deployment resolution is the
@@ -333,7 +462,169 @@ three clear on the host (worst-axis 0.141 px, Modeled), so only (a) and
 finding about the node, not a licence to relax the gate.
 
 E8 (benchmark reproducibility: two runs, same config, within declared
-run-to-run bounds) is board-gated and runs with this section.
+run-to-run bounds) is board-gated and runs with this section. Its bounds
+are declared in 8.1, before it.
+
+**The RAM-loop budget (runbook A4).** A node-local clip preloaded into
+DDR removes the link from the source path, and the check that makes it
+legitimate is whether the clip, the detector's own state AND the daemon's
+fixed footprint fit the declared 160 MB line. Every cell
+below is DERIVED ARITHMETIC
+over the allocator sizes in `sw_detect_ive.c` and the clip geometry — no
+reading of any kind produces them, on any machine, so none of them is
+Measured. The daemon sums the SAME THREE TERMS — clip, detector state,
+fixed — from the allocators it actually calls and REFUSES to start when
+it is over, so this is a check that executes rather than a claim. Its
+detector term is not identical to this table's on the IVE arm, and the
+next paragraph is that difference rather than a footnote to it.
+
+**The daemon's detector term for the IVE arm is STRICTLY LARGER than the
+column below, by one `IVE_CCBLOB_S`.** `ive_footprint_for` sums four U8
+planes, the model store AND that blob; this table counts the first two.
+The blob is an SDK type that appears nowhere in this checkout and the IVE
+arm does not compile off the node, so the term cannot be written here —
+it is DECLARED at an upper bound of 65,536 B
+(`IVE_BLOB_DECLARED_BOUND_BYTES`, an order of magnitude above the 254
+regions `IVE_MAX_REGION_NUM` caps a blob at) rather than left as a silent
+zero. Every IVE cell below is therefore a LOWER BOUND on the board's own
+sum. At these three grids that changes nothing: each row's slack against
+the budget is wider than the declared bound, so counting the blob would
+neither shorten a clip nor break a fit, which
+`test_the_omitted_ive_blob_term_cannot_move_a_derived_clip_length`
+asserts against this table's own grids. The SOFT arm has no such gap and
+is pinned against the daemon's own printed footprint by
+`test_the_budget_check_refuses_rather_than_fitting_the_number`.
+
+**The fixed column is a DECLARED UPPER BOUND, not a derivation.** The
+daemon's `fixed` is `inject.luma_capacity` — one luma frame,
+`proc_w * proc_h`, exact and target-independent — plus five `sizeof()`
+terms over its own structs. Struct layout is a property of the target
+ABI, so the harness declares 65,536 B for that residue rather than
+transcribing five C structs into Python, which would be a second copy
+of the arithmetic that runs — the failure `sw_detect_ive.c`'s own
+comment names. A bound is enough: as long as it is at or above the
+daemon's residue, a clip this table says fits is a clip the daemon
+accepts. That inequality is READ OFF THE DAEMON'S OWN PRINTED `fixed`
+by `test_the_declared_struct_allowance_bounds_the_daemons_own_fixed_term`
+— no residue figure is typed into this generator, where nothing could
+contradict it. **The board's residue is NOT-MEASURED** until C3 prints
+it: that test runs against the HOST build, so what it proves is a bound
+on the board's residue, not the board's value, and re-running it on the
+board is the C3 step that closes the gap.
+
+Before this, the harness subtracted only the detector: the published
+1152x648 row said 174 frames and `fits`, and the daemon refused it at
+startup by 517,856 B — the luma term alone at that grid is 746,496 B
+against 249,856 B of headroom.
+
+The 160 MB is read as DECIMAL bytes (160,000,000 B) and as a
+DAEMON-ONLY ceiling. It is the upper end of the with-NPU subtotal in
+`v1/docs/RV1106_EDGE_NODE.md` section 6, "~120-160 MB" — a narrower
+thing than that subtotal, which also counts its own "~30-50 MB"
+kernel+rootfs row. That section states NO numeric margin anywhere: its
+Notes cells read "still fits with margin" and "very comfortable",
+which is prose. Which reading governs is an open decision, and it moves
+the top row.
+
+| Resolution | IVE detector state | Clip frames (derived) | Clip bytes | Daemon fixed (bound) | Total | Budget |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2304x1296 | 119,439,360 B | 12 | 35,831,808 B | 3,051,520 B | 158,322,688 B | 160,000,000 B |
+| 1536x864 | 53,084,160 B | 78 | 103,514,112 B | 1,392,640 B | 157,990,912 B | 160,000,000 B |
+| 1152x648 | 29,859,840 B | 171 | 127,650,816 B | 812,032 B | 158,322,688 B | 160,000,000 B |
+
+The clip lengths are DERIVED, not chosen. At 2304x1296 a 24-frame
+clip would total 194,154,496 B against the 160,000,000 B
+line and does not clear it, which is why the derived length there is
+12. Each length is the longest that both fits the budget with
+the detector and the daemon's fixed footprint counted AND makes
+`clip_frames * 1e9 / fps` a whole
+number of nanoseconds — the second condition is a correctness
+requirement, not tidiness: the looped capture timestamps equal an
+unrolled feed's only when it holds. The D0 "D8.1 opening" entry's
+"~24 full-res frames" was reasoned against the 256 MB PHYSICAL total
+and is silent about the detector's own allocation, so it needs
+amending against whichever line governs.
+
+### 8.1 Declared benchmark run-to-run bounds (E8)
+
+DECLARED 2026-08-10, BEFORE any board has run the sweep — the
+anti-tuning rule that governs section 6's detector bounds, applied to
+E8. They live in `skyweave2/edge/tolerance.py` as
+`BENCHMARK_RUN_TO_RUN`, and the E8 harness test reads BOTH the constant
+and this table: a declaration that only exists in code is not a
+declaration.
+
+Each bound is a RELATIVE difference, |a - b| / mean, between two runs of
+the same configuration — one bound covering all three resolutions rather
+than three absolute numbers each needing their own justification.
+
+| Axis | Declared bound | Measured |
+| --- | --- | --- |
+| sustained fps (relative) | 0.1 | PENDING (D8.1) |
+| peak RSS (relative) | 0.05 | PENDING (D8.1) |
+| A7 utilisation (relative) | 0.25 | PENDING (D8.1) |
+
+What is deliberately NOT bounded here:
+
+- **the deterministic counters.** Frames, capture events, observations,
+  components offered and emitted, drops: the same frames through the
+  same detector produce the same components, so two runs must agree
+  EXACTLY. A tolerance on those would be permission for a defect.
+  `benchmark.EXACT_COUNTERS` is the list and the comparison uses `==`.
+- **DDR bandwidth and thermals.** They have no bound because they have
+  no measurement yet. Setting one when the board produces them is a
+  decision to record then — while the numbers are still unseen, which is
+  the only time a bound can honestly be set.
+
+The VERDICT is three-valued — `pass`, `fail`, `incomplete` — and the
+third state is the one that matters. Two NOT-MEASURED values agree about
+nothing, so a comparison that lost an axis is not a pass; it is
+incomplete, and the artifact says which. The board scenario that
+produces it is ordinary rather than exotic: no health packet arrives
+(finding D8-F9) so the only bounded fps axis is absent, and a daemon
+that died leaves no stats file so every counter is absent too. A
+two-valued verdict would call that pair "within the declared bounds".
+`fail` outranks `incomplete`: a run that breached a bound and also lost
+an axis has still breached a bound.
+
+### 8.2 The benchmark and provisioning harness (D8.1-prep item 2)
+
+Written and exercised against the HOST-built daemon before any board
+exists, which is what the amendment asks for: the first board session
+should be debugging the board, not this tooling.
+
+| Piece | Module | State |
+| --- | --- | --- |
+| Resolution sweep (unpaced; the ceiling) | `edge/benchmark.py` `run_sweep` | host-exercised |
+| Soak (paced; the operating point) | `edge/benchmark.py` `run_soak` | host-exercised |
+| RAM-loop source (preloaded clip, declared frame budget, declared per-pass PTS stride, optional integer pace) | `firmware/rv1106` `--inject-ram` + `edge/benchmark.py` `ram_loop_declaration` | host-exercised; the IVE arm of the budget check is board-gated |
+| E8 comparison | `edge/benchmark.py` `compare_runs` | host-exercised |
+| Metric collectors | `edge/metrics.py` | host-exercised |
+| 1 Hz health listener | `edge/health.py` | host-exercised |
+| Node provisioning (push, verify, start, collect) | `edge/provision.py` | host-exercised over a local transport |
+| The same over ssh to a node | `edge/provision.py` `SshTransport` | board-gated |
+
+Where each number in the sweep table comes from, and whether a
+development host can answer it at all:
+
+| Axis | Mechanism | Available |
+| --- | --- | --- |
+| sustained fps | harness wall clock over the daemon's frames_in | host and board |
+| peak RSS | /proc/<pid>/status VmHWM, else sampled ps RSS; both KiB, reported in decimal MB | host and board |
+| A7 utilisation | os.wait4 rusage for the daemon's pid | host and board |
+| DDR bandwidth | RV1106 DDR controller counters | board only — NOT-MEASURED on a host |
+| thermals | /sys/class/thermal/thermal_zone*/temp | board and Linux hosts only |
+
+A sweep run is UNPACED — frames as fast as the source delivers them, so
+the fps it reports is a throughput ceiling. A soak run is PACED at a
+declared rate and its fps is a duty cycle. The artifact records which,
+because they are different quantities that share a unit.
+
+The soak's scene LOOPS. An hour at 30 fps is 108000 frames, which at
+1536x864 would be a 143 GB stream; the harness sends a short scene
+repeatedly and says so in the artifact, because a background model
+meeting the same pixels again is a real difference and not one to hide
+inside an fps number.
 
 ## 9. Findings
 
@@ -534,22 +825,300 @@ determinism claim with nothing behind it, so the gate fixture records
 exact failure mode the label discipline exists to prevent, and it was
 introduced BY this regeneration rather than found in it.
 
+### D8-F8 — C1 injection cannot feed the sweep at 30 fps, at any of the
+three resolutions, over any medium the node has
+
+Found while building the D8.1 benchmark runner, before a board exists to
+hit it with. It is arithmetic, not a measurement, and it is the reason
+the runner records a byte rate on every run.
+
+| Resolution | Bytes per Y frame | Needed at 30 fps |
+| --- | --- | --- |
+| 2304x1296 | 2985984 | 89.6 MB/s |
+| 1536x864 | 1327104 | 39.8 MB/s |
+| 1152x648 | 746496 | 22.4 MB/s |
+
+Against that, what a node can actually deliver. The node design's own
+figure for the uplink is 100M Ethernet at "~90 Mbit/s usable" and an SD
+card of the usual class runs around a fifth of what the top resolution
+asks for:
+
+| Medium | Declared throughput |
+| --- | --- |
+| 100m-ethernet | 11.25 MB/s |
+| host-page-cache | 2000.00 MB/s |
+| sd-card-class10 | 20.00 MB/s |
+
+The smallest of the three resolutions needs twice the link and slightly
+more than the card; the largest needs eight times the link.
+
+So a C1-injected sweep on the board measures **min(detector, source)**,
+and without knowing which, an fps number from it is not a GMM2 ceiling.
+Three consequences are implemented here:
+
+- every run records `input_mb_s` and a `source_verdict` against a
+  DECLARED medium — declared by the operator, because the harness cannot
+  tell an SD card from a tmpfs and a verdict with an assumed denominator
+  is worse than none;
+- the soak LOOPS a short scene rather than streaming an hour of unique
+  frames, which at 1536x864 would be a 143 GB file;
+- **the source lever is now taken**, under the D0 "D8.1 opening"
+  entry's sanction, in runbook step A4: `--inject-ram` preloads a SWIJ
+  clip into DDR once and serves it in a loop, so the link is out of the
+  path entirely. The run ends on a DECLARED frame budget
+  (`--ram-loop-frames`) rather than a clock, because every counter in
+  `benchmark.EXACT_COUNTERS` is compared with `==` and a wall-bounded
+  run would make a slow box indistinguishable from a defect. Capture
+  time advances by a per-pass stride the HARNESS declares
+  (`--ram-loop-pts-stride-ns`); the daemon reads no clock on that path
+  and copies `time_sync_error_ms` untouched. The clip, the detector's
+  own allocation AND the daemon's fixed footprint — all three terms the
+  daemon sums, per section 8 — are checked against `--ram-budget-mb`
+  before the frame loop starts, and an over-budget run is REFUSED rather
+  than shortened. Two runs record two rates: `input_mb_s` for what the
+  link carried — the clip crossed it exactly once — and `source_mb_s`
+  for what the detector was actually fed.
+
+What that does NOT remove is the DDR traffic profile: a resident clip
+re-read by the detector is not an ISP write, and the wrap means the
+background model meets pixels it has already seen. Both are declared
+systematics, quoted verbatim in section 8 and recorded beside every
+result, and neither is folded into any bound.
+
+The honest statement for the D8.1 session: with C1 injection over a
+link, a *sustained 30 fps* claim at any D4 resolution cannot be made on
+the board. What CAN be made is a detector-bound ceiling from a
+RAM-resident clip, with the frame count stated — and section 8 states
+it. The derived clip lengths are
+12 at 2304x1296, 78 at 1536x864, 171 at 1152x648,
+derived arithmetic and not Measured.
+
+### D8-F9 — health and measurement share one port, so a monitor must
+demultiplex
+
+The daemon opens ONE UDP socket (`main.c`: `sw_udp_open(&sender,
+jetson_host, measurement_port)`) and sends observation packets and 1 Hz
+health packets down it. There is no health port. A listener bound
+anywhere else hears silence — which is what the D8.1-prep listener was
+about to be, and the framing header's payload type is what saved it.
+
+Recorded because it is a constraint on the Jetson side in D9, not just
+on this harness: whatever watches node health there is the same process
+that receives measurements, or it is a second reader on a shared socket.
+`edge/health.py` demultiplexes on `PayloadType` and counts what it
+discards, which is the shape that side will need.
+
+### D8-F10 — a corrupt health datagram raised out of the D7 ingest
+adapter, and the same bug was written here before a test caught it
+
+**Closed by the D8.1 opening entry's "F10 fix" row (Chosen), in runbook
+step A3.** The finding is kept in full rather than deleted: the fix is
+one `except` clause and the reasoning is the whole value.
+
+`decode_health` raises two unrelated exception types. A bad clock
+domain gives `ProtocolViolation`, which is a `WireError`; a corrupt
+protobuf BODY gives protobuf's own `DecodeError`, which is not. Code
+that catches `WireError` around it is therefore protected against one of
+the two and not the other.
+
+`transport/adapter.py`'s `SocketIngestAdapter.poll` caught exactly
+`WireError` on its health branch, while its MEASUREMENT branch caught
+`Exception` with a labelled rejection and a comment saying why. So a
+single malformed health datagram propagated out of `poll` — on the
+fusion host, in the loop that receives from three nodes, on the port
+health SHARES with measurements (D8-F9). The project's own rule is that
+one corrupt packet may not kill ingest and every drop is labelled; that
+was one packet away from breaking it.
+
+The D8.1 opening entry sanctioned the fix and the runbook's A3 scheduled
+it. It is the measurement branch's own shape — a broad catch with a
+labelled reject, routed through `_reject` so the loud
+`raise_on_reject=True` path is unchanged. The reason string gained the
+exception type (`health_decode:DecodeError`,
+`health_decode:ProtocolViolation`) because a corrupt protobuf and a
+contract violation are different bugs on different sides of the wire,
+and the E7 listener already keeps them apart.
+
+Gated by `tests/transport/test_d81_f10_health_reject.py`: the first test
+drives all three datagrams — corrupt body, unmappable clock domain,
+valid — through one adapter and asserts the labels separately, that the
+good packet still lands, and that the measurement counters never moved;
+the second asserts the loud path still raises `DecodeError`. The health
+branch had NO coverage in the W-series before this, which is why the
+asymmetry survived D7.
+
+The same mistake was made in `edge/health.py` while writing the D8.1
+listener, and `test_a_corrupt_datagram_is_counted_and_does_not_kill_the_
+listener` is what found it — which is the argument for writing the
+harness before the bench session rather than during it.
+
+### D8-F11 — the sanctioned clip length does not survive the budget
+check the same runbook step asks for, and the budget it is checked
+against never counted the detector
+
+Runbook A4 asks for two things that do not both hold. It sanctions a
+RAM-loop clip of "~24 full-res frames = 72 MB" (the D0 "D8.1 opening"
+F8 row) and it asks that "clip + daemon footprint stays under 160 MB".
+Worked from the allocators rather than from either document:
+
+| Term | Bytes at 2304x1296 | Where it comes from |
+| --- | --- | --- |
+| IVE detector state | 119,439,360 | `ive_alloc`: four U8 planes at `stride*height`, plus `plane * model_num * 12` at the compiled-in `model_num = 3`. EXCLUDES `ive_footprint_for`'s third term, `sizeof(IVE_CCBLOB_S)` — an SDK type absent from this checkout, declared at 65,536 B in section 8 |
+| A 24-frame clip | 71,663,616 | `frames * proc_w * proc_h`, the arena the preload malloc's |
+| Daemon fixed | 3,051,520 | `inject.luma_capacity` (one luma frame) plus a DECLARED 65,536 B bound on the five `sizeof()` terms `main.c` adds |
+| Total | 194,154,496 | against a 160,000,000 B line |
+
+The D0 entry is not wrong about what it says: 72 MB IS within 256 MB,
+the node's PHYSICAL total, which is the budget that entry names. It is
+silent about the detector's own allocation, and 160 MB is a different
+budget. Both readings cannot govern the same clip.
+
+**The 160 MB line was never computed against this detector.**
+`RV1106_EDGE_NODE.md` section 6's memory table has no row for a GMM2
+model bank. Its rows are the v1 ISP node's — a full-res NV12 ring, a
+quarter-res stream, RGA scratch, the RKNN runtime — and under RAM-loop
+injection the D8 daemon allocates none of them. What it does allocate —
+119,439,360 B at the top resolution — is larger than every row in
+that table put together. The comparison A4 asks for is not like for
+like, in either direction.
+
+A4 also asks that the budget clear 160 MB "with the margin stated in
+RV1106_EDGE_NODE.md section 6". No numeric margin is stated there. The
+Notes cells read "still fits with margin" and "very comfortable" — that
+is prose, and no figure was invented here to satisfy the clause.
+
+What this phase DID, rather than picking whichever number fits: the
+budget is a declared knob (`--ram-budget-mb`, default 160, decimal MB,
+daemon-only, stated in the header comment), the daemon computes
+clip + detector + fixed at startup, logs every term, and REFUSES rather
+than shortening the clip. The harness derives the longest clip that
+clears THAT SAME THREE-TERM SUM and keeps the looped PTS exact, and the
+derivation is in section 8 with every term. The answer at the top
+resolution is 12 frames, not 24.
+
+**The two sums were not the same sum when this finding was first
+written.** Its own text said "the daemon computes clip + detector +
+fixed" two paragraphs above "the harness derives the longest clip that
+clears the budget", and the harness's budget had no `fixed` term at
+all — it subtracted the detector and nothing else. At 1152x648 that
+published a 174-frame row as fitting which the daemon refused at
+startup, and the pinning test compared the harness's arithmetic against
+itself, so it could not notice. The harness now reserves the daemon's
+`fixed` (section 8 states which half is exact and which half is a
+declared bound), and the gate that keeps them together reads the
+daemon's own printed `fixed` off a real run rather than recomputing it.
+
+Consequence if shipped: an unamended D0 entry and a daemon that refuses
+it. The first board session would meet the refusal, not the entry, and
+the clip length is a resolution decision made before C3 runs — so it
+belongs to the planning session, and it belongs there before Phase B.
+
+### D8-F12 — the image build exits 0 on a build its own manifest
+calls FAILED
+
+`scripts/build-image.sh` writes its manifest from an inline python
+block, and that block re-derives the status: every stage passed but no
+image files were collected, so it sets `status = "FAILED"` with
+`failed = "collect (no image files were produced)"` — which is exactly
+the right judgement. But that `status` is a PYTHON-local name. The
+shell's `${status}` is still `complete`, so the guard on the last lines
+(`if [ "${status}" != "complete" ]`) does not fire and the script exits
+0.
+
+It is reachable rather than theoretical: the collect step is
+`cp -f "${SDK}/output/image/"*` with its errors swallowed by
+`2>/dev/null || true`, so a build whose stages all "succeeded" and whose
+output directory is empty exits successfully, prints a manifest saying
+FAILED, and the operator moves on. The only way to notice is to read the
+manifest — which is why the A2 procedure in this phase did, and why the
+stage table above is derived from the manifest rather than from an exit
+code.
+
+NOT FIXED HERE, deliberately. This phase is sanctioned to make exactly
+one fix (A3's) and this is not it. The fix is one line — export the
+python block's verdict and test THAT — and it is recorded with the lines
+so it is a decision, not an oversight.
+
+### D8-F13 — the image container advertises an emulation check that
+does not exist, and the check it does have misreports after one crash
+
+`docker/Dockerfile.image` says of the build script: "The script says so
+out loud when it detects emulation." It does not. There is no `uname`,
+no `arch`, no qemu or binfmt probe anywhere in `build-image.sh`.
+
+What exists is `grep -q "internal compiler error"` over the stage log,
+used only to choose between two console messages after a failure. And
+the stage log is APPENDED across attempts, so once any attempt within a
+stage has produced an ICE, every later failure in that stage is reported
+as "emulated cc1 died" whatever actually killed it — including, on a
+native host, a failure that has nothing to do with a compiler.
+
+This is the D8-F6 class: a document and its code disagreeing, found by
+running the thing rather than reading it. Consequence if shipped: an
+operator debugging a native build failure is handed a diagnosis about
+emulation. NOT FIXED HERE for the same reason as D8-F12; the fix to the
+comment is a comment, and the fix to the grep is to scope it to the
+current attempt.
+
+### D8-F14 — the image manifest does not record which machine built
+the image, and A2 makes that machine load-bearing
+
+Runbook A2 says to build "on the Linux mirror (native x86 Linux; the
+emulated-Mac path is what crashed)". A manifest records the container
+tag, the SDK commit, the defconfig and a SHA-256 per file. Its
+`provenance` block is the CONTAINER's: a file baked in at `docker build`
+time plus queries of the container's own contents, byte-identical
+whether `docker run --platform linux/amd64` executed natively on x86
+Linux or under emulation on Apple Silicon. D8-F13 names the same missing
+probe from the diagnostics side; one probe closes both.
+
+The manifest committed here carries no host block, so A2's stated
+precondition is evidenced by the procedure log and by no artifact
+in this repository. Section 2.1's build-host row says
+NOT-MEASURED with that reason rather than leaving the
+question un-asked, and the reader is not invited to infer the answer
+from the emulated-Mac paragraph earlier in that section, which
+describes an attempt that was abandoned.
+
+NOT FIXED HERE, deliberately, for the same reason as D8-F12 and
+D8-F13, plus one of its own: the fix writes a new field into a
+manifest, and the only way to produce a manifest carrying it is
+another image build. The hashes ARE the identity of the bytes and B2
+re-checks them against the flashed node, so a rebuild buys provenance
+for the build host and nothing else. The fix, for whoever runs the
+next build: add `"build_host": {"uname": ..., "emulated":
+<binfmt/qemu probe>}` beside `provenance` in the manifest python
+block. `edge/image.py` already reads `build_host` and section 2.1
+already prints whatever it finds there, so the report side needs no
+further change.
+
 ## 10. E-series status
 
-E1-E5 run as one suite (`tests/edge`): **PASS (94 tests)**
+E1-E5 run as one suite (`tests/edge`): **PASS (213 tests)**
 
 | Test | Content | Status |
 | --- | --- | --- |
-| E1 | cap + max_count + ceiling agree; invariant holds in Python AND at daemon startup; cluttered frame emits the top 7 with drops counted; a full event is encodable at the schema worst case; goldens unmoved; the wire confidence is the declared area formula, is the one the cap ranks by, and selects what area alone would select | PASS (94 tests) |
-| E2 | nanopb byte-identity against the host codec on every fixture and on the adversarial cases, both directions, unknown-field tolerance; the committed stats files match the schema the writer writes and the counters this report publishes | PASS (94 tests) |
-| E3 | injection determinism within a process, across processes, and against the committed digest; Ethernet and storage replay produce the same datagrams | PASS (94 tests) |
-| E4 | fabricated-PTS honesty end to end; a board clock domain refused at both ends; the known-lie path flagged in the artifact | PASS (94 tests) |
-| E5 | host fixture replay under the DECLARED tolerance, plus the byte-exactness result, cap/health behaviour, health decode on the unchanged host stack, the packet-log cross-check, host/edge identity across the saturation boundary and with saturated components competing for the cap, and report freshness | PASS (94 tests) |
+| E1 | cap + max_count + ceiling agree; invariant holds in Python AND at daemon startup; cluttered frame emits the top 7 with drops counted; a full event is encodable at the schema worst case; goldens unmoved; the wire confidence is the declared area formula, is the one the cap ranks by, and selects what area alone would select | PASS (213 tests) |
+| E2 | nanopb byte-identity against the host codec on every fixture and on the adversarial cases, both directions, unknown-field tolerance; the committed stats files match the schema the writer writes and the counters this report publishes | PASS (213 tests) |
+| E3 | injection determinism within a process, across processes, and against the committed digest; Ethernet and storage replay produce the same datagrams | PASS (213 tests) |
+| E4 | fabricated-PTS honesty end to end; a board clock domain refused at both ends; the known-lie path flagged in the artifact | PASS (213 tests) |
+| E5 | host fixture replay under the DECLARED tolerance, plus the byte-exactness result, cap/health behaviour, health decode on the unchanged host stack, the packet-log cross-check, host/edge identity across the saturation boundary and with saturated components competing for the cap, and report freshness | PASS (213 tests) |
 | E6 | board fixture replay through the unchanged v2 stack, toleranced scorecard | board-gated (D8.2) |
 | E7 | health packets at 1 Hz with real drop counters, on the node | board-gated (D8.2) |
 | E8 | benchmark reproducibility: two runs, same config, within declared run-to-run bounds | board-gated (D8.1) |
 
 E1-E5 are the D8.0 hand-back. E6-E8 need hardware and are not claimed.
+
+What the D8.1-prep work adds to that table is HARNESS coverage, not a
+board result, and the distinction is the point:
+
+| Harness test | What it exercises on this host | What it does NOT claim |
+| --- | --- | --- |
+| `test_e7_health_listener.py` | the listener decodes real 1 Hz health packets off the measurement port, counts labelled rejections, and reports cadence and drop-counter monotonicity | E7 itself: 1 Hz on a NODE with real drop counters |
+| `test_e8_benchmark_harness.py` | the sweep runner, the collectors' NOT-MEASURED discipline, the soak's paced looped feed, and the E8 comparison including its ability to fail | E8 itself: two runs on the BOARD within the declared bounds |
+| `test_d81_image_build.py` | the image manifest reader, its refusals, and that this document quotes the manifest it was given | that an image has been flashed to anything |
+| `test_d81_provisioning.py` | push, SHA-256 verification on the far side, detached start, SIGTERM-preserves-counters and collect, over a local transport | ssh, scp, and that a Buildroot rootfs has `sha256sum` |
+| `test_d81_ram_loop_source.py` | the RAM-loop source on the HOST build: the frame budget that ends a run, continuous frame_seq across a wrap, the per-pass PTS advance, every refusal, the budget check and the pacing | that any of it has run on a board, and the IVE arm of the budget arithmetic, which does not compile off the node |
 
 ### Full-suite status
 
@@ -558,16 +1127,52 @@ machine that generated this report:
 
 | Suite | Result |
 | --- | --- |
-| E-series (`tests/edge`) alone | 94 passed in 10.90s |
-| Whole suite (`tests`) | 419 passed, 1 skipped in 247.73s (0:04:07) |
+| E-series (`tests/edge`) alone | 213 passed in 43.90s |
+| Whole suite (`tests`) | 540 passed, 1 skipped in 351.24s (0:05:51) |
 | Whole suite before D8 (recorded at the start of this phase) | 325 passed, 1 skipped |
 
-Both rows are the tail of an actual `uv run pytest -q`, recorded by
-`report measure` into the evidence file — not a number typed into this
-generator, which nothing could contradict.
+The first two rows are the tail of an actual `uv run pytest -q`, recorded
+by `report measure` into the evidence file — not a number typed into this
+generator, which nothing could contradict. The third is what the suite
+read at the start of this phase.
 
-The skip is the D7 precedent: a gate-clip test whose machine-local
-render artifacts are absent, with a synthetic variant that still runs.
+#### Which machine, and with which receive buffer
+
+The D0 "D8.1 opening" entry moved the authoritative gate: the all-green
+suite for a hand-back runs on a provisioned Linux server, macOS is
+advisory, and the VM prerequisite is a kernel receive buffer of at least
+4 MB because that is the environment D7 measured in. Until D8.1 the
+evidence file had no field for any of it, so this document could only
+say "the machine that generated this report" — true, and no use at all
+for deciding whether the gate was the gate. `report measure` now records
+it and this table quotes it.
+
+| Gate platform | Value |
+| --- | --- |
+| Kernel | Linux |
+| Kernel release | 6.17.0-1022-azure |
+| Architecture | x86_64 |
+| Distribution | Ubuntu 24.04.4 LTS |
+| `net.core.rmem_max` | `8388608` |
+| `net.core.rmem_default` | `8388608` |
+
+A `net.core.rmem_max` under 4194304 makes the two measured
+suite rows in **Full-suite status** a weaker claim than they look: W3
+pushes 720 datagrams before its first drain and fails on a COUNT
+mismatch rather than an error, so a small buffer is a silent loss that
+reads as a test failure about evidence handling. The value is published
+here so a reader can check it instead of trusting it.
+
+The skip in that row is the v1 cross-check, and it is
+an artefact of HOW this generator runs the suite rather than of the
+machine it ran on: `_run_suite` invokes `uv run pytest <selector>`
+with no `PYTHONPATH`, so `test_v1_projection_agrees_with_frozen_convention`'s
+`importorskip` on `skyweave.fusion.geom` fires. The project's second
+documented invocation, `PYTHONPATH=../v1/src uv run pytest`, runs it
+— and on the gate platform that invocation is where the whole suite
+has NO skips at all. Do not read this row's skip as a missing
+machine-local artifact; that is a different skip, and on a machine
+carrying `output/` it does not fire.
 
 ### A host-load observation on W6, recorded because it cost time
 
@@ -576,8 +1181,9 @@ average near 4 from macOS background indexing (`photoanalysisd`,
 `mediaanalysisd`, `FPCKService`),
 `test_w6_wallclock.py::test_loopback_packet_age_is_measured_and_within_the_declared_budget` failed repeatedly and reproducibly at a loopback
 scheduling-jitter p95 of ~10.03 ms against its 10.0 ms budget. It
-passes on the same machine once quiet, and the run recorded above is a
-clean one.
+passed on the same machine once quiet.
+
+The run recorded above is a clean one: `540 passed, 1 skipped in 351.24s (0:05:51)`.
 
 It was checked against the PRE-D8 tree — same failure, same number — so
 nothing in this phase moved it, and the budget was NOT widened to make
@@ -589,6 +1195,45 @@ LOADED figure") no longer holds on this host under ordinary background
 indexing. That is a planning-session decision, not an edit: either
 re-measure and confirm the budget, or record a new loaded-host figure
 and re-derive the rig speed from it.
+
+**D8.1-prep adds data points, and they are worse than the D8.0
+write-up.** It failed reproducibly while the emulated image build held
+four cores, which is the expected direction. But on an OTHERWISE QUIET
+machine it went one clean run, then 10.01 ms, then 10.04 ms, and then
+10.04 ms again running ALONE — against a 10.0 ms budget. So "it passes
+on the same machine once quiet" is no longer true: the margin on that
+host is under half a percent and mostly on the wrong side.
+
+**That is the observation D8.1 answered by moving the gate, not the
+budget.** The D0 "D8.1 opening" entry makes a provisioned Linux server
+the authoritative all-green suite gate — "where W6 passes on merit;
+macOS results remain advisory" — and runbook A1 executes it.
+
+**The whole-suite row above is that machine's.** The gate-platform
+table records Linux with `net.core.rmem_max` `8388608` — at or above
+the 4194304 A1 requires — and the row reads
+`540 passed, 1 skipped in 351.24s (0:05:51)`. The paragraphs above are now an advisory-host
+record rather than an explanation of a red row.
+
+The honest scope statement has also changed, and pretending otherwise
+would be the D8-F6 mistake one level up. The D8.1-prep write-up argued
+that nothing under `transport/` differed by a byte, so W6's inputs were
+identical to the tree where it passed. **Phase A breaks that argument:**
+A3 changes `transport/adapter.py`. What it changes is one `except`
+clause on the HEALTH branch of `SocketIngestAdapter.poll`; the W6
+loopback rig sends observation datagrams and no health datagrams, so it
+never reaches that branch. That is a weaker argument than byte-identity
+and it is stated as one — the load-bearing claim is now the gate
+platform, not the diff.
+
+The budget still has not been touched, for the same reason as before:
+`rig_replay_speed` is DERIVED from it, and widening a gate to make a
+suite green is the thing this project does not do. Moving the gate to a
+machine that meets the UNCHANGED budget is the opposite move, and it
+does not settle the macOS question: whether D7's declared headroom
+("roughly 2x the LOADED figure") still holds on a developer laptop is
+open, and it belongs to the session that owns D9's rig, before that
+rig's numbers are trusted.
 
 ## 10b. Adversarial review before the D8.0 hand-back
 
@@ -677,6 +1322,159 @@ Three of the seven refutations are worth naming:
   D8.0a introduced. Recorded here as a D9 lever, not patched in a
   phase that has no claim on it.
 
+## 10d. Adversarial review before the D8.1-prep hand-back
+
+The same shape as 10b and 10c, over the D8.1-prep diff: five lenses —
+honesty and labels, tests that cannot fail, measurement correctness,
+scope and blast radius, and correctness/robustness of the new code —
+with every candidate finding handed to an independent skeptic whose
+instruction was to REFUTE it and who could build and run the harness to
+settle it.
+
+**15 candidates, 8 refuted, 7 confirmed — 6 distinct defects, all fixed
+before hand-back.** The gap between 7 and 6 is one defect filed twice by
+two different lenses, which is what independent lenses are for.
+
+| # | Found | Fix |
+| --- | --- | --- |
+| 1 | Section 1's status row said the D8.1-prep work was "complete on this host" as a literal, while section 2.1 seventy lines later said the image build was PENDING. The generator was structurally incapable of agreeing with itself — the same literal-claim failure as review 10c finding 1 | the row is derived from the image manifest, and the image build gets its OWN row: building the tooling and running it to completion are different claims |
+| 2 | `Reproducibility.passes` was `not mismatches and not breaches`, so two runs in which every axis was NOT-MEASURED and every counter absent reported PASS — while section 8.1 asserted the opposite in prose, and the test NAMED for the guarantee never asserted it | the verdict is three-valued (`pass`/`fail`/`incomplete`), it rides in the artifact, the CLI no longer passes on an empty run list (`all([])` is True), and the test now makes the assertion its name promises |
+| 3 | `provision.py` had no test at all, and the report already called it host-exercised. Worse, running it exposed why: `LocalTransport` translated node paths for push/fetch but not for run/spawn, so with the module's OWN default `remote_dir` the binary was pushed to one path and started from another — outside the sandbox, which on a Linux host is a real directory | `_translate` applies to run and spawn too, and `test_d81_provisioning.py` drives push, hash-verify, spawn, SIGTERM and collect against the host-built daemon, including the truncated-transfer refusal |
+| 4 | The A7-utilisation collector differenced `getrusage(RUSAGE_CHILDREN)`, which accumulates over EVERY reaped child — and on a host with no `/proc` the peak-RSS sampler forks `ps` fifty times a second INSIDE that window. A skeptic isolated it: 0.08 core of "A7 utilisation" attributed to a daemon that did not exist | `os.wait4` returns rusage for one pid and cannot be contaminated by another; the source string now says which pid it asked about |
+| 5 | A daemon that was killed or died wrote no `--stats` file, and `frames_in` read the absence as 0, which became a MEASURED "0.00 fps" for a run that never happened | `Run.frames_in` is `int | None` and `sustained_fps` returns NOT-MEASURED with the reason; unknown is not zero |
+| 6 | The 8.1 anti-tuning gate was circular: it compared the report's table against the same constant the generator renders that table from, so it could only ever prove the document had been rebuilt. Section 6's gate has had the same shape since D8.0 | the three numbers are now pinned as LITERALS in the test as well, so widening a declared bound has to be done deliberately, in a place a reviewer reads |
+
+Two more defects were found by running the work rather than reading it,
+and they are the argument for the amendment's "exercised against the
+HOST-built daemon" clause:
+
+- the health listener caught only `WireError` around `decode_health`,
+  which does not cover protobuf's `DecodeError` — one corrupt datagram
+  killed the monitor. Found by the corrupt-datagram test on its first
+  run; finding D8-F10 records that the D7 ingest adapter still has it;
+- the daemon's output went to a PIPE that this harness only drained
+  after the process exited. A soak logging a warning per frame would
+  have filled the pipe buffer and deadlocked — hours in, silently. It
+  went to a file as part of the `wait4` fix above, which is the sort of
+  thing a fix for one defect is allowed to be.
+
+Two test-strength defects, both in tests written by this work:
+
+- `test_a_listener_on_the_wrong_port_hears_nothing` was near-vacuous: no
+  datagram is addressed to an unadvertised ephemeral port under ANY
+  implementation, including one with a separate health port. Replaced
+  with the claim that has content — one socket receives BOTH payload
+  types, plus an assertion that the daemon's `--help` has no health
+  port to move to;
+- the two-run E8 test enforced the BOARD's 10% fps bound on this host
+  and went red at 17% while the emulated image build was using four
+  cores. Widening the bound would have been gate-weakening; the test now
+  gates what a host can honestly gate — the deterministic counters are
+  identical and the axes get compared — and the bound is judged on the
+  board, where it applies. This is the W6 host-load lesson again, in a
+  new place.
+
+Three refutations worth naming, because the refutation is the useful
+part:
+
+- a claimed sandbox escape in `LocalTransport.alive` ("the zombie reads
+  as alive, so `stop_daemon` always returns False") was real when it was
+  filed and had already been fixed by the time the skeptic ran it — the
+  skeptic showed `Popen.poll()` reaps, which is exactly what the fix
+  added;
+- "the E8 anti-tuning gate is circular: it reads a table the generator
+  writes from the same constant". True, and it is the same circularity
+  section 6's gate has had since D8.0. What either gate actually catches
+  is a HAND-EDITED report, which is also what the freshness test exists
+  for. Recorded rather than papered over;
+- "two new unsanctioned `pytest.skip`s" — both are the skip E5 already
+  uses for a missing `D8_EDGE_REPORT.md`, which is a committed repo file
+  rather than an environment dependency. Consistent with the precedent,
+  and it never fires in a checkout that has the report.
+
+## 10e. Adversarial review before the D8.1 Phase A hand-back
+
+The same shape as 10b, 10c and 10d, over the runbook's Phase A diff:
+five lenses — honesty and labels, tests that cannot fail, C correctness/
+memory/refusals, measurement correctness, and scope/blast radius against
+the runbook — with every candidate handed to an independent skeptic whose
+instruction was to REFUTE it and who could build and run the daemon and
+the harness to settle it.
+
+**42 candidates, 20 refuted, 22 confirmed — 17 distinct defects, all
+fixed or recorded before hand-back.** The gap between 22 and 17 is five
+defects filed twice by two different lenses, which is what independent
+lenses are for: the RAM-budget arithmetic was found by both honesty and
+measurement, from opposite ends.
+
+| # | Found | Fix |
+| --- | --- | --- |
+| 1 | **The harness derived a clip length its own daemon refuses.** `main.c` enforces `clip + detector + fixed`, and `fixed` includes `inject.luma_capacity` — a full frame, malloc'd on every injection open — plus five struct terms. The harness subtracted only the detector. At 2304x1296 and 1536x864 the omission is smaller than the headroom and the run happens to work; at 1152x648 the published row left 249,856 B against a luma term of 746,496 B, so the daemon exits 1 with "RAM budget exceeded" — at the resolution most likely to sustain 30 fps and be Chosen by C4. Reproduced through `run_sweep` itself | `daemon_fixed_bytes()` is now a term in the harness's own arithmetic, in `ram_loop_max_frames`, in the published table and in every run record. The derived IVE length at 1152x648 moves 174 -> 171 |
+| 2 | The test that should have caught #1 compared `ram_loop_max_frames()` against `ram_budget_row()` — the same arithmetic on both sides of the assertion, so no divergence between harness and daemon could ever redden it | Replaced by two tests that read the DAEMON: one parses the daemon's own printed `fixed` and asserts the declared allowance bounds it, one runs the derived clip and the old budget-minus-detector clip and asserts the first is accepted and the second refused |
+| 3 | `--ram-loop-frames -1` parsed to 4294967295 and ran; `4294967298` truncated to 2; `200,000` became 200; `--ram-loop-period-ns 33.3e6` became 33 ns and paced nothing | Checked `parse_u32_arg`/`parse_i64_arg` on all three numeric RAM flags: whole string consumed, `errno` checked, sign rejected, range checked. Refuses, never clamps |
+| 4 | `peak_rss_mb` divided KiB by 1024, i.e. binary MiB wearing a decimal-MB label, in the one phase whose entire memory argument is decimal MB and whose budget it would be read against | Converted to decimal; the collector registry states both sources are KiB. The axis had no test at all, which is why it survived |
+| 5 | `scene_looped: True` was asserted on every soak record, including soaks whose scene never wrapped, and the RAM-loop scene note travelled with it — a declared systematic attached to runs that did not have it | Derived per run from the clip and the served count |
+| 6 | `BenchmarkPlan.ram_paced_fps` was written into the scored artifact and read by nothing | Deleted, with a comment naming the three fields that do state the applied pace |
+| 7 | `compare_runs` never checked that its two runs were the same CONFIGURATION, so two different resolutions — or a peak RSS read by `ps` on one side and procfs on the other — compared as a clean pass | `config_mismatches` on label, proc grid, pace, RAM plan and per-axis measurement source; any mismatch forces `fail` |
+| 8 | This report claimed the whole-suite row came from the Linux gate platform as flat prose, sitting under a table that can read PENDING or Darwin and a row that can read one failure | Derived, in four states, from the recorded platform AND the recorded receive buffer: a Linux box under `GATE_RMEM_MAX_BYTES` does not get to claim the gate either |
+| 9 | Section 2.1 narrated an abandoned emulated-Mac attempt directly above a manifest table from a different, completed build, and nothing recorded which machine produced the hashes | The mechanical lesson is kept and retitled by what it explains, in the past tense; every status claim is derived from the manifest; a Build host row renders NOT-MEASURED with its reason (finding D8-F14) |
+| 10 | `detector_state_bytes(..., "ive")` claimed to mirror the C exactly and to be pinned equal by a test; it omits `sizeof(IVE_CCBLOB_S)` and no test compares it to anything | The claim is scoped per arm and the exclusion declared: every IVE cell is stated as a LOWER bound on the board's sum. The arithmetic was NOT changed — the type is an SDK header's and guessing its size would put an uncontradictable number in a byte-precision published total |
+| 11 | The E8 "never folded into any bound" assertions could not fail: they compared a note constant to itself | Replaced by a test that asserts the actual property — the bounded axes are exactly the three declared ones, and no note constant is among them |
+| 12 | E7's paced-health test claimed to gate where the pace sleep sits. Mutation showed the defect it named leaves the measured maximum health period indistinguishable from baseline | Claim corrected to what the test does gate, and the declared slack TIGHTENED 3.0 -> 2.0, derived from the arithmetic of a late packet vs a missed one rather than tuned |
+| 13 | Two more claims asserted over the row they describe: "the run recorded above is a clean one" (W6) and D8-F8's two-term description of the budget check, stale once harness and daemon were reconciled on three | Both derived |
+| 14 | `test_the_preload_stays_out_of_the_daemons_fps_denominator` cannot fail for the defect it names: both rates share `frames_in` as a numerator, so the daemon's interval is structurally a subset of the harness's whatever the preload does | Renamed and the false causal claim struck. Gating it properly needs an observable that does not exist — see the gaps below |
+| 15 | The gate-platform publish test used byte-identical fixture values for both receive-buffer knobs, so a dropped or duplicated row was invisible | Distinguishable values, both still above the A1 line |
+| 16 | The RAM-loop budget arithmetic pin asserted `(w + 15) & ~15 == w` — true of the literals, about no system under test | Replaced with the three-term arithmetic and an explicit assertion that the pre-fix 174-frame row goes over on the luma term alone |
+| 17 | A false claim in live source: `main.c`'s pace block said a sleep ahead of the health check would delay every health packet, which the review measured to be untrue | Comment corrected, and it now names the property that IS gated — byte-identical packet logs paced vs unpaced |
+
+**Three defects were found by running the work rather than reading it,**
+and all three are the argument for the reproduction requirement: #1 (the
+skeptic drove `run_sweep` at the published row and read the refusal), #3
+(every bad argument was fed to the built binary), and #12 (the mutation
+was built and measured four times against a baseline, which is the only
+reason the docstring's claim was known to be false rather than merely
+doubted).
+
+**Test-strength defects — #2, #11, #14, #15, #16 — are five of
+seventeen,** and #2 is the one worth naming twice: it did not merely fail
+to catch #1, it was structurally incapable of catching it, because both
+sides of its assertion came from the same function's arithmetic. A test
+whose two sides share a source is a tautology wearing a comparison.
+
+Two gaps are recorded rather than closed, because closing them is more
+than this phase is sanctioned to do:
+
+- **the preload has no observable.** `write_stats` emits no preload
+  timing, so nothing can gate that the clip loads before the daemon's own
+  clock starts. One key (`ram_preload_ns`) would fix it; it is a wire-
+  adjacent addition to a stats file the board session reads, and it
+  belongs to the session that owns C3;
+- **the IVE arm of every byte figure here is uncompiled.** `sw_detect_ive.c` builds as a refusal without `SKYWEAVE_HAVE_RKMPI`, so
+  `ive_footprint_for` — the code that produces the 119,439,360 B at
+  2304x1296 on which D8-F11 and the whole clip-length question rest — has
+  never been compiled, let alone run. The first RAM-loop start on node 1
+  is the moment that arithmetic is confirmed, and the INFO line it prints
+  is where to read it.
+
+Refutations worth naming, because the refutation is the useful part:
+
+- "the RAM-loop sweep measures a detector that has gone blind" — the
+  absorption effect is real and is already declared in
+  `RAM_LOOP_SCENE_NOTE`, but the skeptic established the sweep is 120
+  frames, far inside the model's time constant, so the impact story does
+  not hold at C3's scale. It holds at C5's, and that is stated where the
+  soak is described rather than as a defect here;
+- "A3 was sanctioned as catch `DecodeError`; the code catches bare
+  `Exception`" — refuted from the finding's own text, which prescribes
+  "the measurement branch's own shape, a broad catch with a labelled
+  reject". The broad catch IS the sanctioned shape;
+- "Phase A ships a replacement for a Chosen D0 decision while filing
+  D8-F11 saying that number belongs to the planning session" — refuted:
+  the daemon refuses the sanctioned length, so SOME length had to be
+  derived to have a working source at all. The derived value is labelled
+  derived arithmetic, the D0 entry is untouched, and the finding asks for
+  the amendment rather than assuming it.
+
 ## 11. Out of scope, confirmed untouched
 
 No engine, threshold or fusion change. No NPU classifier. No RTSP/VENC
@@ -694,4 +1492,25 @@ amendment" entry authorised it. Nothing under
 VALUE the detector puts in an existing field, not the field, its type or
 its bounds — and the fixture regeneration it required is D8 fixtures
 only, with `golden/` untouched.
+
+**Phase A of the D8.1 runbook re-derives this list, because it touched
+more than the D8.1-prep diff did.** What it changed: `transport/`, one
+`except` clause on `SocketIngestAdapter.poll`'s health branch (A3, the
+sanctioned F10 fix); `firmware/rv1106/`, a fourth source mode and the
+budget check it executes (A4, sanctioned by the D0 "D8.1 opening" F8
+row); `skyweave2/edge/`, the harness that declares and records it, plus
+the evidence file's new gate-platform block (A1); this generator; and
+`firmware/rv1106/image/image-manifest.json`, which is a build product
+checked in on purpose (A2).
+
+What it did NOT change, stated as a checkable claim rather than an
+intention: nothing under `v1/`, `golden/`, `v2/proto/`,
+`firmware/rv1106/proto/` or `v2/src/skyweave2/contracts/`; no committed
+byte fixture under `tests/edge/fixtures/`; no wire message, no health
+field (the RAM loop's source mode and byte rate reach the `--stats` JSON
+and the run record, never the frozen `HealthPacket`); no declared bound
+in `tolerance.py`; no existing test deleted or weakened. The three
+decisions-log entries Phase A raises are DRAFTED for the planning
+session and are not written here — the runbook reserves that file, and
+D8-F11 is the one that needs answering before Phase B.
 

@@ -92,6 +92,14 @@ typedef struct {
     uint64_t frames_area_threshold_raised;
     uint32_t max_area_threshold;
     uint64_t frames_label_failed;
+
+    /* What ive_alloc actually asked MMZ for, summed from the same
+     * expressions the alloc_block calls use. The RAM-budget check reads this
+     * rather than re-deriving four-planes-plus-12-B/model/px elsewhere. Note
+     * it is MMZ/CMA memory, so it does NOT appear in the process RSS the
+     * harness samples: the two numbers are different quantities and must
+     * never be added. */
+    size_t footprint_bytes;
 } ive_state_t;
 
 /* u8q2: unsigned, two fractional bits. Rounds to nearest, saturates at the
@@ -166,15 +174,44 @@ static void ive_release_blocks(ive_state_t *state)
     free_block(&state->blob_blk);
 }
 
-static int ive_alloc(ive_state_t *state, int width, int height)
+/* The block sizes ive_alloc asks MMZ for, in ONE place. ive_alloc allocates
+ * from it and ive_footprint_bytes answers with it for the CONFIGURED grid
+ * before the first frame has allocated anything — the RAM budget check runs
+ * before the frame loop. Two copies of the stride/plane/model arithmetic
+ * would mean the budget check could pass against a formula that is not the
+ * one that runs. */
+typedef struct {
+    RK_U32 stride;
+    RK_U32 plane;
+    RK_U32 model_bytes;
+} ive_geometry_t;
+
+static ive_geometry_t ive_geometry(const ive_state_t *state, int width, int height)
 {
-    const RK_U32 stride = (RK_U32)((width + 15) & ~15); /* IVE wants 16B stride */
-    const RK_U32 plane = stride * (RK_U32)height;
+    ive_geometry_t geometry;
+    geometry.stride = (RK_U32)((width + 15) & ~15); /* IVE wants 16B stride */
+    geometry.plane = geometry.stride * (RK_U32)height;
     /* GMM2 model memory: model_num Gaussians per pixel, each carrying a
      * weight, a mean and a variance in the hardware's packed layout. The SDK
      * sample sizes it as 12 bytes per model per pixel; the daemon uses the
      * same figure and checks the call's return rather than trusting it. */
-    const RK_U32 model_bytes = plane * (RK_U32)state->config.gmm2.model_num * 12u;
+    geometry.model_bytes = geometry.plane * (RK_U32)state->config.gmm2.model_num * 12u;
+    return geometry;
+}
+
+static size_t ive_footprint_for(const ive_geometry_t *geometry)
+{
+    /* Four U8 planes (src, fg, bg, match), the model store, and the blob. */
+    return 4u * (size_t)geometry->plane + (size_t)geometry->model_bytes +
+           sizeof(IVE_CCBLOB_S);
+}
+
+static int ive_alloc(ive_state_t *state, int width, int height)
+{
+    const ive_geometry_t geometry = ive_geometry(state, width, height);
+    const RK_U32 stride = geometry.stride;
+    const RK_U32 plane = geometry.plane;
+    const RK_U32 model_bytes = geometry.model_bytes;
 
     if (alloc_block(&state->src_blk, &state->src.au64PhyAddr[0],
                     &state->src.au64VirAddr[0], plane) != 0 ||
@@ -195,6 +232,10 @@ static int ive_alloc(ive_state_t *state, int width, int height)
         state->height = 0;
         return -1;
     }
+    /* Only after all six blocks succeeded: a partial allocation released
+     * everything above and left the geometry at zero, so this stays zero too
+     * rather than claiming memory nobody holds. */
+    state->footprint_bytes = ive_footprint_for(&geometry);
     state->model.u32Size = model_bytes;
     state->blob.u32Size = (RK_U32)sizeof(IVE_CCBLOB_S);
     memset((void *)(uintptr_t)state->model.u64VirAddr, 0, model_bytes);
@@ -412,6 +453,23 @@ static void ive_losses(const sw_detector_t *self, sw_detector_losses_t *out)
                            : 0;
 }
 
+static size_t ive_footprint_bytes(const sw_detector_t *self)
+{
+    const ive_state_t *state = (const ive_state_t *)self->state;
+    ive_geometry_t geometry;
+    if (state == NULL) {
+        return 0;
+    }
+    if (state->footprint_bytes != 0) {
+        return state->footprint_bytes;
+    }
+    /* Nothing is allocated until the first frame arrives (ive_apply's
+     * initialised guard), and the RAM budget check deliberately runs BEFORE
+     * the frame loop — so answer for the grid the detector was opened at. */
+    geometry = ive_geometry(state, state->config.proc_width, state->config.proc_height);
+    return ive_footprint_for(&geometry);
+}
+
 static void ive_close(sw_detector_t *self)
 {
     ive_state_t *state;
@@ -446,6 +504,7 @@ sw_detector_t *sw_detect_open_ive(const sw_detector_config_t *config)
     detector->apply = ive_apply;
     detector->close = ive_close;
     detector->losses = ive_losses;
+    detector->footprint_bytes = ive_footprint_bytes;
     detector->name = "ive-gmm2";
     detector->state = state;
     return detector;

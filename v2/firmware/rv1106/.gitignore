@@ -4,3 +4,10 @@
 build-host/
 build-board/
 build-*/
+
+# The flashable image set. Hundreds of megabytes of derived partition images
+# and build logs; what IS committed is image/image-manifest.json, which carries
+# the defconfig, the SDK commit and the SHA-256 of every file here. The bytes
+# are reproducible from the pinned container; the record of which bytes is not.
+image/*
+!image/image-manifest.json

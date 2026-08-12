@@ -318,3 +318,29 @@ clean, fault manifest byte-unchanged, goldens intact.
 | Wire confidence | Area-derived, Samuel's call after the D8.0 hand-back surfaced the runner/cap/daemon disagreement: `confidence = min(1.0, area_px / 50.0)` with `area_px` at proc resolution (the formula the pre-D8 runner carried). Defined in ONE place (`component_confidence()` in `detector/cap.py`); the runner emits it, the cap ranks by it, and the C daemon (`sw_pipeline.c`) mirrors it with integer-safe math. The E-series invariants stay: reported confidence == ranked confidence, and a fresh oracle run must reproduce the committed fixture bytes | Chosen |
 | Fixture regeneration | Sanctioned with this entry as the recorded reason: the confidence wire field changes value, so the D8 frame-to-packet fixtures and any packet-byte fixture carrying a non-saturated component regenerate from the host oracle. Golden manifest files (`golden/`) are NOT affected — this touches D8 fixtures only. The wire byte-identity gate (E2/E5) re-applies AFTER regeneration and stays absolute | Chosen |
 | Constant 1.0 | Superseded by this entry (it was the D8.0 hand-back's interim restoration, correct at the time: it made host and edge agree) | Rejected |
+
+### D8.1-prep record (2026-08-10)
+
+| Item | Decision / record | Label |
+| --- | --- | --- |
+| Benchmark run-to-run bounds | Declared BEFORE any board run per the anti-tuning rule: sustained fps ±10% (health-packet-derived), peak RSS ±5%, CPU utilisation ±25%; deterministic counters compared exactly, never bounded. Literals live in `edge/tolerance.py`, printed in report section 8.1, pinned by test | Chosen |
+| D8-F8 | C1 Ethernet injection cannot feed 30 fps at any D4 resolution (2304x1296 Y needs 89.6 MB/s; the node link carries ~11). A board sweep over Ethernet measures min(detector, source). Every run records its source byte rate. Resolution of the source question is a planning decision (see D8.1 runbook) | Recorded |
+| D8-F10 | A corrupt health datagram raises protobuf `DecodeError` out of `SocketIngestAdapter.poll` (D7 code catches only `WireError`). Recorded at hand-back; fix sanctioning is a planning decision | Recorded |
+
+### D8.1 opening (2026-08-10)
+
+| Item | Decision | Label |
+| --- | --- | --- |
+| F8 resolution: benchmark source | RAM-loop injection source in the daemon: a short Y clip preloaded into DDR at start, looped. The sweep measures the detector, not the link. The DDR traffic profile differs from real ISP writes; this is a declared systematic difference recorded next to every sweep result, never folded into any bound. CORRECTION 2026-08-11 (D8-F11): the original "~24 full-res frames = 72 MB within the 256 MB budget" conflated the board's 256 MB with the daemon's 160 MB subtotal and omitted the GMM2 model bank (~107 MB at full res — absent from RV1106_EDGE_NODE.md section 6's table, which is v1 and stays unedited; the omission is recorded here). Clip lengths are therefore per-resolution, derived against the daemon's own budget check: 12 / 78 / 171 frames at 2304x1296 / 1536x864 / 1152x648 | Chosen |
+| F10 fix | Sanctioned inside D8.1: `SocketIngestAdapter.poll` catches protobuf `DecodeError` on health datagrams, counts them as rejected, never raises. One test. Closes D8-F10 | Chosen |
+| W6 / gate platform | The 10 ms loopback budget stands unweakened. The authoritative all-green suite gate for hand-backs runs on a provisioned Linux server (Azure), where W6 passes on merit; macOS results remain advisory. VM prerequisite: raise `net.core.rmem_max`/`rmem_default` (W3 needs kernel receive buffer >= 4 MB, matching the D7 report environment) | Chosen |
+
+### D8.1 Phase A closure (2026-08-11)
+
+| Item | Decision / record | Label |
+| --- | --- | --- |
+| RAM ceiling (the A4 "margin", now numeric) | Daemon total (clip + detector + fixed) <= 160 MB, the upper end of RV1106_EDGE_NODE.md section 6's with-NPU subtotal, enforced by the daemon's own startup budget check and gated in tests against the daemon's printed total, never recomputed harness-side | Chosen |
+| Clip-length defaults | The shipped per-resolution defaults (12 / 78 / 171 frames) stand. Derived by arithmetic against an UNCOMPILED IVE arm (119,439,360 B detector figure), so they are Provisional until the first daemon start on node 1 prints its budget INFO line; runbook C1 records actual vs arithmetic and STOPS before C3 if actual exceeds it | Provisional |
+| Fabricated-PTS exception for the RAM loop | Named, narrow exception to "capture time is never invented": the RAM-loop benchmark source advances `capture_ts_ns` by a harness-declared integer step per frame. It reads no clock; the step is declared in the run record; output is gated byte-identical against the E3-gated looped TCP feed; clock domain stays SYNTHETIC. Benchmark-only: this source is barred from any scored measurement path outside D8.1/D8.2 benchmarking, and the bar is a test | Chosen |
+| D8-F12 | `build-image.sh` exits 0 on a build its own manifest marks FAILED. Fix sanctioned for the next code-touching scope (before any image REBUILD; Phase B flashes the already-verified image and is unaffected) | Recorded, fix Chosen |
+| D8-F13 / D8-F14 | Container documents an emulation probe the script lacks; manifest records no build host. Recorded; folded into the same sanctioned fix as F12 | Recorded |

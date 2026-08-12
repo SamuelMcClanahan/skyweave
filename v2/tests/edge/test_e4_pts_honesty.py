@@ -268,6 +268,136 @@ def test_the_honest_path_is_not_vacuous(scene_clips):
     assert all(f.time_sync_error_ms == 0.0 for f in lying)
 
 
+# ---------------------------------------------------------------------------
+# The RAM loop: an advance is not an invention, and the declaration survives it
+# ---------------------------------------------------------------------------
+#
+# PTS honesty is E4's subject, so the RAM loop's two honesty claims live here.
+# The source's own behaviour — its budget, its refusals, its pacing — is in
+# test_d81_ram_loop_source.py.
+
+RAM_CLIP_FRAMES = 6
+RAM_STRIDE_NS = 200_000_000  # 6 frames at 30 fps, exactly
+RAM_SESSION = "e4-ram-loop-00000000-0000-0000001"
+
+
+def test_the_ram_loop_carries_a_constant_offset_declaration_on_every_pass(
+    edge_build_dir, tmp_path
+):
+    """A constant offset is HONEST under a constant per-pass stride.
+
+    This is the case an over-strict design would have refused. With a pure
+    offset, ``capture_ts(seq) = scene_ts(seq) + offset``, so
+    ``clip[i].capture_ts + pass*stride`` is exactly what an unrolled feed would
+    have written for virtual frame ``pass*N + i`` — the offset rides along
+    unchanged and the declaration stays true on pass 4 as much as on pass 1.
+    What actually breaks under a loop is drift (the error grows with scene
+    time) and jitter (keyed by frame_seq, so a repeated slot carries the wrong
+    frame's draw); both are refused at the host, and that is the test below.
+
+    Note the ``by_seq`` idiom the file-source test above uses does NOT apply
+    here: a looped run's frame_seq spans the whole budget from an N-frame clip,
+    so there is no stored frame to look up. The arithmetic is asserted instead.
+    """
+    from skyweave2.edge import benchmark
+
+    width, height = 288, 162
+    plan = benchmark.BenchmarkPlan(frames=RAM_CLIP_FRAMES, warmup_frames=0)
+    profile = PtsProfile(offset_ms=2.5)
+    clip = tmp_path / "clip.swij"
+    benchmark.write_benchmark_stream(
+        clip, plan, width, height, session_uuid=RAM_SESSION, profile=profile,
+        frame_count=RAM_CLIP_FRAMES,
+    )
+    total_frames = 24
+    config = benchmark.benchmark_config(
+        width, height, benchmark.BenchmarkPlan(frames=total_frames, warmup_frames=2)
+    )
+    run = daemon.run_daemon_on_stream(
+        clip, config, tmp_path / "run", build_dir=edge_build_dir,
+        ram_loop=daemon.RamLoopDeclaration(
+            clip_frames=RAM_CLIP_FRAMES, total_frames=total_frames,
+            pts_stride_ns=RAM_STRIDE_NS,
+        ),
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.packets, "the daemon sent nothing to compare"
+
+    _, clip_frames = read_stream(clip.read_bytes())
+    assert len(clip_frames) == RAM_CLIP_FRAMES
+    seen_passes = set()
+    for packet in run.packets:
+        envelope, observations = codec.decode_observation_packet(unframe(packet)[1])
+        passes, slot = divmod(envelope.frame_seq, RAM_CLIP_FRAMES)
+        seen_passes.add(passes)
+        source = clip_frames[slot]
+        # The declaration is the CLIP's, copied byte for byte and never
+        # recomputed — on pass 4 exactly as on pass 0.
+        assert envelope.time_sync_error_ms == pytest.approx(
+            source.time_sync_error_ms, rel=1e-6
+        )
+        assert envelope.time_sync_error_ms == pytest.approx(2.5, rel=1e-6)
+        # ...and the timestamp is what an UNROLLED feed would have carried for
+        # this virtual frame_seq. Exactly, not approximately: the whole point of
+        # a declared integer stride is that no float enters the daemon's path.
+        unrolled, declared = fabricate_pts(
+            _scene_ts_ns(envelope.frame_seq, 30.0), profile, 0, envelope.frame_seq
+        )
+        assert envelope.capture_ts_ns == unrolled, envelope.frame_seq
+        assert declared == pytest.approx(envelope.time_sync_error_ms, rel=1e-6)
+        # An advanced synthetic timestamp is still a synthetic timestamp.
+        assert envelope.clock_domain is ClockDomain.SYNTHETIC
+        assert observations
+    assert seen_passes >= {0, 1, 2, 3}, (
+        f"only passes {sorted(seen_passes)} reached the wire; the claim is about "
+        "the later ones"
+    )
+
+
+def test_a_drifting_or_jittering_profile_is_refused_at_the_host():
+    """The two profiles a constant per-pass stride cannot carry, each with its
+    own reason rather than one shared "unsupported".
+
+    Drift makes the declared error grow with SCENE time, so from pass 2 the
+    looped timestamp is one no unrolled feed would have written. Jitter is drawn
+    from a key that includes frame_seq, so a repeated clip slot carries the
+    perturbation belonging to a different frame. Neither is a limitation of the
+    daemon: they are conditions under which the harness's own looping rule stops
+    being reproducible, which is why they are refused where the clip is BUILT.
+
+    A clip length whose per-pass stride is not a whole number of nanoseconds is
+    refused for the same underlying reason and is checked here beside them.
+    """
+    from skyweave2.edge import benchmark
+
+    plan = benchmark.BenchmarkPlan(
+        source_mode=benchmark.SOURCE_MODE_INJECT_RAM, ram_clip_frames=6
+    )
+    with pytest.raises(ValueError, match="drift"):
+        benchmark.ram_loop_declaration(
+            plan, 288, 162, total_frames=24, profile=PtsProfile(drift_ppm=30.0)
+        )
+    with pytest.raises(ValueError, match="jitter"):
+        benchmark.ram_loop_declaration(
+            plan, 288, 162, total_frames=24, profile=PtsProfile(jitter_ms_sigma=0.1)
+        )
+    with pytest.raises(ValueError, match="known-lie"):
+        benchmark.ram_loop_declaration(
+            plan, 288, 162, total_frames=24,
+            profile=PtsProfile(offset_ms=25.0, declared_error_ms_override=0.0),
+        )
+    # ...and the honest constant offset the test above exercises is NOT refused.
+    assert benchmark.ram_loop_declaration(
+        plan, 288, 162, total_frames=24, profile=PtsProfile(offset_ms=2.5)
+    ).pts_stride_ns == RAM_STRIDE_NS
+
+    odd = benchmark.BenchmarkPlan(
+        source_mode=benchmark.SOURCE_MODE_INJECT_RAM, ram_clip_frames=13
+    )
+    with pytest.raises(ValueError, match="whole number of nanoseconds"):
+        benchmark.ram_loop_declaration(odd, 288, 162, total_frames=24)
+
+
 def test_unknown_injection_flags_are_rejected(scene_clips):
     """A future flag this build has never heard of must stop the stream, not
     be ignored: an ignored flag is an undeclared change in what the bytes

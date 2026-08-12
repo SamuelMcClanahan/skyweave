@@ -20,7 +20,8 @@
 typedef enum {
     SW_SOURCE_INJECT_FILE = 0, /* C1: a SWIJ stream from local storage */
     SW_SOURCE_INJECT_TCP = 1,  /* C1: a SWIJ stream over Ethernet */
-    SW_SOURCE_VI = 2           /* real CSI capture through RKMPI VI */
+    SW_SOURCE_VI = 2,          /* real CSI capture through RKMPI VI */
+    SW_SOURCE_INJECT_RAM = 3   /* C1: a SWIJ clip preloaded into DDR and looped */
 } sw_source_kind_t;
 
 typedef enum {
@@ -69,12 +70,39 @@ typedef struct {
     char calibration_rev[SW_CALIBRATION_REV_MAX];
 } sw_detector_config_t;
 
+/* The RAM loop's budget line, and the ONLY reading of it this daemon has.
+ *
+ * DECIMAL MB (10^6 B), and a DAEMON-ONLY budget: the clip arena plus the
+ * detector's own allocation plus the daemon's fixed buffers. It is the upper
+ * end of RV1106_EDGE_NODE.md section 6's with-NPU subtotal, "~120-160 MB".
+ * That subtotal counts its own "~30-50 MB" kernel+rootfs row, which this
+ * budget does NOT include, so the two are not the same quantity. Section 6
+ * states no numeric margin at all — its Notes cells read "still fits with
+ * margin" and "very comfortable", which is prose — so no margin figure is
+ * derived from it here. Overridable with --ram-budget-mb, because which line
+ * governs is an open question and a daemon that hid it would settle it. */
+#define SW_RAM_BUDGET_DEFAULT_MB 160
+
 typedef struct {
     sw_source_kind_t source;
     sw_detector_kind_t detector_kind;
 
-    char inject_path[512];  /* SW_SOURCE_INJECT_FILE */
+    /* SW_SOURCE_INJECT_FILE, and SW_SOURCE_INJECT_RAM: the RAM loop
+     * deliberately reuses this field because it is the same thing, a path to
+     * a SWIJ stream, read by the same parser. */
+    char inject_path[512];
     int inject_port;        /* SW_SOURCE_INJECT_TCP */
+
+    /* SW_SOURCE_INJECT_RAM. Every value below is DECLARED by the harness on
+     * the command line and the daemon derives NONE of them: a loop that
+     * computed its own timestamp advance or its own run length would be the
+     * daemon forming an opinion about capture time, which is the one thing
+     * sw_inject.h's header rules out. sw_config_validate refuses each of them
+     * rather than substituting a default. */
+    uint32_t ram_loop_frames;      /* total frames the run serves; 0 = unset */
+    int64_t ram_loop_pts_stride_ns; /* capture_ts_ns advance per pass */
+    int64_t ram_loop_period_ns;    /* per-frame pace; 0 = unpaced */
+    int ram_budget_mb;             /* SW_RAM_BUDGET_DEFAULT_MB unless overridden */
 
     char jetson_host[64];
     int measurement_port;
@@ -95,6 +123,12 @@ typedef struct {
 } sw_config_t;
 
 void sw_config_defaults(sw_config_t *config);
+
+/* The source mode as a string, for --stats. Returns exactly the spellings
+ * `skyweave2.edge.benchmark.SOURCE_MODES` uses ("inject-file", "inject-tcp",
+ * "inject-ram", "capture-vi"), because a collected node artifact whose source
+ * mode does not match the harness's own vocabulary cannot be joined to it. */
+const char *sw_source_name(sw_source_kind_t source);
 
 /* Refuses on any inconsistency rather than clamping. Returns 0 or -1. */
 int sw_config_validate(const sw_config_t *config);

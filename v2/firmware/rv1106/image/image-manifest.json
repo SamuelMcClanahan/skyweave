@@ -1,0 +1,132 @@
+{
+  "board_config": "BoardConfig-SD_CARD-Buildroot-RV1106_Luckfox_Pico_Pro_Max-IPC.mk",
+  "container_tag": "skyweave-image-build:d8.1",
+  "daemon_baked_in": false,
+  "declared": {
+    "LF_TARGET_ROOTFS": "buildroot",
+    "RK_BOOTARGS_CMA_SIZE": "66M",
+    "RK_BOOT_MEDIUM": "sd_card",
+    "RK_BUILDROOT_DEFCONFIG": "luckfox_pico_defconfig",
+    "RK_CAMERA_SENSOR_IQFILES": "sc4336_OT01_40IRC_F16.json sc3336_CMK-OT2119-PC1_30IRC-F16.json mis5001_CMK-OT2115-PC1_30IRC-F16.json",
+    "RK_CHIP": "rv1106",
+    "RK_KERNEL_DEFCONFIG": "luckfox_rv1106_linux_defconfig",
+    "RK_KERNEL_DTS": "rv1106g-luckfox-pico-pro-max.dts",
+    "RK_PARTITION_CMD_IN_ENV": "32K(env),512K@32K(idblock),256K(uboot),32M(boot),256M(userdata),-(rootfs)",
+    "RK_PARTITION_FS_TYPE_CFG": "rootfs@IGNORE@ext4,userdata@/userdata@ext4",
+    "RK_TOOLCHAIN_CROSS": "arm-rockchip830-linux-uclibcgnueabihf",
+    "RK_UBOOT_DEFCONFIG": "luckfox_rv1106_uboot_defconfig",
+    "RK_UBOOT_DEFCONFIG_FRAGMENT": "rk-emmc.config"
+  },
+  "failed_stage": "",
+  "files": [
+    {
+      "bytes": 3724800,
+      "name": "boot.img",
+      "sha256": "88153ce6533edb1f87ce161ef9f9aa5c5870d9e55bc3833b222958214cd53751"
+    },
+    {
+      "bytes": 268736,
+      "name": "download.bin",
+      "sha256": "6f6b2e8adaa191efc5b858f994c16a1c44ba273032bb32074deeeed921c6cccb"
+    },
+    {
+      "bytes": 32768,
+      "name": "env.img",
+      "sha256": "5b60412eb56d854a8ca49f2881dee3523fddceacf958bd4ca1659fed6bfc4b60"
+    },
+    {
+      "bytes": 188416,
+      "name": "idblock.img",
+      "sha256": "7823eab4e9b911a69a972f11e4c47a2eaa51ab8209ecb6b33b486fd5d1bc14d5"
+    },
+    {
+      "bytes": 208422912,
+      "name": "rootfs.img",
+      "sha256": "8c1cb040db5b7c871ed5ae6ad71aff61939f545958b05715a346d8369cacdf71"
+    },
+    {
+      "bytes": 511705088,
+      "name": "sd_update.img",
+      "sha256": "9c88bf53e1f08eeaf256aabea97c008fb576ce7cf6110715b5c6a6a62eb96b64"
+    },
+    {
+      "bytes": 917,
+      "name": "sd_update.txt",
+      "sha256": "62da1666897c0bfb43a32b220362795dca3cc34d0112d91568e3ec9a58850130"
+    },
+    {
+      "bytes": 878,
+      "name": "tftp_update.txt",
+      "sha256": "a8df3eeaed92b900c48f455ba536c8ebad06bff9db619ec6d9ceeb9963ef1ab5"
+    },
+    {
+      "bytes": 262144,
+      "name": "uboot.img",
+      "sha256": "9e252dbe4269ca759065767d32a255195ce0a700e1a023c06bd36a610c518e91"
+    },
+    {
+      "bytes": 14752330,
+      "name": "update.img",
+      "sha256": "7170039bec8e4d76a5659384ff01f816573fcd714287c0252aa7c9f2253c9caa"
+    },
+    {
+      "bytes": 9999360,
+      "name": "userdata.img",
+      "sha256": "0ac0e0536c3d90b2a414896284980983f4a7e980233d28fbc7a456b47db9a646"
+    }
+  ],
+  "provenance": {
+    "base": "debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241",
+    "buildroot": "2023.02.6 (vendored in the SDK at sysdrv/tools/board/buildroot/)",
+    "cmake": "cmake version 3.25.1",
+    "debian": "12.15",
+    "gcc": "8.3.0",
+    "git": "git version 2.39.5",
+    "host_gcc": "12",
+    "luckfox_commit": "824b817f889c2cbff1d48fcdb18ab494a68f69d1",
+    "luckfox_repo": "https://github.com/LuckfoxTECH/luckfox-pico.git",
+    "make": "GNU Make 4.3",
+    "sdk_root": "/opt/luckfox-pico",
+    "toolchain": "arm-rockchip830-linux-uclibcgnueabihf"
+  },
+  "schema": "d8-image/1",
+  "stages": [
+    {
+      "attempts": 1,
+      "seconds": 7,
+      "stage": "uboot",
+      "status": "ok"
+    },
+    {
+      "attempts": 1,
+      "seconds": 43,
+      "stage": "kernel",
+      "status": "ok"
+    },
+    {
+      "attempts": 1,
+      "seconds": 1070,
+      "stage": "rootfs",
+      "status": "ok"
+    },
+    {
+      "attempts": 1,
+      "seconds": 20,
+      "stage": "media",
+      "status": "ok"
+    },
+    {
+      "attempts": 1,
+      "seconds": 3,
+      "stage": "app",
+      "status": "ok"
+    },
+    {
+      "attempts": 1,
+      "seconds": 4,
+      "stage": "firmware",
+      "status": "ok"
+    }
+  ],
+  "status": "complete"
+}

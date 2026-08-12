@@ -155,8 +155,17 @@ class SocketIngestAdapter:
         if payload_type is PayloadType.HEALTH:
             try:
                 decode_health(body)
-            except WireError as exc:
-                return self._reject("health_decode", exc)
+            except Exception as exc:  # noqa: BLE001 - decode/validation, both labeled
+                # Broad on purpose, and the breadth is finding D8-F10 rather
+                # than a style choice: `decode_health` raises
+                # `ProtocolViolation` (a WireError) for a clock domain the
+                # contract will not map, and protobuf's own `DecodeError` —
+                # not a WireError at all — for a corrupt body. Catching only
+                # WireError let one malformed health datagram propagate out of
+                # `poll`, on the fusion host, in the loop that receives from
+                # three nodes, on the port health SHARES with measurements
+                # (finding D8-F9). Same shape as the measurement branch below.
+                return self._reject(f"health_decode:{type(exc).__name__}", exc)
             self.stats.health_packets += 1
             return []
         if payload_type is not PayloadType.OBSERVATION:

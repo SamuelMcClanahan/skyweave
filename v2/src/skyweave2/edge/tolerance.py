@@ -265,8 +265,91 @@ DECLARED_TOLERANCE = {
     "ive": BOARD_IVE_TOLERANCE,
 }
 
+
+# --------------------------------------------------------------------------
+# E8: the benchmark's run-to-run bounds
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BenchmarkTolerance:
+    """How far two runs of the SAME benchmark configuration may differ.
+
+    A sibling of :class:`DetectorTolerance` and declared under the same rule —
+    before the run, in the report, read by a test — but it bounds a different
+    kind of quantity. The detector bounds cover a DIVERGENCE between two
+    detectors; these cover the REPEATABILITY of one measurement on one machine.
+
+    Only three axes appear here, and the omissions are the design:
+
+    - the deterministic counters (frames, capture events, observations, drops)
+      are compared EXACTLY, not bounded. The same frames through the same
+      detector produce the same components; a tolerance on that would be
+      permission for a defect. ``benchmark.EXACT_COUNTERS`` is that list.
+    - DDR bandwidth and thermals have no bound because they have no host
+      measurement to bound. When the board produces them, a bound for them is a
+      decision to record then — with the numbers still unseen, which is the
+      only time a bound can honestly be set.
+
+    Each value is a RELATIVE difference, |a - b| / mean, so one bound covers
+    all three resolutions instead of three absolute numbers that would each
+    need their own justification.
+    """
+
+    #: Sustained fps, taken from the daemon's own health-packet rate rather
+    #: than the harness's wall clock (the harness figure includes process
+    #: startup, which is not the node's).
+    fps_relative: float
+    #: Peak resident set. The daemon allocates everything at startup and never
+    #: allocates in the frame loop, so two runs of one configuration should
+    #: differ by page-granularity noise and nothing else.
+    peak_rss_relative: float
+    #: CPU seconds per wall second. A ratio of two measured quantities, so it
+    #: carries both errors and gets the loosest bound of the three.
+    cpu_utilisation_relative: float
+
+
+#: DECLARED 2026-08-10, BEFORE any board has run the sweep — the same
+#: anti-tuning rule the detector bounds were declared under, applied to E8
+#: ("two runs, same config, stats within declared run-to-run bounds").
+#:
+#: The numbers, and why each is what it is:
+#:
+#: - **fps 10%.** The node is a fixed-clock single-core device with nothing
+#:   else running on it, so the honest expectation is a few percent. Ten
+#:   leaves room for scheduler and I/O noise while still failing on the things
+#:   this bound exists to catch: thermal throttling between runs, a source that
+#:   starved one run and not the other, and a background process that should
+#:   not be on a sealed node at all.
+#: - **peak RSS 5%.** Allocation happens once at startup. Five percent is
+#:   already generous for a quantity that should be identical, and it is not
+#:   zero only because the two mechanisms that can read it (a kernel high-water
+#:   mark, a sampled maximum) do not have to agree to the page.
+#: - **CPU utilisation 25%.** cpu_seconds / wall_seconds on a short run is a
+#:   small number over a small number. The bound is wide because the estimator
+#:   is, and it is still narrow enough to catch a run that spent a quarter more
+#:   of the core than its twin.
+#:
+#: Exceeding one is a finding to investigate and record, not automatically a
+#: failure — but the bound is what decides which conversation happens, and it
+#: exists before the data. Changing a number here without changing it in
+#: `v2/docs/D8_EDGE_REPORT.md` is a documentation break, and the E8 harness
+#: test reads BOTH.
+BENCHMARK_RUN_TO_RUN = BenchmarkTolerance(
+    fps_relative=0.10,
+    peak_rss_relative=0.05,
+    cpu_utilisation_relative=0.25,
+)
+
+DECLARED_BENCHMARK_TOLERANCE = {
+    "run_to_run": BENCHMARK_RUN_TO_RUN,
+}
+
 __all__ = [
+    "BENCHMARK_RUN_TO_RUN",
     "BOARD_IVE_TOLERANCE",
+    "BenchmarkTolerance",
+    "DECLARED_BENCHMARK_TOLERANCE",
     "DECLARED_TOLERANCE",
     "DetectorTolerance",
     "Divergence",

@@ -1,0 +1,104 @@
+# The pinned IMAGE-build container for the RV1106 node (D8.1-prep item 1).
+#
+# `docker/Dockerfile` builds the DAEMON and needs seven directories out of the
+# Luckfox SDK. This one builds the FLASHABLE IMAGE SET — u-boot, kernel,
+# Buildroot rootfs — and needs the whole SDK plus the Debian packages the SDK's
+# own README asks for. Two images, one pinned commit: the daemon image stays
+# small and its tag stays exactly what the D8.0 report already quotes, and a
+# rebuild here cannot silently change the binary that phase measured.
+#
+#   docker build --platform linux/amd64 -t skyweave-image-build:d8.1 \
+#       -f docker/Dockerfile.image docker/
+#   docker run --rm --platform linux/amd64 -v "$PWD:/src" -w /src \
+#       skyweave-image-build:d8.1 ./scripts/build-image.sh
+#
+# Platform note, same as the daemon image and for the same reason: the SDK's
+# toolchain binaries are x86_64 ELF, so this is linux/amd64 and it runs under
+# emulation on Apple Silicon. A Buildroot build is four orders of magnitude
+# more compiler invocations than the daemon build, so what is merely slow
+# there is the difference between a laptop and a Linux PC here. The script
+# says so out loud when it detects emulation; see the report.
+
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+
+# The base is pinned by DIGEST. The apt packages are not version-pinned, for
+# the reason the daemon image gives: Debian stable moves under a point release
+# and a pinned version turns "reproducible" into "unbuildable in three months".
+# What they resolved to is RECORDED in the provenance file instead.
+#
+# The list is the Luckfox SDK README's own `apt-get install` line, minus the
+# four entries that only make sense on a developer's workstation (`ssh`,
+# `openssh-server`, `openssh-client`, `vim`) and plus what Buildroot's
+# download and unpack stages need on a slim base (`wget`, `curl`, `cpio`,
+# `rsync`, `bzip2`, `lz4`, `xz-utils`, `patch`, `perl`, `libncurses-dev`).
+# Dropping a package the SDK asks for would be a divergence from the SDK's
+# build environment; adding one Buildroot needs is not.
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git make gcc g++ gcc-multilib g++-multilib module-assistant \
+        expect gawk texinfo libssl-dev bison flex fakeroot cmake unzip \
+        gperf autoconf device-tree-compiler libncurses5-dev libncurses-dev \
+        pkg-config bc python-is-python3 python3 passwd openssl file cpio \
+        rsync wget curl ca-certificates bzip2 lz4 xz-utils patch perl \
+        util-linux sudo \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+# The SAME commit the daemon image pins. If these two ever drift, the daemon
+# in the report and the rootfs it runs on stop being the same SDK, and the
+# report's build-provenance section would be describing two different things
+# under one heading.
+ENV LUCKFOX_REPO=https://github.com/LuckfoxTECH/luckfox-pico.git
+ENV LUCKFOX_COMMIT=824b817f889c2cbff1d48fcdb18ab494a68f69d1
+ENV SKYWEAVE_SDK=/opt/luckfox-pico
+
+# No sparse checkout here: `build.sh` walks the whole tree. Depth 1 at the
+# pinned commit, then the history is dropped — it is a build input, not a
+# repository to work in.
+RUN set -eux; \
+    mkdir -p "${SKYWEAVE_SDK}"; \
+    cd "${SKYWEAVE_SDK}"; \
+    git init -q .; \
+    git remote add origin "${LUCKFOX_REPO}"; \
+    git fetch --depth 1 origin "${LUCKFOX_COMMIT}"; \
+    git checkout -q FETCH_HEAD; \
+    test -x "tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/bin/arm-rockchip830-linux-uclibcgnueabihf-gcc"; \
+    test -f "project/build.sh"; \
+    test -f "sysdrv/tools/board/buildroot/buildroot-2023.02.6.tar.gz"; \
+    rm -rf .git
+
+# Buildroot declines to run as root, and several of its packages configure
+# differently when they find one. The build therefore runs as `builder`, which
+# owns the SDK tree; `build-image.sh` itself stays root so it can write the
+# manifest and the images back through the bind mount, which is the same thing
+# the daemon build already does.
+RUN set -eux; \
+    useradd -m -u 1000 -s /bin/bash builder; \
+    chown -R builder:builder "${SKYWEAVE_SDK}"
+
+ENV PATH="${SKYWEAVE_SDK}/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/bin:${PATH}"
+
+# Recorded in the image so a container can be asked what it is, and the report
+# can quote the answer instead of a note somebody typed. Same format and same
+# keys as the daemon image's provenance file, so one reader parses both.
+RUN set -eux; \
+    { \
+      echo "base=debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241"; \
+      echo "luckfox_repo=${LUCKFOX_REPO}"; \
+      echo "luckfox_commit=${LUCKFOX_COMMIT}"; \
+      echo "sdk_root=${SKYWEAVE_SDK}"; \
+      echo -n "toolchain="; \
+      arm-rockchip830-linux-uclibcgnueabihf-gcc -dumpmachine; \
+      echo -n "gcc="; \
+      arm-rockchip830-linux-uclibcgnueabihf-gcc -dumpversion; \
+      echo -n "host_gcc="; gcc -dumpversion; \
+      cmake --version | head -n1 | sed 's/^/cmake=/'; \
+      git --version | sed 's/^/git=/'; \
+      make --version | head -n1 | sed 's/^/make=/'; \
+      echo -n "debian="; cat /etc/debian_version; \
+      echo "buildroot=2023.02.6 (vendored in the SDK at sysdrv/tools/board/buildroot/)"; \
+    } > /etc/skyweave-image-provenance; \
+    cat /etc/skyweave-image-provenance
+
+CMD ["/bin/bash"]

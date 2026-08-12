@@ -49,6 +49,19 @@ void sw_log(sw_log_level_t level, const char *fmt, ...);
  * determinism rule). */
 int64_t sw_monotonic_ns(void);
 
+/* Sleep for at most `ns` nanoseconds on the same monotonic clock
+ * sw_monotonic_ns reads. PACING ONLY, exactly as scoped above: a deadline
+ * never becomes a capture timestamp and never reaches --stats, the packet log
+ * or any scored artifact. Returns immediately if `ns` <= 0.
+ *
+ * Does NOT resume after a signal. The only signals this daemon installs are
+ * SIGINT/SIGTERM (which mean leave) and SIGPIPE (ignored), so the caller
+ * re-tests its stop flag at the top of the next slice and a SIGTERM is never
+ * slept through. nanosleep (<time.h>) rather than usleep, which
+ * _POSIX_C_SOURCE=200809L does not declare, and rather than
+ * clock_nanosleep, which the macOS host build does not have. */
+void sw_sleep_ns(int64_t ns);
+
 /* Read exactly n bytes from a file descriptor, or fail. Returns 0 on success,
  * -1 on error, 1 on clean EOF before any byte was read (the only case a
  * caller is allowed to treat as "the stream ended"). */

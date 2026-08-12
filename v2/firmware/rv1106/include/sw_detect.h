@@ -63,6 +63,13 @@ struct sw_detector {
     /* Losses so far. Every detector implements it; a detector with no bound
      * of its own returns zeros rather than leaving the caller to guess. */
     void (*losses)(const sw_detector_t *self, sw_detector_losses_t *out);
+    /* The exact byte total this backend passed to its allocator for the
+     * current grid. NOT an RSS reading and never a measurement — it is the
+     * sum of the sizes the allocations actually asked for, which is what the
+     * RAM-budget check compares a preloaded clip against. Re-deriving the
+     * formula elsewhere would give two copies, one of which is not the one
+     * that runs. Every backend implements it. */
+    size_t (*footprint_bytes)(const sw_detector_t *self);
     const char *name;
     void *state;
 };

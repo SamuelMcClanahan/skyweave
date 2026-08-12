@@ -52,6 +52,12 @@ typedef struct {
      * log line scrolls away while a counter reaches the health packet. */
     uint64_t components_over_list_bound;
     uint64_t frames_over_list_bound;
+
+    /* What soft_alloc actually asked for, summed from the same expressions
+     * the callocs use. The RAM-budget check reads this rather than
+     * re-deriving 46 B/px somewhere else, because two copies of one formula
+     * means one of them is not the one that runs. */
+    size_t footprint_bytes;
 } soft_state_t;
 
 static void soft_free(soft_state_t *state)
@@ -67,6 +73,18 @@ static void soft_free(soft_state_t *state)
     free(state->labels);
     free(state->stack);
     free(state);
+}
+
+/* THE sum of what soft_alloc asks for, in one place and one place only.
+ * soft_alloc records it; soft_footprint_bytes answers with it for the
+ * CONFIGURED grid before the first frame has arrived to allocate anything.
+ * Two copies of this expression would mean the RAM-budget check could pass
+ * against a formula that is not the one that runs. */
+static size_t soft_footprint_for(int model_num, size_t pixels)
+{
+    size_t models = (size_t)model_num;
+    return models * pixels * sizeof(float) * 3 + pixels * 1 * 2 +
+           pixels * sizeof(int32_t) * 2;
 }
 
 static int soft_alloc(soft_state_t *state, int width, int height)
@@ -110,6 +128,9 @@ static int soft_alloc(soft_state_t *state, int width, int height)
     state->width = width;
     state->height = height;
     state->pixels = pixels;
+    /* Only on the success path, beside the geometry: a partial allocation
+     * failure leaves this zero rather than claiming bytes nobody holds. */
+    state->footprint_bytes = soft_footprint_for(state->config.gmm2.model_num, pixels);
     return 0;
 }
 
@@ -567,6 +588,24 @@ static void soft_losses(const sw_detector_t *self, sw_detector_losses_t *out)
     out->frames_shed = state != NULL ? state->frames_over_list_bound : 0;
 }
 
+static size_t soft_footprint_bytes(const sw_detector_t *self)
+{
+    const soft_state_t *state = (const soft_state_t *)self->state;
+    if (state == NULL) {
+        return 0;
+    }
+    if (state->footprint_bytes != 0) {
+        return state->footprint_bytes;
+    }
+    /* Nothing is allocated until the first frame arrives (soft_apply's
+     * re-entry guard), and the RAM budget check deliberately runs BEFORE the
+     * frame loop — so answer for the grid the detector was opened at. Same
+     * expression, so the two answers cannot disagree. */
+    return soft_footprint_for((int)state->config.gmm2.model_num,
+                              (size_t)state->config.proc_width *
+                                  (size_t)state->config.proc_height);
+}
+
 static void soft_close(sw_detector_t *self)
 {
     soft_state_t *state;
@@ -599,6 +638,7 @@ sw_detector_t *sw_detect_open_soft(const sw_detector_config_t *config)
     detector->apply = soft_apply;
     detector->close = soft_close;
     detector->losses = soft_losses;
+    detector->footprint_bytes = soft_footprint_bytes;
     detector->name = "soft-gmm2";
     detector->state = state;
     return detector;

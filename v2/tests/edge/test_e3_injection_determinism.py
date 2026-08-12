@@ -343,3 +343,159 @@ def test_ethernet_and_storage_replay_produce_the_same_datagrams(
 def _write(path, data):
     path.write_bytes(data)
     return path
+
+
+# ---------------------------------------------------------------------------
+# The RAM-loop source: a third way into the same parser
+# ---------------------------------------------------------------------------
+#
+# Replay determinism is E3's subject, so the RAM loop's two determinism claims
+# live here rather than in the runbook item's own file. The rest of that source
+# — its refusals, its budget, its pacing — is in test_d81_ram_loop_source.py.
+
+RAM_CLIP_FRAMES = 6
+RAM_STRIDE_NS = 200_000_000  # 6 frames at 30 fps, exactly
+RAM_SESSION = "e3-ram-loop-00000000-0000-0000001"
+
+
+def _ram_plan(frames: int = RAM_CLIP_FRAMES, warmup_frames: int = 0):
+    from skyweave2.edge import benchmark
+
+    return benchmark.BenchmarkPlan(frames=frames, warmup_frames=warmup_frames)
+
+
+def test_one_pass_of_the_ram_loop_is_byte_identical_to_the_file_source(
+    edge_build_dir, tmp_path
+):
+    """One pass through the arena must be indistinguishable from reading the file.
+
+    This is what makes the SECOND pass's arithmetic trustworthy. The preload
+    drives the UNMODIFIED file path — ``ram_active`` is still false while it
+    runs — so the clip goes through exactly one parser and every existing
+    validation applies verbatim; if that were not true, a RAM run and a file run
+    could disagree about the bytes before any wrap arithmetic entered the
+    picture, and the wrap tests would be measuring the wrong difference.
+    """
+    from skyweave2.edge import benchmark, daemon
+
+    clip_plan = _ram_plan()
+    width, height = 288, 162
+    clip = tmp_path / "clip.swij"
+    benchmark.write_benchmark_stream(
+        clip, clip_plan, width, height, session_uuid=RAM_SESSION,
+        frame_count=RAM_CLIP_FRAMES,
+    )
+    config = benchmark.benchmark_config(width, height, _ram_plan(warmup_frames=2))
+
+    from_file = daemon.run_daemon_on_stream(
+        clip, config, tmp_path / "file", build_dir=edge_build_dir
+    )
+    assert from_file.returncode == 0, from_file.stderr
+    from_ram = daemon.run_daemon_on_stream(
+        clip, config, tmp_path / "ram", build_dir=edge_build_dir,
+        ram_loop=daemon.RamLoopDeclaration(
+            clip_frames=RAM_CLIP_FRAMES, total_frames=RAM_CLIP_FRAMES,
+            pts_stride_ns=RAM_STRIDE_NS,
+        ),
+    )
+    assert from_ram.returncode == 0, from_ram.stderr
+
+    assert from_ram.packets, "the RAM loop sent nothing, so identity proves nothing"
+    assert from_ram.packets == from_file.packets, (
+        "one pass of the preloaded arena produced different datagrams from "
+        "reading the same file"
+    )
+    assert from_file.stats["frames_in"] == from_ram.stats["frames_in"] == (
+        RAM_CLIP_FRAMES
+    )
+
+
+def test_a_ram_loop_emits_the_datagrams_the_harnesss_own_looped_feed_emits(
+    edge_build_dir, tmp_path
+):
+    """The headline claim about the RAM loop, gated against a NON-CIRCULAR oracle.
+
+    The harness already loops: ``_feed_stream_over_tcp`` sends
+    ``scene[frame_seq % len(scene)]`` with a CONTINUOUS frame_seq and a PTS from
+    ``frame_seq / fps``, and that path is already gated by the Ethernet-vs-storage
+    test above. So the claim "the daemon reproduces the harness's own looping
+    rule locally" can be checked against the harness rather than against a
+    restatement of the daemon's own arithmetic.
+
+    Run A is that existing TCP feed, 6 scene frames stretched over 24. Run B is
+    the same 6 frames preloaded and looped by the daemon under a DECLARED
+    per-pass stride. If the daemon replayed the clip's stored PTS, renumbered
+    frame_seq per pass, or got the stride wrong by a nanosecond, the two packet
+    logs would differ.
+    """
+    import socket
+    import subprocess
+
+    from skyweave2.edge import benchmark, daemon
+
+    clip_plan = _ram_plan()
+    width, height = 288, 162
+    profile = PtsProfile(offset_ms=2.5)
+    run_config = benchmark.benchmark_config(width, height, _ram_plan(warmup_frames=2))
+    total_frames = 24
+
+    # Run A: the harness's own looping rule, over TCP, into the daemon.
+    port = benchmark._free_port()
+    tcp_log = tmp_path / "tcp-packets.hex"
+    tcp_stats = tmp_path / "tcp-stats.json"
+    sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sink.bind(("127.0.0.1", 0))
+    argv = [
+        str(daemon.daemon_path(edge_build_dir)),
+        "--inject-listen", str(port),
+        "--packet-log", str(tcp_log),
+        "--stats", str(tcp_stats),
+        "--measurement-port", str(sink.getsockname()[1]),
+        "--control-port", "0",
+    ] + daemon.daemon_args(run_config, detector="soft")
+    process = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    feeder = benchmark._Feeder(
+        port=port, plan=clip_plan, proc_width=width, proc_height=height,
+        session_uuid=RAM_SESSION, frame_count=total_frames, profile=profile,
+        paced_fps=None,
+    )
+    try:
+        feeder.start()
+        _, stderr = process.communicate(timeout=180)
+        assert process.returncode == 0, stderr
+    finally:
+        feeder.join()
+        sink.close()
+        if process.poll() is None:
+            process.kill()
+    assert feeder.error is None, feeder.error
+    over_tcp = [
+        bytes.fromhex(line) for line in tcp_log.read_text(encoding="utf-8").split()
+        if line
+    ]
+
+    # Run B: the same six frames, preloaded and looped by the daemon.
+    clip = tmp_path / "clip.swij"
+    benchmark.write_benchmark_stream(
+        clip, clip_plan, width, height, session_uuid=RAM_SESSION, profile=profile,
+        frame_count=RAM_CLIP_FRAMES,
+    )
+    from_ram = daemon.run_daemon_on_stream(
+        clip, run_config, tmp_path / "ram", build_dir=edge_build_dir,
+        ram_loop=daemon.RamLoopDeclaration(
+            clip_frames=RAM_CLIP_FRAMES, total_frames=total_frames,
+            pts_stride_ns=RAM_STRIDE_NS,
+        ),
+    )
+    assert from_ram.returncode == 0, from_ram.stderr
+
+    import json
+
+    assert json.loads(tcp_stats.read_text())["frames_in"] == total_frames
+    assert from_ram.stats["frames_in"] == total_frames
+    assert over_tcp, "the TCP feed logged nothing to compare against"
+    assert from_ram.packets == over_tcp, (
+        "the daemon's RAM loop did not reproduce the harness's own looped feed"
+    )

@@ -10,8 +10,8 @@
     "toolchain": "arm-rockchip830-linux-uclibcgnueabihf"
   },
   "daemon": {
-    "path": "/Users/samuelmccanahan/Desktop/los proyectos/skyweave-main/v2/firmware/rv1106/build-host/skyweave-edge",
-    "sha256": "db05568658af0db360f09e9bc56fe9e3f921802e8243a12f0e3e74320c6c94bb"
+    "path": "/home/azureuser/skyweave-main/v2/firmware/rv1106/build-host/skyweave-edge",
+    "sha256": "4f97a2dd3c5e915457c30c38eead12d2db7ce4bed91ac975e1403acd3ac6dba8"
   },
   "fixtures": {
     "clutter": {
@@ -59,11 +59,22 @@
         "max_components_offered": 10,
         "max_components_per_frame": 7,
         "observations_sent": 273,
+        "pace_late_frames": 0,
+        "pace_max_late_ns": 0,
         "proc_height": 240,
         "proc_width": 320,
+        "ram_budget_mb": 160,
+        "ram_clip_bytes": 0,
+        "ram_clip_frames": 0,
+        "ram_loop_period_ns": 0,
+        "ram_loop_pts_stride_ns": 0,
         "send_failures": 0,
-        "socket_bytes_sent": 21081,
+        "socket_bytes_sent": 21080,
         "socket_datagrams_sent": 40,
+        "source_bytes_served": 4608000,
+        "source_frames_planned": 0,
+        "source_frames_served": 60,
+        "source_mode": "inject-file",
         "wire_observations_max_count": 7
       }
     },
@@ -112,35 +123,54 @@
         "max_components_offered": 4,
         "max_components_per_frame": 7,
         "observations_sent": 156,
+        "pace_late_frames": 0,
+        "pace_max_late_ns": 0,
         "proc_height": 240,
         "proc_width": 320,
+        "ram_budget_mb": 160,
+        "ram_clip_bytes": 0,
+        "ram_clip_frames": 0,
+        "ram_loop_period_ns": 0,
+        "ram_loop_pts_stride_ns": 0,
         "send_failures": 0,
-        "socket_bytes_sent": 13711,
+        "socket_bytes_sent": 13710,
         "socket_datagrams_sent": 40,
+        "source_bytes_served": 4608000,
+        "source_frames_planned": 0,
+        "source_frames_served": 60,
+        "source_mode": "inject-file",
         "wire_observations_max_count": 7
       }
     }
   },
-  "schema": "d8-evidence/3",
+  "gate_platform": {
+    "distribution": "Ubuntu 24.04.4 LTS",
+    "machine": "x86_64",
+    "net.core.rmem_default": 8388608,
+    "net.core.rmem_max": 8388608,
+    "release": "6.17.0-1022-azure",
+    "system": "Linux"
+  },
+  "schema": "d8-evidence/4",
   "seed": 7,
   "suites": {
     "edge": {
       "error": 0,
       "failed": 0,
-      "passed": 94,
+      "passed": 213,
       "returncode": 0,
       "selector": "tests/edge",
       "skipped": 0,
-      "summary": "94 passed in 10.90s"
+      "summary": "213 passed in 43.90s"
     },
     "full": {
       "error": 0,
       "failed": 0,
-      "passed": 419,
+      "passed": 540,
       "returncode": 0,
       "selector": "tests",
       "skipped": 1,
-      "summary": "419 passed, 1 skipped in 247.73s (0:04:07)"
+      "summary": "540 passed, 1 skipped in 351.24s (0:05:51)"
     }
   },
   "wire_identity": {

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from skyweave2.detector import cap
 from skyweave2.detector.config import DetectorConfig
-from skyweave2.edge import daemon, fixtures, tolerance
+from skyweave2.edge import benchmark, daemon, fixtures, image, metrics, tolerance
 from skyweave2.edge.injection import PtsProfile, build_injection_stream
 from skyweave2.edge.obsfixture import decode_fixture
 from skyweave2.edge.tolerance import DetectorTolerance, compare_to_oracle
@@ -46,8 +46,9 @@ DEFAULT_REPORT = V2_ROOT / "docs" / "D8_EDGE_REPORT.md"
 
 # The three D4 sweep resolutions. The board benchmark (D8.1) fills the
 # numbers; the rows exist here now so the report shows what is PENDING
-# instead of omitting it.
-D4_RESOLUTIONS = ((2304, 1296), (1536, 864), (1152, 648))
+# instead of omitting it. Imported from the runner rather than repeated here:
+# two lists of the same three resolutions is one list too many.
+D4_RESOLUTIONS = benchmark.D4_RESOLUTIONS
 
 
 # ---------------------------------------------------------------------------
@@ -123,13 +124,122 @@ def _run_suite(selector: str) -> dict:
     }
 
 
+def _sysctl(name: str) -> int | None:
+    """One kernel knob, read from procfs. None where there is no procfs."""
+    path = Path("/proc/sys") / name.replace(".", "/")
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _gate_platform() -> dict:
+    """WHICH machine produced the suite rows, and with which receive buffer.
+
+    The D8.1 opening entry makes a provisioned Linux server the authoritative
+    all-green gate and macOS advisory, and runbook A1 says to RECORD the two
+    sysctls it requires. Neither claim had anywhere to live: the evidence file
+    carried no host field, so the report could only say "the machine that
+    generated this report" — true, and useless for deciding whether the gate
+    was the gate.
+
+    Recorded by `measure`, quoted by `generate`. `generate` stays a pure
+    function of repo + evidence: it reads this block, it never probes a host.
+    """
+    import platform
+
+    pretty = ""
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if line.startswith("PRETTY_NAME="):
+                pretty = line.split("=", 1)[1].strip().strip('"')
+                break
+    except OSError:
+        pretty = ""
+    out: dict = {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "distribution": pretty,
+    }
+    for knob in ("net.core.rmem_max", "net.core.rmem_default"):
+        value = _sysctl(knob)
+        # A knob with no procfs is NOT-MEASURED with its reason, never a zero:
+        # macOS has these under a different name and a different meaning, and
+        # a 0 here would read as "the buffer is zero".
+        out[knob] = value if value is not None else {
+            metrics.NOT_MEASURED: "no /proc/sys on this platform"
+        }
+    return out
+
+
+#: The receive buffer the D0 "D8.1 opening" entry requires of the gate machine
+#: (W3 pushes 720 datagrams before its first drain, and a small buffer loses
+#: them silently). A CONSTANT, compared against, rather than a number inside a
+#: sentence: the finding "the report asserts the whole-suite row came from the
+#: Linux gate platform, unconditionally" was reachable precisely because 4194304
+#: existed in this module only inside the prose that failed to check it.
+GATE_RMEM_MAX_BYTES = 4_194_304
+
+
+def _on_gate_platform(platform_block: dict | None) -> bool:
+    """Whether the RECORDED platform is the gate A1 describes.
+
+    Two conditions, both from the D0 entry: a Linux kernel, and a receive
+    buffer at or above :data:`GATE_RMEM_MAX_BYTES`. A NOT-MEASURED buffer is
+    not a pass — the marker means nobody read it, which is exactly the state
+    that cannot support the claim.
+    """
+    if not platform_block:
+        return False
+    rmem = platform_block.get("net.core.rmem_max")
+    return (
+        platform_block.get("system") == "Linux"
+        and isinstance(rmem, int)
+        and not isinstance(rmem, bool)
+        and rmem >= GATE_RMEM_MAX_BYTES
+    )
+
+
+def _suite_is_green(suite: dict | None) -> bool:
+    """Whether a recorded suite row is a pass, read off the row itself."""
+    if not suite:
+        return False
+    return (
+        suite.get("returncode") == 0
+        and not suite.get("failed")
+        and not suite.get("error")
+        and bool(suite.get("passed"))
+    )
+
+
+def _platform_value(platform_block: dict | None, key: str) -> str:
+    """One gate-platform cell, rendered once and used by table AND prose.
+
+    The table and the sentence beneath it disagreeing about the same machine is
+    the finding this section earned; sharing the renderer makes that
+    impossible rather than merely unlikely.
+    """
+    value = (platform_block or {}).get(key)
+    if isinstance(value, dict):
+        return f"{metrics.NOT_MEASURED} ({value.get(metrics.NOT_MEASURED, '')})"
+    if value in (None, ""):
+        return f"{metrics.NOT_MEASURED} (not recorded)"
+    return f"`{value}`" if key.startswith("net.core") else str(value)
+
+
 def measure(work_dir: Path, build_dir: Path | None = None,
             run_suites: bool = True, seed: int = fixtures.SCENE_SEED) -> dict:
     """Replay every regenerable fixture through the daemon; record the result."""
     import hashlib
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    evidence: dict = {"schema": "d8-evidence/3", "seed": seed, "fixtures": {}}
+    evidence: dict = {
+        "schema": "d8-evidence/4",
+        "seed": seed,
+        "fixtures": {},
+        "gate_platform": _gate_platform(),
+    }
     try:
         binary = daemon.daemon_path(build_dir)
         evidence["daemon"] = {
@@ -218,6 +328,15 @@ def _container_provenance() -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+#: The E8 axes, label first. The label is what the anti-tuning test looks a
+#: bound up by, so it lives beside the renderer rather than being typed twice.
+_BENCHMARK_AXES = (
+    ("sustained fps (relative)", "fps_relative"),
+    ("peak RSS (relative)", "peak_rss_relative"),
+    ("A7 utilisation (relative)", "cpu_utilisation_relative"),
+)
+
+
 def _tolerance_rows(name: str, declared: DetectorTolerance, measured: dict | None):
     fields = (
         ("match radius (full-res px)", "match_radius_px", None),
@@ -251,6 +370,11 @@ def generate(evidence: dict | None) -> str:
     }
     measured = (evidence or {}).get("fixtures", {})
     container = (evidence or {}).get("container")
+    # The image manifest is a COMMITTED repo file, like the fixtures, so it is
+    # read here rather than carried through the evidence: `generate` stays a
+    # pure function of the repository plus the evidence dict, and an image
+    # built on the Linux mirror is describable on a machine with no docker.
+    manifest = image.load_manifest()
 
     # Read out of the committed fixtures, not typed in. Section 9's D8-F7
     # makes claims about these artifacts ("all N observations", "none of them
@@ -297,13 +421,32 @@ def generate(evidence: dict | None) -> str:
     a("| --- | --- |")
     a("| D8.0 host-side: capacity, daemon, injection harness, fixtures, E1-E5 | "
       "**complete on this host** |")
+    # Derived from the manifest, not asserted. The first draft of this row said
+    # "complete on this host" while section 2.1 said PENDING seventy lines
+    # later, which is the literal-claim failure mode this generator keeps
+    # being caught by (review 10c finding 1, and again here).
+    if manifest is None:
+        image_state = "image build TOOLING complete, no image built yet (see 2.1)"
+    elif manifest.complete:
+        image_state = f"image built, {len(manifest.files)} files hashed (see 2.1)"
+    else:
+        image_state = f"image build FAILED at `{manifest.failed_stage}` (see 2.1)"
+    a("| D8.1-prep (board-free): benchmark and provisioning harness, declared "
+      "run-to-run bounds | **complete on this host** |")
+    a(f"| D8.1-prep: the flashable image set | {image_state} |")
     a("| D8.1 board bring-up: benchmark, soak, deployment resolution | "
       "**not started — needs a flashed node** |")
     a("| D8.2 board validation: fixture replay, toleranced scorecard, health | "
       "**not started — gated on D8.1** |")
     a("")
     a("The brief bars an agent from starting D8.1 until Samuel confirms the")
-    a("flashed node. Nothing below claims a board number.")
+    a("flashed node, and that gate still holds. Its 2026-08-10 amendment")
+    a("sanctions three items that have no board dependency — the image build,")
+    a("the harness, and the declared bounds — and those are the two rows in the")
+    a("middle. The image build gets its own row because building the TOOLING")
+    a("and running it to completion are different claims, and one row would")
+    a("have let the stronger one stand in for the weaker. Nothing below claims")
+    a("a board number.")
     a("")
 
     # ---------------------------------------------------------------- 2
@@ -323,7 +466,7 @@ def generate(evidence: dict | None) -> str:
     a("| nanopb | 0.4.9, vendored under `firmware/rv1106/third_party/nanopb/` |")
     a("| Generated protobuf sources | `firmware/rv1106/proto/skyweave.pb.{c,h}`, "
       "checked in, bounds from `proto/skyweave.options` verbatim |")
-    a("| Board image | **Pending** — recorded in D8.1 when a node is flashed |")
+    a("| Board image | see 2.1 |")
     a("")
     a("The image is `linux/amd64` because the Luckfox toolchain binaries are")
     a("x86_64 ELF. On Apple Silicon it runs under emulation; the Linux PC runs")
@@ -353,6 +496,146 @@ def generate(evidence: dict | None) -> str:
     a("  first attempt succeeds. It is an emulation artifact, not a compiler bug")
     a("  and not a property of this source.")
     a("")
+
+    # -------------------------------------------------------------- 2.1
+    a("### 2.1 The flashable image set (D8.1-prep item 1)")
+    a("")
+    a("Built by `scripts/build-image.sh` in a SECOND pinned container,")
+    a("`skyweave-image-build:d8.1`, at the SAME SDK commit as the daemon image.")
+    a("Two images because they need different things: the daemon build needs a")
+    a("toolchain and three media SDKs, the image build needs the whole SDK and")
+    a("the Debian packages its README asks for. Splitting them keeps")
+    a("`skyweave-edge-build:d8.0` — the tag this report already quotes for the")
+    a("binary D8.0 measured — exactly as it was.")
+    a("")
+    a("The daemon is deliberately NOT baked into the rootfs. The amendment")
+    a("allows hand-start until D8.2, and an image that carried the binary would")
+    a("have to be rebuilt whenever the binary moved, which is the wrong")
+    a("property for a provenance record during bring-up.")
+    a("")
+    # Past tense, and titled by what it explains rather than by how far it got.
+    # The finding "section 2.1 narrates an abandoned emulated Mac build directly
+    # above a manifest table from a different, complete build" is what forced
+    # the split: everything from here to the branch is a MECHANICAL lesson about
+    # the script, true whether or not an image exists, and every sentence that
+    # was a status claim about this item moved into the `manifest is None`
+    # branch below, where it is true.
+    a("**Why the script sweeps object files: an emulated-Mac attempt, and a")
+    a("retry loop that was not enough.** The daemon build is twelve files, so")
+    a("`build-board.sh` can retry the whole thing when the emulated `cc1` dies.")
+    a("An image build is u-boot, a kernel and a Buildroot rootfs — five orders")
+    a("of magnitude more compiler invocations — and the crash leaves a build")
+    a("output that EXISTS and is newer than its source. Make then treats it as")
+    a("up to date and never rebuilds it, so the next attempt walks past the")
+    a("damage and dies at the LINK instead: that attempt ended with `undefined")
+    a("reference to stdio_devices`, from a `common/stdio.o` whose compile had")
+    a("been interrupted several attempts earlier.")
+    a("")
+    a("So `build-image.sh` checks the magic number of every object, archive and")
+    a("module the failed attempt touched and deletes the ones that are not what")
+    a("they claim to be, before retrying. On that Mac it removed 23 and then 53")
+    a("truncated outputs between successive u-boot attempts — an observation")
+    a("about emulation on that host, not a property of the SDK. On a native x86")
+    a("Linux host there is nothing for it to clean up.")
+    a("")
+    if manifest is None:
+        # Status claims about THIS item live only here. With a manifest
+        # committed, "how far it got" and "the hours belong on the mirror" are
+        # PENDING-era sentences describing a different, abandoned run, and the
+        # finding they earned was that they read as a caption for the completed
+        # build's table twelve lines below.
+        a("**How far the emulated-Mac attempt got, recorded because it is the")
+        a("useful number:** u-boot built CLEAN on the third attempt (333 s, two")
+        a("crashes cleaned up between attempts). The kernel was still going")
+        a("after four crashes when that session ended and was stopped")
+        a("deliberately — a benchmark and a build competing for four emulated")
+        a("cores would have put host load into the suite numbers this report")
+        a("publishes, and W6 is already sensitive to exactly that (section 10).")
+        a("The tooling is what this item delivers and it demonstrably works;")
+        a("the hours belong on the Linux mirror, where the toolchain does not")
+        a("need retrying at all.")
+        a("")
+        a("**PENDING — no image has been built in this repository.** The")
+        a("manifest `firmware/rv1106/image/image-manifest.json` does not exist,")
+        a("and this section refuses to describe an image set that was not")
+        a("produced. To fill it, from `v2/firmware/rv1106`:")
+        a("")
+        a("```sh")
+        a(f"{image.BUILD_COMMAND}")
+        a("```")
+        a("")
+        a("When a build lands, `report generate` fills this section from the")
+        a("manifest — the defconfig table, the per-stage status and every")
+        a("SHA-256. Nothing here is hand-written, so a build on the Linux mirror")
+        a("is published by copying one JSON file into the repo and regenerating.")
+        a("")
+    else:
+        if not manifest.complete:
+            a(f"**BUILD FAILED at stage `{manifest.failed_stage}`.** The manifest")
+            a("is committed anyway: a failed build and an absent build look the")
+            a("same from outside, and they are not the same thing. The stage")
+            a("table below is what happened, and the logs are beside the")
+            a("manifest.")
+            a("")
+        # The paragraph the finding asked for: the tables below are NOT the
+        # attempt described above, and the artifact cannot say whose they are.
+        a("**The build below is not that attempt.** The attempt above was")
+        a("stopped; what follows is read out of a manifest committed by a build")
+        a(f"that ran to `{manifest.status}` — a different run, on a machine this")
+        a("record does not name. The stage counts, the byte counts and the hashes")
+        a("are that run's, and nothing above them describes it.")
+        a("")
+        a("| Item | Value |")
+        a("| --- | --- |")
+        a(f"| Image build container | `{manifest.container_tag}` |")
+        a(f"| Board config | `{manifest.board_config}` |")
+        a(f"| SDK commit | `{manifest.sdk_commit}` |")
+        for label, value in manifest.defconfig_rows():
+            a(f"| {label} | `{value}` |")
+        # Derived from the manifest, never asserted: runbook A2 makes "native
+        # x86 Linux" this build's precondition, and the finding was that no
+        # artifact in the repo evidences it either way. NOT-MEASURED with its
+        # reason while the manifest carries no host block; the recorded values
+        # the moment one does.
+        if manifest.build_host:
+            for key in sorted(manifest.build_host):
+                a(f"| Build host {key} | `{manifest.build_host[key]}` |")
+        else:
+            a(f"| Build host | {metrics.NOT_MEASURED} — the manifest carries no "
+              "host block; `build-image.sh` has no `uname`, `arch` or binfmt "
+              "probe, and `provenance` describes the CONTAINER, which is "
+              "identical native or emulated (D8-F14) |")
+        a(f"| Daemon baked into the rootfs | {'yes' if manifest.daemon_baked_in else 'no'} |")
+        a(f"| Build status | {'complete' if manifest.complete else '**FAILED**'} |")
+        a("")
+        a("Stages, in the order `build.sh all` runs them (`save` is omitted: it")
+        a("stamps a copy with the wall clock, and this project does not put")
+        a("wall-clock values in artifacts). More than one attempt means a")
+        a("compile or link step died and the retry resumed after the")
+        a("magic-number sweep; on the emulated path that was `cc1`, and the")
+        a("script cannot tell that case from any other (D8-F13):")
+        a("")
+        a("| Stage | Status | Attempts |")
+        a("| --- | --- | --- |")
+        for stage in manifest.stages:
+            a(f"| {stage.get('stage', '?')} | {stage.get('status', '?')} | "
+              f"{stage.get('attempts', 1)} |")
+        a("")
+        if manifest.files:
+            a("Every file the build produced, with the SHA-256 the brief asks")
+            a("for. The images themselves are gitignored — they are derived and")
+            a("large; this table is the record:")
+            a("")
+            a("| Image file | Bytes | SHA-256 |")
+            a("| --- | --- | --- |")
+            for item in manifest.files:
+                a(f"| `{item.name}` | {item.bytes} | `{item.sha256}` |")
+            a("")
+            a(f"Total: {len(manifest.files)} files, {manifest.total_bytes} B.")
+            a("")
+        else:
+            a("No image files were produced, so there is nothing to hash.")
+            a("")
 
     # ---------------------------------------------------------------- 3
     a("## 3. The recorded decisions, implemented")
@@ -669,20 +952,47 @@ def generate(evidence: dict | None) -> str:
     a("argument and the choice become a decisions-log entry (label: Chosen,")
     a("benchmark numbers Measured).")
     a("")
-    a("| Resolution | Sustained fps | Peak RSS | DDR bandwidth | A7 utilisation | "
-      "Thermals | Verdict |")
-    a("| --- | --- | --- | --- | --- | --- | --- |")
+    a("Two different absences appear in the table below and they are not the")
+    a("same claim. PENDING means no board has run this yet. NOT-MEASURED means")
+    a("the quantity has no reading on the machine that would run it — the")
+    a("brief's own word for the stubbed collectors, and the harness emits it as")
+    a("a marker rather than a zero.")
+    a("")
+    a("The source mode is a column rather than a footnote: three of the four")
+    a("sources are injection sources, so \"injected\" does not identify the")
+    a("run, and the byte rate the DETECTOR was fed is a different number from")
+    a("the one the link carried whenever the source loops.")
+    a("")
+    a("| Resolution | Source mode | Source byte rate | Sustained fps | Peak RSS | "
+      "DDR bandwidth | A7 utilisation | Thermals | Verdict |")
+    a("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for width, height in D4_RESOLUTIONS:
         a(f"| {width}x{height} | PENDING | PENDING | PENDING | PENDING | PENDING | "
-          "PENDING |")
+          "PENDING | PENDING | PENDING |")
     a("")
     a("| Soak | Value |")
     a("| --- | --- |")
     a("| Resolution | PENDING |")
+    a("| Source mode | PENDING |")
     a("| Duration | 1 h (declared) |")
     a("| Frames | PENDING |")
     a("| Drops | PENDING |")
     a("| Thermal drift | PENDING |")
+    a("")
+    a("Two DECLARED SYSTEMATICS travel with any row whose source mode is")
+    a("`inject-ram`. They are quoted here from the constants the harness")
+    a("writes into every run record, not retyped: a declaration that exists")
+    a("only in code is not a declaration, and one that exists only in prose is")
+    a("not enforced.")
+    a("")
+    a(f"> {benchmark.DDR_PROFILE_NOTE}")
+    a("")
+    a(f"> {benchmark.RAM_LOOP_SCENE_NOTE}")
+    a("")
+    a("Both are recorded beside every result and folded into NO bound. They")
+    a("appear in no tolerance table and in no bound row, because a systematic")
+    a("absorbed into a tolerance stops being visible and starts being")
+    a("permission — the two-error-channel rule, applied to a source.")
     a("")
     a("The intersection argument, stated now so the choice cannot be made by")
     a("whichever number is prettiest later: the deployment resolution is the")
@@ -694,7 +1004,199 @@ def generate(evidence: dict | None) -> str:
     a("finding about the node, not a licence to relax the gate.")
     a("")
     a("E8 (benchmark reproducibility: two runs, same config, within declared")
-    a("run-to-run bounds) is board-gated and runs with this section.")
+    a("run-to-run bounds) is board-gated and runs with this section. Its bounds")
+    a("are declared in 8.1, before it.")
+    a("")
+
+    # The RAM-loop budget arithmetic. Deliberately placed HERE — inside section
+    # 8 and BEFORE `### 8.1` — because the E8 and E5 table gates scan from a
+    # heading to the next line starting with `#` and store rows last-write-
+    # wins. Under 8.1 a row whose first cell collided with a bound label would
+    # silently replace a declared anti-tuning bound, which is a corruption
+    # those helpers have a recorded history of.
+    ram_budget_mb = benchmark.RAM_LOOP_BUDGET_BYTES // 1_000_000
+    a("**The RAM-loop budget (runbook A4).** A node-local clip preloaded into")
+    a("DDR removes the link from the source path, and the check that makes it")
+    a("legitimate is whether the clip, the detector's own state AND the daemon's")
+    a(f"fixed footprint fit the declared {ram_budget_mb} MB line. Every cell")
+    a("below is DERIVED ARITHMETIC")
+    a("over the allocator sizes in `sw_detect_ive.c` and the clip geometry — no")
+    a("reading of any kind produces them, on any machine, so none of them is")
+    a("Measured. The daemon sums the SAME THREE TERMS — clip, detector state,")
+    a("fixed — from the allocators it actually calls and REFUSES to start when")
+    a("it is over, so this is a check that executes rather than a claim. Its")
+    a("detector term is not identical to this table's on the IVE arm, and the")
+    a("next paragraph is that difference rather than a footnote to it.")
+    a("")
+    blob_bound = benchmark.IVE_BLOB_DECLARED_BOUND_BYTES
+    a("**The daemon's detector term for the IVE arm is STRICTLY LARGER than the")
+    a("column below, by one `IVE_CCBLOB_S`.** `ive_footprint_for` sums four U8")
+    a("planes, the model store AND that blob; this table counts the first two.")
+    a("The blob is an SDK type that appears nowhere in this checkout and the IVE")
+    a("arm does not compile off the node, so the term cannot be written here —")
+    a(f"it is DECLARED at an upper bound of {blob_bound:,} B")
+    a("(`IVE_BLOB_DECLARED_BOUND_BYTES`, an order of magnitude above the 254")
+    a("regions `IVE_MAX_REGION_NUM` caps a blob at) rather than left as a silent")
+    a("zero. Every IVE cell below is therefore a LOWER BOUND on the board's own")
+    a("sum. At these three grids that changes nothing: each row's slack against")
+    a("the budget is wider than the declared bound, so counting the blob would")
+    a("neither shorten a clip nor break a fit, which")
+    a("`test_the_omitted_ive_blob_term_cannot_move_a_derived_clip_length`")
+    a("asserts against this table's own grids. The SOFT arm has no such gap and")
+    a("is pinned against the daemon's own printed footprint by")
+    a("`test_the_budget_check_refuses_rather_than_fitting_the_number`.")
+    a("")
+    f_allow = benchmark.DAEMON_STRUCT_ALLOWANCE_BYTES
+    a("**The fixed column is a DECLARED UPPER BOUND, not a derivation.** The")
+    a("daemon's `fixed` is `inject.luma_capacity` — one luma frame,")
+    a("`proc_w * proc_h`, exact and target-independent — plus five `sizeof()`")
+    a("terms over its own structs. Struct layout is a property of the target")
+    a(f"ABI, so the harness declares {f_allow:,} B for that residue rather than")
+    a("transcribing five C structs into Python, which would be a second copy")
+    a("of the arithmetic that runs — the failure `sw_detect_ive.c`'s own")
+    a("comment names. A bound is enough: as long as it is at or above the")
+    a("daemon's residue, a clip this table says fits is a clip the daemon")
+    a("accepts. That inequality is READ OFF THE DAEMON'S OWN PRINTED `fixed`")
+    a("by `test_the_declared_struct_allowance_bounds_the_daemons_own_fixed_term`")
+    a("— no residue figure is typed into this generator, where nothing could")
+    a("contradict it. **The board's residue is NOT-MEASURED** until C3 prints")
+    a("it: that test runs against the HOST build, so what it proves is a bound")
+    a("on the board's residue, not the board's value, and re-running it on the")
+    a("board is the C3 step that closes the gap.")
+    a("")
+    a("Before this, the harness subtracted only the detector: the published")
+    a("1152x648 row said 174 frames and `fits`, and the daemon refused it at")
+    a("startup by 517,856 B — the luma term alone at that grid is 746,496 B")
+    a("against 249,856 B of headroom.")
+    a("")
+    a(f"The {ram_budget_mb} MB is read as DECIMAL bytes "
+      f"({benchmark.RAM_LOOP_BUDGET_BYTES:,} B) and as a")
+    a("DAEMON-ONLY ceiling. It is the upper end of the with-NPU subtotal in")
+    a("`v1/docs/RV1106_EDGE_NODE.md` section 6, \"~120-160 MB\" — a narrower")
+    a("thing than that subtotal, which also counts its own \"~30-50 MB\"")
+    a("kernel+rootfs row. That section states NO numeric margin anywhere: its")
+    a("Notes cells read \"still fits with margin\" and \"very comfortable\",")
+    a("which is prose. Which reading governs is an open decision, and it moves")
+    a("the top row.")
+    a("")
+    a("| Resolution | IVE detector state | Clip frames (derived) | Clip bytes | "
+      "Daemon fixed (bound) | Total | Budget |")
+    a("| --- | --- | --- | --- | --- | --- | --- |")
+    for row in benchmark.ram_budget_table():
+        a(f"| {row['resolution']} | {row['detector_state_bytes']:,} B | "
+          f"{row['clip_frames']} | {row['clip_bytes']:,} B | "
+          f"{row['daemon_fixed_bytes']:,} B | "
+          f"{row['total_bytes']:,} B | {row['budget_bytes']:,} B |")
+    a("")
+    full_w, full_h = D4_RESOLUTIONS[0]
+    over = (
+        benchmark.detector_state_bytes(full_w, full_h, "ive")
+        + benchmark.ram_clip_bytes(full_w, full_h, 24)
+        + benchmark.daemon_fixed_bytes(full_w, full_h)
+    )
+    a(f"The clip lengths are DERIVED, not chosen. At {full_w}x{full_h} a 24-frame")
+    a(f"clip would total {over:,} B against the "
+      f"{benchmark.RAM_LOOP_BUDGET_BYTES:,} B")
+    a("line and does not clear it, which is why the derived length there is")
+    a(f"{benchmark.ram_loop_max_frames(full_w, full_h)}. Each length is the "
+      "longest that both fits the budget with")
+    a("the detector and the daemon's fixed footprint counted AND makes")
+    a("`clip_frames * 1e9 / fps` a whole")
+    a("number of nanoseconds — the second condition is a correctness")
+    a("requirement, not tidiness: the looped capture timestamps equal an")
+    a("unrolled feed's only when it holds. The D0 \"D8.1 opening\" entry's")
+    a("\"~24 full-res frames\" was reasoned against the 256 MB PHYSICAL total")
+    a("and is silent about the detector's own allocation, so it needs")
+    a("amending against whichever line governs.")
+    a("")
+
+    # -------------------------------------------------------------- 8.1
+    a("### 8.1 Declared benchmark run-to-run bounds (E8)")
+    a("")
+    a("DECLARED 2026-08-10, BEFORE any board has run the sweep — the")
+    a("anti-tuning rule that governs section 6's detector bounds, applied to")
+    a("E8. They live in `skyweave2/edge/tolerance.py` as")
+    a("`BENCHMARK_RUN_TO_RUN`, and the E8 harness test reads BOTH the constant")
+    a("and this table: a declaration that only exists in code is not a")
+    a("declaration.")
+    a("")
+    a("Each bound is a RELATIVE difference, |a - b| / mean, between two runs of")
+    a("the same configuration — one bound covering all three resolutions rather")
+    a("than three absolute numbers each needing their own justification.")
+    a("")
+    a("| Axis | Declared bound | Measured |")
+    a("| --- | --- | --- |")
+    for label, field_name in _BENCHMARK_AXES:
+        bound = getattr(tolerance.BENCHMARK_RUN_TO_RUN, field_name)
+        a(f"| {label} | {bound:g} | PENDING (D8.1) |")
+    a("")
+    a("What is deliberately NOT bounded here:")
+    a("")
+    a("- **the deterministic counters.** Frames, capture events, observations,")
+    a("  components offered and emitted, drops: the same frames through the")
+    a("  same detector produce the same components, so two runs must agree")
+    a("  EXACTLY. A tolerance on those would be permission for a defect.")
+    a("  `benchmark.EXACT_COUNTERS` is the list and the comparison uses `==`.")
+    a("- **DDR bandwidth and thermals.** They have no bound because they have")
+    a("  no measurement yet. Setting one when the board produces them is a")
+    a("  decision to record then — while the numbers are still unseen, which is")
+    a("  the only time a bound can honestly be set.")
+    a("")
+    a("The VERDICT is three-valued — `pass`, `fail`, `incomplete` — and the")
+    a("third state is the one that matters. Two NOT-MEASURED values agree about")
+    a("nothing, so a comparison that lost an axis is not a pass; it is")
+    a("incomplete, and the artifact says which. The board scenario that")
+    a("produces it is ordinary rather than exotic: no health packet arrives")
+    a("(finding D8-F9) so the only bounded fps axis is absent, and a daemon")
+    a("that died leaves no stats file so every counter is absent too. A")
+    a("two-valued verdict would call that pair \"within the declared bounds\".")
+    a("`fail` outranks `incomplete`: a run that breached a bound and also lost")
+    a("an axis has still breached a bound.")
+    a("")
+
+    # -------------------------------------------------------------- 8.2
+    a("### 8.2 The benchmark and provisioning harness (D8.1-prep item 2)")
+    a("")
+    a("Written and exercised against the HOST-built daemon before any board")
+    a("exists, which is what the amendment asks for: the first board session")
+    a("should be debugging the board, not this tooling.")
+    a("")
+    a("| Piece | Module | State |")
+    a("| --- | --- | --- |")
+    a("| Resolution sweep (unpaced; the ceiling) | `edge/benchmark.py` "
+      "`run_sweep` | host-exercised |")
+    a("| Soak (paced; the operating point) | `edge/benchmark.py` `run_soak` | "
+      "host-exercised |")
+    a("| RAM-loop source (preloaded clip, declared frame budget, declared "
+      "per-pass PTS stride, optional integer pace) | `firmware/rv1106` "
+      "`--inject-ram` + `edge/benchmark.py` `ram_loop_declaration` | "
+      "host-exercised; the IVE arm of the budget check is board-gated |")
+    a("| E8 comparison | `edge/benchmark.py` `compare_runs` | host-exercised |")
+    a("| Metric collectors | `edge/metrics.py` | host-exercised |")
+    a("| 1 Hz health listener | `edge/health.py` | host-exercised |")
+    a("| Node provisioning (push, verify, start, collect) | `edge/provision.py` "
+      "| host-exercised over a local transport |")
+    a("| The same over ssh to a node | `edge/provision.py` `SshTransport` | "
+      "board-gated |")
+    a("")
+    a("Where each number in the sweep table comes from, and whether a")
+    a("development host can answer it at all:")
+    a("")
+    a("| Axis | Mechanism | Available |")
+    a("| --- | --- | --- |")
+    for axis, mechanism, availability in metrics.COLLECTOR_REGISTRY:
+        a(f"| {axis} | {mechanism} | {availability} |")
+    a("")
+    a("A sweep run is UNPACED — frames as fast as the source delivers them, so")
+    a("the fps it reports is a throughput ceiling. A soak run is PACED at a")
+    a("declared rate and its fps is a duty cycle. The artifact records which,")
+    a("because they are different quantities that share a unit.")
+    a("")
+    a("The soak's scene LOOPS. An hour at 30 fps is 108000 frames, which at")
+    a("1536x864 would be a 143 GB stream; the harness sends a short scene")
+    a("repeatedly and says so in the artifact, because a background model")
+    a("meeting the same pixels again is a real difference and not one to hide")
+    a("inside an fps number.")
     a("")
 
     # ---------------------------------------------------------------- 9
@@ -912,6 +1414,319 @@ def generate(evidence: dict | None) -> str:
     a("introduced BY this regeneration rather than found in it.")
     a("")
 
+    a("### D8-F8 — C1 injection cannot feed the sweep at 30 fps, at any of the")
+    a("three resolutions, over any medium the node has")
+    a("")
+    a("Found while building the D8.1 benchmark runner, before a board exists to")
+    a("hit it with. It is arithmetic, not a measurement, and it is the reason")
+    a("the runner records a byte rate on every run.")
+    a("")
+    a("| Resolution | Bytes per Y frame | Needed at 30 fps |")
+    a("| --- | --- | --- |")
+    for width, height in D4_RESOLUTIONS:
+        a(f"| {width}x{height} | {benchmark.frame_bytes(width, height)} | "
+          f"{benchmark.required_mb_s(width, height, 30.0):.1f} MB/s |")
+    a("")
+    a("Against that, what a node can actually deliver. The node design's own")
+    a("figure for the uplink is 100M Ethernet at \"~90 Mbit/s usable\" and an SD")
+    a("card of the usual class runs around a fifth of what the top resolution")
+    a("asks for:")
+    a("")
+    a("| Medium | Declared throughput |")
+    a("| --- | --- |")
+    for medium, rate in sorted(benchmark.SOURCE_MEDIA.items()):
+        a(f"| {medium} | {rate:.2f} MB/s |")
+    a("")
+    a("The smallest of the three resolutions needs twice the link and slightly")
+    a("more than the card; the largest needs eight times the link.")
+    a("")
+    a("So a C1-injected sweep on the board measures **min(detector, source)**,")
+    a("and without knowing which, an fps number from it is not a GMM2 ceiling.")
+    a("Three consequences are implemented here:")
+    a("")
+    a("- every run records `input_mb_s` and a `source_verdict` against a")
+    a("  DECLARED medium — declared by the operator, because the harness cannot")
+    a("  tell an SD card from a tmpfs and a verdict with an assumed denominator")
+    a("  is worse than none;")
+    a("- the soak LOOPS a short scene rather than streaming an hour of unique")
+    a("  frames, which at 1536x864 would be a 143 GB file;")
+    a("- **the source lever is now taken**, under the D0 \"D8.1 opening\"")
+    a("  entry's sanction, in runbook step A4: `--inject-ram` preloads a SWIJ")
+    a("  clip into DDR once and serves it in a loop, so the link is out of the")
+    a("  path entirely. The run ends on a DECLARED frame budget")
+    a("  (`--ram-loop-frames`) rather than a clock, because every counter in")
+    a("  `benchmark.EXACT_COUNTERS` is compared with `==` and a wall-bounded")
+    a("  run would make a slow box indistinguishable from a defect. Capture")
+    a("  time advances by a per-pass stride the HARNESS declares")
+    a("  (`--ram-loop-pts-stride-ns`); the daemon reads no clock on that path")
+    a("  and copies `time_sync_error_ms` untouched. The clip, the detector's")
+    a("  own allocation AND the daemon's fixed footprint — all three terms the")
+    a("  daemon sums, per section 8 — are checked against `--ram-budget-mb`")
+    a("  before the frame loop starts, and an over-budget run is REFUSED rather")
+    a("  than shortened. Two runs record two rates: `input_mb_s` for what the")
+    a("  link carried — the clip crossed it exactly once — and `source_mb_s`")
+    a("  for what the detector was actually fed.")
+    a("")
+    a("What that does NOT remove is the DDR traffic profile: a resident clip")
+    a("re-read by the detector is not an ISP write, and the wrap means the")
+    a("background model meets pixels it has already seen. Both are declared")
+    a("systematics, quoted verbatim in section 8 and recorded beside every")
+    a("result, and neither is folded into any bound.")
+    a("")
+    a("The honest statement for the D8.1 session: with C1 injection over a")
+    a("link, a *sustained 30 fps* claim at any D4 resolution cannot be made on")
+    a("the board. What CAN be made is a detector-bound ceiling from a")
+    a("RAM-resident clip, with the frame count stated — and section 8 states")
+    a("it. The derived clip lengths are")
+    lengths = ", ".join(
+        f"{benchmark.ram_loop_max_frames(w, h)} at {w}x{h}"
+        for w, h in D4_RESOLUTIONS
+    )
+    a(f"{lengths},")
+    a("derived arithmetic and not Measured.")
+    a("")
+
+    a("### D8-F9 — health and measurement share one port, so a monitor must")
+    a("demultiplex")
+    a("")
+    a("The daemon opens ONE UDP socket (`main.c`: `sw_udp_open(&sender,")
+    a("jetson_host, measurement_port)`) and sends observation packets and 1 Hz")
+    a("health packets down it. There is no health port. A listener bound")
+    a("anywhere else hears silence — which is what the D8.1-prep listener was")
+    a("about to be, and the framing header's payload type is what saved it.")
+    a("")
+    a("Recorded because it is a constraint on the Jetson side in D9, not just")
+    a("on this harness: whatever watches node health there is the same process")
+    a("that receives measurements, or it is a second reader on a shared socket.")
+    a("`edge/health.py` demultiplexes on `PayloadType` and counts what it")
+    a("discards, which is the shape that side will need.")
+    a("")
+
+    a("### D8-F10 — a corrupt health datagram raised out of the D7 ingest")
+    a("adapter, and the same bug was written here before a test caught it")
+    a("")
+    a("**Closed by the D8.1 opening entry's \"F10 fix\" row (Chosen), in runbook")
+    a("step A3.** The finding is kept in full rather than deleted: the fix is")
+    a("one `except` clause and the reasoning is the whole value.")
+    a("")
+    a("`decode_health` raises two unrelated exception types. A bad clock")
+    a("domain gives `ProtocolViolation`, which is a `WireError`; a corrupt")
+    a("protobuf BODY gives protobuf's own `DecodeError`, which is not. Code")
+    a("that catches `WireError` around it is therefore protected against one of")
+    a("the two and not the other.")
+    a("")
+    a("`transport/adapter.py`'s `SocketIngestAdapter.poll` caught exactly")
+    a("`WireError` on its health branch, while its MEASUREMENT branch caught")
+    a("`Exception` with a labelled rejection and a comment saying why. So a")
+    a("single malformed health datagram propagated out of `poll` — on the")
+    a("fusion host, in the loop that receives from three nodes, on the port")
+    a("health SHARES with measurements (D8-F9). The project's own rule is that")
+    a("one corrupt packet may not kill ingest and every drop is labelled; that")
+    a("was one packet away from breaking it.")
+    a("")
+    a("The D8.1 opening entry sanctioned the fix and the runbook's A3 scheduled")
+    a("it. It is the measurement branch's own shape — a broad catch with a")
+    a("labelled reject, routed through `_reject` so the loud")
+    a("`raise_on_reject=True` path is unchanged. The reason string gained the")
+    a("exception type (`health_decode:DecodeError`,")
+    a("`health_decode:ProtocolViolation`) because a corrupt protobuf and a")
+    a("contract violation are different bugs on different sides of the wire,")
+    a("and the E7 listener already keeps them apart.")
+    a("")
+    a("Gated by `tests/transport/test_d81_f10_health_reject.py`: the first test")
+    a("drives all three datagrams — corrupt body, unmappable clock domain,")
+    a("valid — through one adapter and asserts the labels separately, that the")
+    a("good packet still lands, and that the measurement counters never moved;")
+    a("the second asserts the loud path still raises `DecodeError`. The health")
+    a("branch had NO coverage in the W-series before this, which is why the")
+    a("asymmetry survived D7.")
+    a("")
+    a("The same mistake was made in `edge/health.py` while writing the D8.1")
+    a("listener, and `test_a_corrupt_datagram_is_counted_and_does_not_kill_the_")
+    a("listener` is what found it — which is the argument for writing the")
+    a("harness before the bench session rather than during it.")
+    a("")
+
+    a("### D8-F11 — the sanctioned clip length does not survive the budget")
+    a("check the same runbook step asks for, and the budget it is checked")
+    a("against never counted the detector")
+    a("")
+    a("Runbook A4 asks for two things that do not both hold. It sanctions a")
+    a("RAM-loop clip of \"~24 full-res frames = 72 MB\" (the D0 \"D8.1 opening\"")
+    a("F8 row) and it asks that \"clip + daemon footprint stays under 160 MB\".")
+    a("Worked from the allocators rather than from either document:")
+    a("")
+    f11_detector = benchmark.detector_state_bytes(2304, 1296, "ive")
+    f11_clip = benchmark.ram_clip_bytes(2304, 1296, 24)
+    a("| Term | Bytes at 2304x1296 | Where it comes from |")
+    a("| --- | --- | --- |")
+    a(f"| IVE detector state | {f11_detector:,} | "
+      "`ive_alloc`: four U8 planes at `stride*height`, plus "
+      "`plane * model_num * 12` at the compiled-in `model_num = 3`. EXCLUDES "
+      "`ive_footprint_for`'s third term, `sizeof(IVE_CCBLOB_S)` — an SDK type "
+      "absent from this checkout, declared at "
+      f"{benchmark.IVE_BLOB_DECLARED_BOUND_BYTES:,} B in section 8 |")
+    f11_fixed = benchmark.daemon_fixed_bytes(2304, 1296)
+    a(f"| A 24-frame clip | {f11_clip:,} | "
+      "`frames * proc_w * proc_h`, the arena the preload malloc's |")
+    a(f"| Daemon fixed | {f11_fixed:,} | "
+      "`inject.luma_capacity` (one luma frame) plus a DECLARED "
+      f"{benchmark.DAEMON_STRUCT_ALLOWANCE_BYTES:,} B bound on the five "
+      "`sizeof()` terms `main.c` adds |")
+    a(f"| Total | {f11_detector + f11_clip + f11_fixed:,} | "
+      "against a 160,000,000 B line |")
+    a("")
+    a("The D0 entry is not wrong about what it says: 72 MB IS within 256 MB,")
+    a("the node's PHYSICAL total, which is the budget that entry names. It is")
+    a("silent about the detector's own allocation, and 160 MB is a different")
+    a("budget. Both readings cannot govern the same clip.")
+    a("")
+    a("**The 160 MB line was never computed against this detector.**")
+    a("`RV1106_EDGE_NODE.md` section 6's memory table has no row for a GMM2")
+    a("model bank. Its rows are the v1 ISP node's — a full-res NV12 ring, a")
+    a("quarter-res stream, RGA scratch, the RKNN runtime — and under RAM-loop")
+    a("injection the D8 daemon allocates none of them. What it does allocate —")
+    a(f"{f11_detector:,} B at the top resolution — is larger than every row in")
+    a("that table put together. The comparison A4 asks for is not like for")
+    a("like, in either direction.")
+    a("")
+    a("A4 also asks that the budget clear 160 MB \"with the margin stated in")
+    a("RV1106_EDGE_NODE.md section 6\". No numeric margin is stated there. The")
+    a("Notes cells read \"still fits with margin\" and \"very comfortable\" — that")
+    a("is prose, and no figure was invented here to satisfy the clause.")
+    a("")
+    a("What this phase DID, rather than picking whichever number fits: the")
+    a("budget is a declared knob (`--ram-budget-mb`, default 160, decimal MB,")
+    a("daemon-only, stated in the header comment), the daemon computes")
+    a("clip + detector + fixed at startup, logs every term, and REFUSES rather")
+    a("than shortening the clip. The harness derives the longest clip that")
+    a("clears THAT SAME THREE-TERM SUM and keeps the looped PTS exact, and the")
+    a("derivation is in section 8 with every term. The answer at the top")
+    f11_top = benchmark.ram_loop_max_frames(2304, 1296, "ive")
+    a(f"resolution is {f11_top} frames, not 24.")
+    a("")
+    a("**The two sums were not the same sum when this finding was first")
+    a("written.** Its own text said \"the daemon computes clip + detector +")
+    a("fixed\" two paragraphs above \"the harness derives the longest clip that")
+    a("clears the budget\", and the harness's budget had no `fixed` term at")
+    a("all — it subtracted the detector and nothing else. At 1152x648 that")
+    a("published a 174-frame row as fitting which the daemon refused at")
+    a("startup, and the pinning test compared the harness's arithmetic against")
+    a("itself, so it could not notice. The harness now reserves the daemon's")
+    a("`fixed` (section 8 states which half is exact and which half is a")
+    a("declared bound), and the gate that keeps them together reads the")
+    a("daemon's own printed `fixed` off a real run rather than recomputing it.")
+    a("")
+    a("Consequence if shipped: an unamended D0 entry and a daemon that refuses")
+    a("it. The first board session would meet the refusal, not the entry, and")
+    a("the clip length is a resolution decision made before C3 runs — so it")
+    a("belongs to the planning session, and it belongs there before Phase B.")
+    a("")
+
+    a("### D8-F12 — the image build exits 0 on a build its own manifest")
+    a("calls FAILED")
+    a("")
+    a("`scripts/build-image.sh` writes its manifest from an inline python")
+    a("block, and that block re-derives the status: every stage passed but no")
+    a("image files were collected, so it sets `status = \"FAILED\"` with")
+    a("`failed = \"collect (no image files were produced)\"` — which is exactly")
+    a("the right judgement. But that `status` is a PYTHON-local name. The")
+    a("shell's `${status}` is still `complete`, so the guard on the last lines")
+    a("(`if [ \"${status}\" != \"complete\" ]`) does not fire and the script exits")
+    a("0.")
+    a("")
+    a("It is reachable rather than theoretical: the collect step is")
+    a("`cp -f \"${SDK}/output/image/\"*` with its errors swallowed by")
+    a("`2>/dev/null || true`, so a build whose stages all \"succeeded\" and whose")
+    a("output directory is empty exits successfully, prints a manifest saying")
+    a("FAILED, and the operator moves on. The only way to notice is to read the")
+    a("manifest — which is why the A2 procedure in this phase did, and why the")
+    a("stage table above is derived from the manifest rather than from an exit")
+    a("code.")
+    a("")
+    a("NOT FIXED HERE, deliberately. This phase is sanctioned to make exactly")
+    a("one fix (A3's) and this is not it. The fix is one line — export the")
+    a("python block's verdict and test THAT — and it is recorded with the lines")
+    a("so it is a decision, not an oversight.")
+    a("")
+
+    a("### D8-F13 — the image container advertises an emulation check that")
+    a("does not exist, and the check it does have misreports after one crash")
+    a("")
+    a("`docker/Dockerfile.image` says of the build script: \"The script says so")
+    a("out loud when it detects emulation.\" It does not. There is no `uname`,")
+    a("no `arch`, no qemu or binfmt probe anywhere in `build-image.sh`.")
+    a("")
+    a("What exists is `grep -q \"internal compiler error\"` over the stage log,")
+    a("used only to choose between two console messages after a failure. And")
+    a("the stage log is APPENDED across attempts, so once any attempt within a")
+    a("stage has produced an ICE, every later failure in that stage is reported")
+    a("as \"emulated cc1 died\" whatever actually killed it — including, on a")
+    a("native host, a failure that has nothing to do with a compiler.")
+    a("")
+    a("This is the D8-F6 class: a document and its code disagreeing, found by")
+    a("running the thing rather than reading it. Consequence if shipped: an")
+    a("operator debugging a native build failure is handed a diagnosis about")
+    a("emulation. NOT FIXED HERE for the same reason as D8-F12; the fix to the")
+    a("comment is a comment, and the fix to the grep is to scope it to the")
+    a("current attempt.")
+    a("")
+
+    # The heading and the closing status are DERIVED from the manifest for the
+    # same reason the finding exists: a finding about a missing field that goes
+    # on asserting the field is missing after a build records it is the
+    # literal-claim failure one level up.
+    host_recorded = bool(manifest and manifest.build_host)
+    if host_recorded:
+        a("### D8-F14 — CLOSED: the image manifest now records which machine")
+        a("built the image")
+    else:
+        a("### D8-F14 — the image manifest does not record which machine built")
+        a("the image, and A2 makes that machine load-bearing")
+    a("")
+    a("Runbook A2 says to build \"on the Linux mirror (native x86 Linux; the")
+    a("emulated-Mac path is what crashed)\". A manifest records the container")
+    a("tag, the SDK commit, the defconfig and a SHA-256 per file. Its")
+    a("`provenance` block is the CONTAINER's: a file baked in at `docker build`")
+    a("time plus queries of the container's own contents, byte-identical")
+    a("whether `docker run --platform linux/amd64` executed natively on x86")
+    a("Linux or under emulation on Apple Silicon. D8-F13 names the same missing")
+    a("probe from the diagnostics side; one probe closes both.")
+    a("")
+    if host_recorded:
+        a("The manifest committed here carries a `build_host` block, and section")
+        a("2.1 prints it. A2's precondition is now evidenced by an artifact")
+        a("rather than by the procedure log, which is what this finding asked")
+        a("for.")
+        a("")
+    else:
+        if manifest is None:
+            a("No manifest is committed here yet, and the script that writes one")
+            a("has no host probe to put in it, so A2's stated precondition is")
+            a("evidenced by the procedure log and by no artifact in this")
+            a("repository.")
+        else:
+            a("The manifest committed here carries no host block, so A2's stated")
+            a("precondition is evidenced by the procedure log and by no artifact")
+            a("in this repository. Section 2.1's build-host row says")
+        a(f"{metrics.NOT_MEASURED} with that reason rather than leaving the")
+        a("question un-asked, and the reader is not invited to infer the answer")
+        a("from the emulated-Mac paragraph earlier in that section, which")
+        a("describes an attempt that was abandoned.")
+        a("")
+        a("NOT FIXED HERE, deliberately, for the same reason as D8-F12 and")
+        a("D8-F13, plus one of its own: the fix writes a new field into a")
+        a("manifest, and the only way to produce a manifest carrying it is")
+        a("another image build. The hashes ARE the identity of the bytes and B2")
+        a("re-checks them against the flashed node, so a rebuild buys provenance")
+        a("for the build host and nothing else. The fix, for whoever runs the")
+        a("next build: add `\"build_host\": {\"uname\": ..., \"emulated\":")
+        a("<binfmt/qemu probe>}` beside `provenance` in the manifest python")
+        a("block. `edge/image.py` already reads `build_host` and section 2.1")
+        a("already prints whatever it finds there, so the report side needs no")
+        a("further change.")
+        a("")
+
     # ---------------------------------------------------------------- 10
     a("## 10. E-series status")
     a("")
@@ -960,6 +1775,32 @@ def generate(evidence: dict | None) -> str:
     a("")
     a("E1-E5 are the D8.0 hand-back. E6-E8 need hardware and are not claimed.")
     a("")
+    a("What the D8.1-prep work adds to that table is HARNESS coverage, not a")
+    a("board result, and the distinction is the point:")
+    a("")
+    a("| Harness test | What it exercises on this host | What it does NOT claim |")
+    a("| --- | --- | --- |")
+    a("| `test_e7_health_listener.py` | the listener decodes real 1 Hz health "
+      "packets off the measurement port, counts labelled rejections, and "
+      "reports cadence and drop-counter monotonicity | E7 itself: 1 Hz on a "
+      "NODE with real drop counters |")
+    a("| `test_e8_benchmark_harness.py` | the sweep runner, the collectors' "
+      "NOT-MEASURED discipline, the soak's paced looped feed, and the E8 "
+      "comparison including its ability to fail | E8 itself: two runs on the "
+      "BOARD within the declared bounds |")
+    a("| `test_d81_image_build.py` | the image manifest reader, its refusals, "
+      "and that this document quotes the manifest it was given | that an image "
+      "has been flashed to anything |")
+    a("| `test_d81_provisioning.py` | push, SHA-256 verification on the far "
+      "side, detached start, SIGTERM-preserves-counters and collect, over a "
+      "local transport | ssh, scp, and that a Buildroot rootfs has "
+      "`sha256sum` |")
+    a("| `test_d81_ram_loop_source.py` | the RAM-loop source on the HOST "
+      "build: the frame budget that ends a run, continuous frame_seq across a "
+      "wrap, the per-pass PTS advance, every refusal, the budget check and "
+      "the pacing | that any of it has run on a board, and the IVE arm of the "
+      "budget arithmetic, which does not compile off the node |")
+    a("")
     a("### Full-suite status")
     a("")
     a("Every prior suite plus the E-series, and `ruff check src tests`, on the")
@@ -975,13 +1816,66 @@ def generate(evidence: dict | None) -> str:
     a("| Whole suite before D8 (recorded at the start of this phase) | "
       "325 passed, 1 skipped |")
     a("")
-    a("Both rows are the tail of an actual `uv run pytest -q`, recorded by")
-    a("`report measure` into the evidence file — not a number typed into this")
-    a("generator, which nothing could contradict.")
+    # "Both rows" against a three-row table: the third is a figure recorded at
+    # the start of the phase, not a run this generator saw. Named precisely so
+    # the caveat below can name the same two.
+    a("The first two rows are the tail of an actual `uv run pytest -q`, recorded")
+    a("by `report measure` into the evidence file — not a number typed into this")
+    a("generator, which nothing could contradict. The third is what the suite")
+    a("read at the start of this phase.")
     a("")
-    a("The skip is the D7 precedent: a gate-clip test whose machine-local")
-    a("render artifacts are absent, with a synthetic variant that still runs.")
+    a("#### Which machine, and with which receive buffer")
     a("")
+    a("The D0 \"D8.1 opening\" entry moved the authoritative gate: the all-green")
+    a("suite for a hand-back runs on a provisioned Linux server, macOS is")
+    a("advisory, and the VM prerequisite is a kernel receive buffer of at least")
+    a("4 MB because that is the environment D7 measured in. Until D8.1 the")
+    a("evidence file had no field for any of it, so this document could only")
+    a("say \"the machine that generated this report\" — true, and no use at all")
+    a("for deciding whether the gate was the gate. `report measure` now records")
+    a("it and this table quotes it.")
+    a("")
+    platform_block = (evidence or {}).get("gate_platform")
+    a("| Gate platform | Value |")
+    a("| --- | --- |")
+    if platform_block:
+        for key, label in (
+            ("system", "Kernel"),
+            ("release", "Kernel release"),
+            ("machine", "Architecture"),
+            ("distribution", "Distribution"),
+            ("net.core.rmem_max", "`net.core.rmem_max`"),
+            ("net.core.rmem_default", "`net.core.rmem_default`"),
+        ):
+            a(f"| {label} | {_platform_value(platform_block, key)} |")
+    else:
+        a("| every row | PENDING (run `report measure`) |")
+    a("")
+    # Names its subject rather than relying on position: "the two rows above"
+    # pointed at this table, which renders one row when the block is absent and
+    # six when it is present, and never two.
+    a(f"A `net.core.rmem_max` under {GATE_RMEM_MAX_BYTES} makes the two measured")
+    a("suite rows in **Full-suite status** a weaker claim than they look: W3")
+    a("pushes 720 datagrams before its first drain and fails on a COUNT")
+    a("mismatch rather than an error, so a small buffer is a silent loss that")
+    a("reads as a test failure about evidence handling. The value is published")
+    a("here so a reader can check it instead of trusting it.")
+    a("")
+    skipped = (full_suite or {}).get("skipped") or 0
+    if skipped:
+        a(f"The {'skip' if skipped == 1 else 'skips'} in that row "
+          f"{'is' if skipped == 1 else 'include'} the v1 cross-check, and it is")
+        a("an artefact of HOW this generator runs the suite rather than of the")
+        a("machine it ran on: `_run_suite` invokes `uv run pytest <selector>`")
+        a("with no `PYTHONPATH`, so `test_v1_projection_agrees_with_frozen_"
+          "convention`'s")
+        a("`importorskip` on `skyweave.fusion.geom` fires. The project's second")
+        a("documented invocation, `PYTHONPATH=../v1/src uv run pytest`, runs it")
+        a("— and on the gate platform that invocation is where the whole suite")
+        a("has NO skips at all. Do not read this row's skip as a missing")
+        a("machine-local artifact; that is a different skip, and on a machine")
+        a("carrying `output/` it does not fire.")
+        a("")
     a("### A host-load observation on W6, recorded because it cost time")
     a("")
     a("Earlier in this phase, with the machine carrying a sustained load")
@@ -990,8 +1884,21 @@ def generate(evidence: dict | None) -> str:
     a("`test_w6_wallclock.py::test_loopback_packet_age_is_measured_and_within"
       "_the_declared_budget` failed repeatedly and reproducibly at a loopback")
     a("scheduling-jitter p95 of ~10.03 ms against its 10.0 ms budget. It")
-    a("passes on the same machine once quiet, and the run recorded above is a")
-    a("clean one.")
+    a("passed on the same machine once quiet.")
+    a("")
+    # "and the run recorded above is a clean one" was a claim about the suite
+    # row this generator itself prints, asserted whatever that row said — the
+    # same shape as the gate claim below, five paragraphs apart. Read off the
+    # row instead.
+    if _suite_is_green(full_suite):
+        a(f"The run recorded above is a clean one: `{full_suite['summary']}`.")
+    elif full_suite:
+        a("The run recorded above is NOT a clean one —")
+        a(f"`{full_suite['summary']}` — so whatever this paragraph says about")
+        a("quiet machines, the row a reader can see is the row that governs.")
+    else:
+        a("Whether the run recorded above is a clean one is PENDING: no suite")
+        a("has been recorded into the evidence file.")
     a("")
     a("It was checked against the PRE-D8 tree — same failure, same number — so")
     a("nothing in this phase moved it, and the budget was NOT widened to make")
@@ -1003,6 +1910,78 @@ def generate(evidence: dict | None) -> str:
     a("indexing. That is a planning-session decision, not an edit: either")
     a("re-measure and confirm the budget, or record a new loaded-host figure")
     a("and re-derive the rig speed from it.")
+    a("")
+    a("**D8.1-prep adds data points, and they are worse than the D8.0")
+    a("write-up.** It failed reproducibly while the emulated image build held")
+    a("four cores, which is the expected direction. But on an OTHERWISE QUIET")
+    a("machine it went one clean run, then 10.01 ms, then 10.04 ms, and then")
+    a("10.04 ms again running ALONE — against a 10.0 ms budget. So \"it passes")
+    a("on the same machine once quiet\" is no longer true: the margin on that")
+    a("host is under half a percent and mostly on the wrong side.")
+    a("")
+    a("**That is the observation D8.1 answered by moving the gate, not the")
+    a("budget.** The D0 \"D8.1 opening\" entry makes a provisioned Linux server")
+    a("the authoritative all-green suite gate — \"where W6 passes on merit;")
+    a("macOS results remain advisory\" — and runbook A1 executes it.")
+    a("")
+    # DERIVED from the gate-platform block and the suite row, not asserted. The
+    # first draft of this paragraph said "the whole-suite row above is that
+    # machine's" unconditionally, four paragraphs under a table that could read
+    # PENDING or Darwin and a row that could read one failure — the
+    # literal-claim failure mode this generator keeps being caught by (review
+    # 10c finding 1, 10d finding 1, and again here, in the one section whose
+    # whole subject is provenance). `generate` still probes nothing: both
+    # predicates read the evidence dict.
+    on_gate = _on_gate_platform(platform_block)
+    row_green = _suite_is_green(full_suite)
+    suite_summary = (full_suite or {}).get("summary") or "PENDING"
+    system = _platform_value(platform_block, "system")
+    rmem = _platform_value(platform_block, "net.core.rmem_max")
+    if on_gate and row_green:
+        a("**The whole-suite row above is that machine's.** The gate-platform")
+        a(f"table records {system} with `net.core.rmem_max` {rmem} — at or above")
+        a(f"the {GATE_RMEM_MAX_BYTES} A1 requires — and the row reads")
+        a(f"`{suite_summary}`. The paragraphs above are now an advisory-host")
+        a("record rather than an explanation of a red row.")
+    elif on_gate:
+        a("**The whole-suite row above is that machine's, and it is not green:**")
+        a(f"`{suite_summary}`. The gate ran where A1 says it should and still")
+        a("reads a failure, so W6 is NOT retired by it and the paragraphs above")
+        a("stand until that row is a pass on this platform.")
+    elif platform_block:
+        a("**The whole-suite row above is NOT that machine's.** The gate-platform")
+        a(f"table records {system} with `net.core.rmem_max` {rmem}, which is not")
+        a(f"the Linux gate at or above {GATE_RMEM_MAX_BYTES} that A1 requires;")
+        a(f"the row reads `{suite_summary}`. These rows are an ADVISORY host's,")
+        a("W6 is not retired, and the paragraphs above are still the explanation")
+        a("of whatever that row reads. Re-run `report measure` on the gate")
+        a("platform before this document is a hand-back artifact.")
+    else:
+        a("**Whether the whole-suite row above is that machine's is NOT")
+        a("RECORDED.** The evidence file carries no gate-platform block, so this")
+        a("document cannot say which host produced the row — the state the")
+        a("section above exists to remove. W6 is not retired by an unrecorded")
+        a("platform; run `report measure` on the gate platform.")
+    a("")
+    a("The honest scope statement has also changed, and pretending otherwise")
+    a("would be the D8-F6 mistake one level up. The D8.1-prep write-up argued")
+    a("that nothing under `transport/` differed by a byte, so W6's inputs were")
+    a("identical to the tree where it passed. **Phase A breaks that argument:**")
+    a("A3 changes `transport/adapter.py`. What it changes is one `except`")
+    a("clause on the HEALTH branch of `SocketIngestAdapter.poll`; the W6")
+    a("loopback rig sends observation datagrams and no health datagrams, so it")
+    a("never reaches that branch. That is a weaker argument than byte-identity")
+    a("and it is stated as one — the load-bearing claim is now the gate")
+    a("platform, not the diff.")
+    a("")
+    a("The budget still has not been touched, for the same reason as before:")
+    a("`rig_replay_speed` is DERIVED from it, and widening a gate to make a")
+    a("suite green is the thing this project does not do. Moving the gate to a")
+    a("machine that meets the UNCHANGED budget is the opposite move, and it")
+    a("does not settle the macOS question: whether D7's declared headroom")
+    a("(\"roughly 2x the LOADED figure\") still holds on a developer laptop is")
+    a("open, and it belongs to the session that owns D9's rig, before that")
+    a("rig's numbers are trusted.")
     a("")
 
     # ---------------------------------------------------------------- 10b
@@ -1181,6 +2160,273 @@ def generate(evidence: dict | None) -> str:
     a("  phase that has no claim on it.")
     a("")
 
+    # -------------------------------------------------------------- 10d
+    a("## 10d. Adversarial review before the D8.1-prep hand-back")
+    a("")
+    a("The same shape as 10b and 10c, over the D8.1-prep diff: five lenses —")
+    a("honesty and labels, tests that cannot fail, measurement correctness,")
+    a("scope and blast radius, and correctness/robustness of the new code —")
+    a("with every candidate finding handed to an independent skeptic whose")
+    a("instruction was to REFUTE it and who could build and run the harness to")
+    a("settle it.")
+    a("")
+    a("**15 candidates, 8 refuted, 7 confirmed — 6 distinct defects, all fixed")
+    a("before hand-back.** The gap between 7 and 6 is one defect filed twice by")
+    a("two different lenses, which is what independent lenses are for.")
+    a("")
+    a("| # | Found | Fix |")
+    a("| --- | --- | --- |")
+    a("| 1 | Section 1's status row said the D8.1-prep work was \"complete on "
+      "this host\" as a literal, while section 2.1 seventy lines later said the "
+      "image build was PENDING. The generator was structurally incapable of "
+      "agreeing with itself — the same literal-claim failure as review 10c "
+      "finding 1 | the row is derived from the image manifest, and the image "
+      "build gets its OWN row: building the tooling and running it to "
+      "completion are different claims |")
+    a("| 2 | `Reproducibility.passes` was `not mismatches and not breaches`, so "
+      "two runs in which every axis was NOT-MEASURED and every counter absent "
+      "reported PASS — while section 8.1 asserted the opposite in prose, and "
+      "the test NAMED for the guarantee never asserted it | the verdict is "
+      "three-valued (`pass`/`fail`/`incomplete`), it rides in the artifact, "
+      "the CLI no longer passes on an empty run list (`all([])` is True), and "
+      "the test now makes the assertion its name promises |")
+    a("| 3 | `provision.py` had no test at all, and the report already called "
+      "it host-exercised. Worse, running it exposed why: `LocalTransport` "
+      "translated node paths for push/fetch but not for run/spawn, so with the "
+      "module's OWN default `remote_dir` the binary was pushed to one path and "
+      "started from another — outside the sandbox, which on a Linux host is a "
+      "real directory | `_translate` applies to run and spawn too, and "
+      "`test_d81_provisioning.py` drives push, hash-verify, spawn, SIGTERM and "
+      "collect against the host-built daemon, including the truncated-transfer "
+      "refusal |")
+    a("| 4 | The A7-utilisation collector differenced "
+      "`getrusage(RUSAGE_CHILDREN)`, which accumulates over EVERY reaped "
+      "child — and on a host with no `/proc` the peak-RSS sampler forks `ps` "
+      "fifty times a second INSIDE that window. A skeptic isolated it: 0.08 "
+      "core of \"A7 utilisation\" attributed to a daemon that did not exist | "
+      "`os.wait4` returns rusage for one pid and cannot be contaminated by "
+      "another; the source string now says which pid it asked about |")
+    a("| 5 | A daemon that was killed or died wrote no `--stats` file, and "
+      "`frames_in` read the absence as 0, which became a MEASURED \"0.00 fps\" "
+      "for a run that never happened | `Run.frames_in` is `int | None` and "
+      "`sustained_fps` returns NOT-MEASURED with the reason; unknown is not "
+      "zero |")
+    a("| 6 | The 8.1 anti-tuning gate was circular: it compared the report's "
+      "table against the same constant the generator renders that table from, "
+      "so it could only ever prove the document had been rebuilt. Section 6's "
+      "gate has had the same shape since D8.0 | the three numbers are now "
+      "pinned as LITERALS in the test as well, so widening a declared bound "
+      "has to be done deliberately, in a place a reviewer reads |")
+    a("")
+    a("Two more defects were found by running the work rather than reading it,")
+    a("and they are the argument for the amendment's \"exercised against the")
+    a("HOST-built daemon\" clause:")
+    a("")
+    a("- the health listener caught only `WireError` around `decode_health`,")
+    a("  which does not cover protobuf's `DecodeError` — one corrupt datagram")
+    a("  killed the monitor. Found by the corrupt-datagram test on its first")
+    a("  run; finding D8-F10 records that the D7 ingest adapter still has it;")
+    a("- the daemon's output went to a PIPE that this harness only drained")
+    a("  after the process exited. A soak logging a warning per frame would")
+    a("  have filled the pipe buffer and deadlocked — hours in, silently. It")
+    a("  went to a file as part of the `wait4` fix above, which is the sort of")
+    a("  thing a fix for one defect is allowed to be.")
+    a("")
+    a("Two test-strength defects, both in tests written by this work:")
+    a("")
+    a("- `test_a_listener_on_the_wrong_port_hears_nothing` was near-vacuous: no")
+    a("  datagram is addressed to an unadvertised ephemeral port under ANY")
+    a("  implementation, including one with a separate health port. Replaced")
+    a("  with the claim that has content — one socket receives BOTH payload")
+    a("  types, plus an assertion that the daemon's `--help` has no health")
+    a("  port to move to;")
+    a("- the two-run E8 test enforced the BOARD's 10% fps bound on this host")
+    a("  and went red at 17% while the emulated image build was using four")
+    a("  cores. Widening the bound would have been gate-weakening; the test now")
+    a("  gates what a host can honestly gate — the deterministic counters are")
+    a("  identical and the axes get compared — and the bound is judged on the")
+    a("  board, where it applies. This is the W6 host-load lesson again, in a")
+    a("  new place.")
+    a("")
+    a("Three refutations worth naming, because the refutation is the useful")
+    a("part:")
+    a("")
+    a("- a claimed sandbox escape in `LocalTransport.alive` (\"the zombie reads")
+    a("  as alive, so `stop_daemon` always returns False\") was real when it was")
+    a("  filed and had already been fixed by the time the skeptic ran it — the")
+    a("  skeptic showed `Popen.poll()` reaps, which is exactly what the fix")
+    a("  added;")
+    a("- \"the E8 anti-tuning gate is circular: it reads a table the generator")
+    a("  writes from the same constant\". True, and it is the same circularity")
+    a("  section 6's gate has had since D8.0. What either gate actually catches")
+    a("  is a HAND-EDITED report, which is also what the freshness test exists")
+    a("  for. Recorded rather than papered over;")
+    a("- \"two new unsanctioned `pytest.skip`s\" — both are the skip E5 already")
+    a("  uses for a missing `D8_EDGE_REPORT.md`, which is a committed repo file")
+    a("  rather than an environment dependency. Consistent with the precedent,")
+    a("  and it never fires in a checkout that has the report.")
+    a("")
+
+    # ---------------------------------------------------------------- 10e
+    a("## 10e. Adversarial review before the D8.1 Phase A hand-back")
+    a("")
+    a("The same shape as 10b, 10c and 10d, over the runbook's Phase A diff:")
+    a("five lenses — honesty and labels, tests that cannot fail, C correctness/")
+    a("memory/refusals, measurement correctness, and scope/blast radius against")
+    a("the runbook — with every candidate handed to an independent skeptic whose")
+    a("instruction was to REFUTE it and who could build and run the daemon and")
+    a("the harness to settle it.")
+    a("")
+    a("**42 candidates, 20 refuted, 22 confirmed — 17 distinct defects, all")
+    a("fixed or recorded before hand-back.** The gap between 22 and 17 is five")
+    a("defects filed twice by two different lenses, which is what independent")
+    a("lenses are for: the RAM-budget arithmetic was found by both honesty and")
+    a("measurement, from opposite ends.")
+    a("")
+    a("| # | Found | Fix |")
+    a("| --- | --- | --- |")
+    a("| 1 | **The harness derived a clip length its own daemon refuses.** "
+      "`main.c` enforces `clip + detector + fixed`, and `fixed` includes "
+      "`inject.luma_capacity` — a full frame, malloc'd on every injection open "
+      "— plus five struct terms. The harness subtracted only the detector. At "
+      "2304x1296 and 1536x864 the omission is smaller than the headroom and the "
+      "run happens to work; at 1152x648 the published row left 249,856 B "
+      "against a luma term of 746,496 B, so the daemon exits 1 with \"RAM "
+      "budget exceeded\" — at the resolution most likely to sustain 30 fps and "
+      "be Chosen by C4. Reproduced through `run_sweep` itself | "
+      "`daemon_fixed_bytes()` is now a term in the harness's own arithmetic, in "
+      "`ram_loop_max_frames`, in the published table and in every run record. "
+      "The derived IVE length at 1152x648 moves 174 -> 171 |")
+    a("| 2 | The test that should have caught #1 compared "
+      "`ram_loop_max_frames()` against `ram_budget_row()` — the same arithmetic "
+      "on both sides of the assertion, so no divergence between harness and "
+      "daemon could ever redden it | Replaced by two tests that read the "
+      "DAEMON: one parses the daemon's own printed `fixed` and asserts the "
+      "declared allowance bounds it, one runs the derived clip and the old "
+      "budget-minus-detector clip and asserts the first is accepted and the "
+      "second refused |")
+    a("| 3 | `--ram-loop-frames -1` parsed to 4294967295 and ran; "
+      "`4294967298` truncated to 2; `200,000` became 200; "
+      "`--ram-loop-period-ns 33.3e6` became 33 ns and paced nothing | "
+      "Checked `parse_u32_arg`/`parse_i64_arg` on all three numeric RAM flags: "
+      "whole string consumed, `errno` checked, sign rejected, range checked. "
+      "Refuses, never clamps |")
+    a("| 4 | `peak_rss_mb` divided KiB by 1024, i.e. binary MiB wearing a "
+      "decimal-MB label, in the one phase whose entire memory argument is "
+      "decimal MB and whose budget it would be read against | Converted to "
+      "decimal; the collector registry states both sources are KiB. The axis "
+      "had no test at all, which is why it survived |")
+    a("| 5 | `scene_looped: True` was asserted on every soak record, including "
+      "soaks whose scene never wrapped, and the RAM-loop scene note travelled "
+      "with it — a declared systematic attached to runs that did not have it | "
+      "Derived per run from the clip and the served count |")
+    a("| 6 | `BenchmarkPlan.ram_paced_fps` was written into the scored artifact "
+      "and read by nothing | Deleted, with a comment naming the three fields "
+      "that do state the applied pace |")
+    a("| 7 | `compare_runs` never checked that its two runs were the same "
+      "CONFIGURATION, so two different resolutions — or a peak RSS read by "
+      "`ps` on one side and procfs on the other — compared as a clean pass | "
+      "`config_mismatches` on label, proc grid, pace, RAM plan and per-axis "
+      "measurement source; any mismatch forces `fail` |")
+    a("| 8 | This report claimed the whole-suite row came from the Linux gate "
+      "platform as flat prose, sitting under a table that can read PENDING or "
+      "Darwin and a row that can read one failure | Derived, in four states, "
+      "from the recorded platform AND the recorded receive buffer: a Linux box "
+      "under `GATE_RMEM_MAX_BYTES` does not get to claim the gate either |")
+    a("| 9 | Section 2.1 narrated an abandoned emulated-Mac attempt directly "
+      "above a manifest table from a different, completed build, and nothing "
+      "recorded which machine produced the hashes | The mechanical lesson is "
+      "kept and retitled by what it explains, in the past tense; every status "
+      "claim is derived from the manifest; a Build host row renders "
+      "NOT-MEASURED with its reason (finding D8-F14) |")
+    a("| 10 | `detector_state_bytes(..., \"ive\")` claimed to mirror the C "
+      "exactly and to be pinned equal by a test; it omits `sizeof(IVE_CCBLOB_S)` "
+      "and no test compares it to anything | The claim is scoped per arm and "
+      "the exclusion declared: every IVE cell is stated as a LOWER bound on the "
+      "board's sum. The arithmetic was NOT changed — the type is an SDK "
+      "header's and guessing its size would put an uncontradictable number in a "
+      "byte-precision published total |")
+    a("| 11 | The E8 \"never folded into any bound\" assertions could not fail: "
+      "they compared a note constant to itself | Replaced by a test that "
+      "asserts the actual property — the bounded axes are exactly the three "
+      "declared ones, and no note constant is among them |")
+    a("| 12 | E7's paced-health test claimed to gate where the pace sleep sits. "
+      "Mutation showed the defect it named leaves the measured maximum health "
+      "period indistinguishable from baseline | Claim corrected to what the "
+      "test does gate, and the declared slack TIGHTENED 3.0 -> 2.0, derived "
+      "from the arithmetic of a late packet vs a missed one rather than tuned |")
+    a("| 13 | Two more claims asserted over the row they describe: \"the run "
+      "recorded above is a clean one\" (W6) and D8-F8's two-term description of "
+      "the budget check, stale once harness and daemon were reconciled on three "
+      "| Both derived |")
+    a("| 14 | `test_the_preload_stays_out_of_the_daemons_fps_denominator` "
+      "cannot fail for the defect it names: both rates share `frames_in` as a "
+      "numerator, so the daemon's interval is structurally a subset of the "
+      "harness's whatever the preload does | Renamed and the false causal claim "
+      "struck. Gating it properly needs an observable that does not exist — see "
+      "the gaps below |")
+    a("| 15 | The gate-platform publish test used byte-identical fixture values "
+      "for both receive-buffer knobs, so a dropped or duplicated row was "
+      "invisible | Distinguishable values, both still above the A1 line |")
+    a("| 16 | The RAM-loop budget arithmetic pin asserted `(w + 15) & ~15 == w` "
+      "— true of the literals, about no system under test | Replaced with the "
+      "three-term arithmetic and an explicit assertion that the pre-fix "
+      "174-frame row goes over on the luma term alone |")
+    a("| 17 | A false claim in live source: `main.c`'s pace block said a sleep "
+      "ahead of the health check would delay every health packet, which the "
+      "review measured to be untrue | Comment corrected, and it now names the "
+      "property that IS gated — byte-identical packet logs paced vs unpaced |")
+    a("")
+    a("**Three defects were found by running the work rather than reading it,**")
+    a("and all three are the argument for the reproduction requirement: #1 (the")
+    a("skeptic drove `run_sweep` at the published row and read the refusal), #3")
+    a("(every bad argument was fed to the built binary), and #12 (the mutation")
+    a("was built and measured four times against a baseline, which is the only")
+    a("reason the docstring's claim was known to be false rather than merely")
+    a("doubted).")
+    a("")
+    a("**Test-strength defects — #2, #11, #14, #15, #16 — are five of")
+    a("seventeen,** and #2 is the one worth naming twice: it did not merely fail")
+    a("to catch #1, it was structurally incapable of catching it, because both")
+    a("sides of its assertion came from the same function's arithmetic. A test")
+    a("whose two sides share a source is a tautology wearing a comparison.")
+    a("")
+    a("Two gaps are recorded rather than closed, because closing them is more")
+    a("than this phase is sanctioned to do:")
+    a("")
+    a("- **the preload has no observable.** `write_stats` emits no preload")
+    a("  timing, so nothing can gate that the clip loads before the daemon's own")
+    a("  clock starts. One key (`ram_preload_ns`) would fix it; it is a wire-")
+    a("  adjacent addition to a stats file the board session reads, and it")
+    a("  belongs to the session that owns C3;")
+    a("- **the IVE arm of every byte figure here is uncompiled.** "
+      "`sw_detect_ive.c` builds as a refusal without `SKYWEAVE_HAVE_RKMPI`, so")
+    a("  `ive_footprint_for` — the code that produces the 119,439,360 B at")
+    a("  2304x1296 on which D8-F11 and the whole clip-length question rest — has")
+    a("  never been compiled, let alone run. The first RAM-loop start on node 1")
+    a("  is the moment that arithmetic is confirmed, and the INFO line it prints")
+    a("  is where to read it.")
+    a("")
+    a("Refutations worth naming, because the refutation is the useful part:")
+    a("")
+    a("- \"the RAM-loop sweep measures a detector that has gone blind\" — the")
+    a("  absorption effect is real and is already declared in")
+    a("  `RAM_LOOP_SCENE_NOTE`, but the skeptic established the sweep is 120")
+    a("  frames, far inside the model's time constant, so the impact story does")
+    a("  not hold at C3's scale. It holds at C5's, and that is stated where the")
+    a("  soak is described rather than as a defect here;")
+    a("- \"A3 was sanctioned as catch `DecodeError`; the code catches bare")
+    a("  `Exception`\" — refuted from the finding's own text, which prescribes")
+    a("  \"the measurement branch's own shape, a broad catch with a labelled")
+    a("  reject\". The broad catch IS the sanctioned shape;")
+    a("- \"Phase A ships a replacement for a Chosen D0 decision while filing")
+    a("  D8-F11 saying that number belongs to the planning session\" — refuted:")
+    a("  the daemon refuses the sanctioned length, so SOME length had to be")
+    a("  derived to have a working source at all. The derived value is labelled")
+    a("  derived arithmetic, the D0 entry is untouched, and the finding asks for")
+    a("  the amendment rather than assuming it.")
+    a("")
+
     # ---------------------------------------------------------------- 11
     a("## 11. Out of scope, confirmed untouched")
     a("")
@@ -1199,6 +2445,27 @@ def generate(evidence: dict | None) -> str:
     a("VALUE the detector puts in an existing field, not the field, its type or")
     a("its bounds — and the fixture regeneration it required is D8 fixtures")
     a("only, with `golden/` untouched.")
+    a("")
+    a("**Phase A of the D8.1 runbook re-derives this list, because it touched")
+    a("more than the D8.1-prep diff did.** What it changed: `transport/`, one")
+    a("`except` clause on `SocketIngestAdapter.poll`'s health branch (A3, the")
+    a("sanctioned F10 fix); `firmware/rv1106/`, a fourth source mode and the")
+    a("budget check it executes (A4, sanctioned by the D0 \"D8.1 opening\" F8")
+    a("row); `skyweave2/edge/`, the harness that declares and records it, plus")
+    a("the evidence file's new gate-platform block (A1); this generator; and")
+    a("`firmware/rv1106/image/image-manifest.json`, which is a build product")
+    a("checked in on purpose (A2).")
+    a("")
+    a("What it did NOT change, stated as a checkable claim rather than an")
+    a("intention: nothing under `v1/`, `golden/`, `v2/proto/`,")
+    a("`firmware/rv1106/proto/` or `v2/src/skyweave2/contracts/`; no committed")
+    a("byte fixture under `tests/edge/fixtures/`; no wire message, no health")
+    a("field (the RAM loop's source mode and byte rate reach the `--stats` JSON")
+    a("and the run record, never the frozen `HealthPacket`); no declared bound")
+    a("in `tolerance.py`; no existing test deleted or weakened. The three")
+    a("decisions-log entries Phase A raises are DRAFTED for the planning")
+    a("session and are not written here — the runbook reserves that file, and")
+    a("D8-F11 is the one that needs answering before Phase B.")
     a("")
 
     return "\n".join(lines) + "\n"

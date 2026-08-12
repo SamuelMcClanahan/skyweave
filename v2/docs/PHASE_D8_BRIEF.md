@@ -85,6 +85,29 @@ The two hand-back tests (reported == ranked; fresh oracle reproduces
 committed bytes) must pass unchanged in form. Full suite + ruff green,
 adversarial review before hand-back, as always.
 
+## D8.1-prep amendment (2026-08-10): board-free D8.1 work, sanctioned now
+
+Three D8.1 items have no board dependency and may be done immediately,
+before the flashed-node gate; the gate still holds for everything else.
+
+1. **Flashable image build:** full Buildroot image set (boot, kernel,
+   rootfs) from the pinned SDK commit in the pinned container. Record
+   defconfig, SDK commit, and SHA-256 of every produced image file in
+   the report's build-provenance section. The daemon does NOT need to be
+   baked in; hand-start is acceptable until D8.2.
+2. **Benchmark + provisioning harness:** the resolution sweep runner
+   (three D4 resolutions, sustained fps/memory/DDR/A7/thermal
+   collection, soak orchestration, E8 run-to-run bounds), a node
+   provisioning script (push daemon, start, collect results), and the
+   health-packet listener. All exercised against the HOST-built daemon
+   in tests so the first board session debugs the board, not the
+   tooling. Board-only collectors (DDR counters, thermals) may stub
+   with a loud NOT-MEASURED marker, never a fake number.
+3. **Declared tolerances:** the D8.2 detector tolerance bounds and the
+   benchmark run-to-run bounds written into the report skeleton and
+   committed BEFORE any board run, per the anti-tuning rule already in
+   this brief.
+
 ## Tests (E-series)
 
 E1 capacity: cap + max_count + ceiling constants agree, invariant holds,

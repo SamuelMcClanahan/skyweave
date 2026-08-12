@@ -75,6 +75,58 @@ _GMM2_DEFAULTS = {
 }
 
 
+@dataclass(frozen=True)
+class RamLoopDeclaration:
+    """Everything the daemon needs to loop a SWIJ clip out of DDR, declared.
+
+    This is the ONE place the RAM-loop flags are spelled. Three argv builders
+    reach the daemon — this module for the tests, ``benchmark`` for the sweep
+    and ``provision`` for a node — and three spellings of ``--ram-loop-frames``
+    are three ways a board command line diverges from what a host test
+    exercised.
+
+    Deliberately NOT part of :func:`daemon_args`. That mapping is TOTAL over
+    ``DetectorConfig`` and raises on any field it does not know, and a source
+    is not a detector knob: putting it there would make every daemon-driving
+    test fail on an unmapped field that does not exist.
+
+    Every value is a DECLARATION. The daemon derives none of them — that is
+    what keeps the looped capture timestamps the harness's arithmetic rather
+    than the daemon's opinion.
+    """
+
+    #: Frames in the clip file itself.
+    clip_frames: int
+    #: Frames the run serves before it ends. A RAM loop has no trailer, so
+    #: this is what terminates it — never a duration, because every counter in
+    #: ``benchmark.EXACT_COUNTERS`` is compared with ``==``.
+    total_frames: int
+    #: What ``capture_ts_ns`` advances by on each pass through the clip.
+    pts_stride_ns: int
+    budget_mb: int = 160
+    #: 0 = unpaced. Nanoseconds per frame, never an fps float: a rate rounded
+    #: in two places is a rate that disagrees with itself.
+    period_ns: int = 0
+
+    def as_daemon_args(self, clip_path: str) -> list[str]:
+        return [
+            "--inject-ram", str(clip_path),
+            "--ram-loop-frames", str(self.total_frames),
+            "--ram-loop-pts-stride-ns", str(self.pts_stride_ns),
+            "--ram-budget-mb", str(self.budget_mb),
+            "--ram-loop-period-ns", str(self.period_ns),
+        ]
+
+    def as_dict(self) -> dict:
+        return {
+            "clip_frames": self.clip_frames,
+            "total_frames": self.total_frames,
+            "pts_stride_ns": self.pts_stride_ns,
+            "budget_mb": self.budget_mb,
+            "period_ns": self.period_ns,
+        }
+
+
 def daemon_args(config: DetectorConfig, detector: str = "soft") -> list[str]:
     """Daemon argv for a ``DetectorConfig``. Raises on anything unmapped."""
     known = set(_NOT_PASSED) | set(_SCALAR_FLAGS) | {
@@ -178,8 +230,15 @@ def run_daemon_on_stream(
     build_dir: str | Path | None = None,
     timeout_s: float = 600.0,
     extra_args: list[str] | None = None,
+    ram_loop: RamLoopDeclaration | None = None,
 ) -> DaemonRun:
     """Replay an injection stream through the daemon and collect what it sent.
+
+    With ``ram_loop`` the same file is preloaded into DDR and looped instead of
+    being read frame by frame. It is a PARAMETER rather than something to pass
+    through ``extra_args``, because that hatch appends: ``--inject-file`` would
+    stay in the argv, the daemon would count two sources and refuse
+    (``sw_config.c``'s "choose exactly one source").
 
     The datagrams are read back from ``--packet-log`` rather than off the
     socket: the log is written by the same code path, immediately before the
@@ -201,10 +260,14 @@ def run_daemon_on_stream(
     sink.bind(("127.0.0.1", 0))
     sink.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
     try:
+        source_args = (
+            ram_loop.as_daemon_args(str(stream_path))
+            if ram_loop is not None
+            else ["--inject-file", str(stream_path)]
+        )
         argv = [
             str(daemon_path(build_dir)),
-            "--inject-file",
-            str(stream_path),
+            *source_args,
             "--packet-log",
             str(packet_log),
             "--stats",
@@ -240,6 +303,7 @@ def run_daemon_on_stream(
 __all__ = [
     "DaemonRun",
     "DaemonUnavailable",
+    "RamLoopDeclaration",
     "daemon_args",
     "daemon_path",
     "fixture_tool_path",

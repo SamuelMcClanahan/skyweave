@@ -39,6 +39,21 @@ int64_t sw_monotonic_ns(void)
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }
 
+void sw_sleep_ns(int64_t ns)
+{
+    struct timespec req;
+    if (ns <= 0) {
+        return;
+    }
+    req.tv_sec = (time_t)(ns / 1000000000LL);
+    req.tv_nsec = (long)(ns % 1000000000LL);
+    /* The return value and the EINTR remainder are discarded deliberately.
+     * Every caller sleeps towards an ABSOLUTE deadline it recomputes on the
+     * next slice, so a short sleep is absorbed there instead of accumulating
+     * the loop's own cost as pace drift. */
+    (void)nanosleep(&req, NULL);
+}
+
 int sw_read_exact_by(int fd, void *buffer, size_t n, int64_t deadline_ns)
 {
     uint8_t *out = (uint8_t *)buffer;

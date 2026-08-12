@@ -211,11 +211,240 @@ int sw_inject_open_listen(sw_inject_t *inject, int port)
     return 0;
 }
 
+/* Serve one frame out of the preloaded arena.
+ *
+ * The whole D1 transform is the four assignments below, and every input to
+ * them was declared by the harness and checked at preload. */
+static int ram_next(sw_inject_t *inject, sw_inject_frame_t *frame)
+{
+    uint64_t index;
+    uint64_t pass;
+    uint64_t slot;
+
+    if (inject->ram_served >= inject->ram_total_frames) {
+        /* Return 1, the SAME clean end a trailer gives, so the frame loop
+         * needs no new case. Said out loud so it is never mistaken for one. */
+        SW_LOG_INFO("RAM loop served its declared budget of %llu frames; ending "
+                    "the run the way a trailer would (there is no trailer)",
+                    (unsigned long long)inject->ram_total_frames);
+        return 1;
+    }
+    index = inject->ram_served;
+    pass = index / (uint64_t)inject->ram_frames;
+    slot = index % (uint64_t)inject->ram_frames;
+
+    /* Valid only because preload enforced stored seq == index: this IS the
+     * harness's own numbering continued, not a renumbering. */
+    frame->frame_seq = index;
+    /* The addend is the harness's DECLARED per-pass stride. The daemon adds
+     * it and derives nothing — no fps, no division, no clock. */
+    frame->capture_ts_ns =
+        inject->ram_meta[slot].capture_ts_ns + (int64_t)pass * inject->ram_pts_stride_ns;
+    /* Copied, never recomputed: the harness declared this and the daemon's
+     * job is to carry the declaration, not to have an opinion about it. */
+    frame->time_sync_error_ms = inject->ram_meta[slot].time_sync_error_ms;
+    frame->width = inject->proc_width;
+    frame->height = inject->proc_height;
+    frame->luma = inject->ram_arena + (size_t)slot * inject->ram_frame_bytes;
+    inject->ram_served++;
+    inject->frames_read++;
+    return 0;
+}
+
+int sw_inject_preload_ram(sw_inject_t *inject, uint64_t total_frames,
+                          int64_t pts_stride_ns, uint64_t byte_budget)
+{
+    uint64_t frame_bytes;
+    uint64_t arena_bytes;
+    uint64_t clip_span_ns;
+    uint64_t passes;
+    uint8_t *arena;
+    sw_inject_ram_meta_t *meta;
+    sw_inject_frame_t f;
+    uint32_t i;
+    int status;
+
+    if (inject->declaration_overridden) {
+        SW_LOG_ERR("this clip declares OVERRIDDEN time_sync_error_ms: a known-lie "
+                   "fixture may not become a looped sweep source. Refusing.");
+        return -1;
+    }
+    if (inject->frame_count == 0 || inject->frame_count > SW_INJECT_RAM_MAX_FRAMES) {
+        SW_LOG_ERR("RAM clip declares %u frames, outside 1..%d "
+                   "(SW_INJECT_RAM_MAX_FRAMES bounds the per-frame metadata arrays "
+                   "whatever the byte budget allows)",
+                   inject->frame_count, SW_INJECT_RAM_MAX_FRAMES);
+        return -1;
+    }
+    if (total_frames < 1) {
+        SW_LOG_ERR("--ram-loop-frames must be at least 1");
+        return -1;
+    }
+    if (pts_stride_ns <= 0) {
+        SW_LOG_ERR("--ram-loop-pts-stride-ns must be positive");
+        return -1;
+    }
+
+    /* OVERFLOW GUARD, BY DIVISION and never by multiplication. size_t is 32
+     * bits on this ARM (see read_session's bound), so at 2304x1296 the arena
+     * product wraps at 1439 frames — and a wrapped product would malloc a
+     * small buffer and then be written past. Division cannot wrap. */
+    frame_bytes = (uint64_t)inject->proc_width * (uint64_t)inject->proc_height;
+    if ((uint64_t)inject->frame_count > byte_budget / frame_bytes) {
+        SW_LOG_ERR("RAM clip is %u frames x %llu B, over the %llu B remaining "
+                   "budget; checked by division before any malloc because size_t "
+                   "is 32 bits on this target",
+                   inject->frame_count, (unsigned long long)frame_bytes,
+                   (unsigned long long)byte_budget);
+        return -1;
+    }
+    arena_bytes = (uint64_t)inject->frame_count * frame_bytes;
+    if (arena_bytes > (uint64_t)SIZE_MAX) {
+        SW_LOG_ERR("RAM clip arena is %llu B, past what a size_t on this target "
+                   "can address",
+                   (unsigned long long)arena_bytes);
+        return -1;
+    }
+
+    arena = (uint8_t *)malloc((size_t)arena_bytes);
+    meta = (sw_inject_ram_meta_t *)malloc((size_t)inject->frame_count *
+                                          sizeof(sw_inject_ram_meta_t));
+    if (arena == NULL || meta == NULL) {
+        SW_LOG_ERR("out of memory preloading a %llu B RAM clip",
+                   (unsigned long long)arena_bytes);
+        goto refuse;
+    }
+
+    for (i = 0; i < inject->frame_count; ++i) {
+        /* The UNMODIFIED file path: ram_active is still false, so the clip
+         * goes through exactly ONE parser and every existing validation — the
+         * SWIF/SWIE magic, payload_len != width*height, the mid-stream
+         * resolution refusal — applies verbatim. */
+        status = sw_inject_next(inject, &f);
+        if (status != 0) {
+            SW_LOG_ERR("RAM clip is shorter than its header declares: %u of %u "
+                       "frames arrived",
+                       i, inject->frame_count);
+            goto refuse;
+        }
+        if (f.frame_seq != (uint64_t)i) {
+            SW_LOG_ERR("RAM-loop clip frame %u declares frame_seq %llu: a RAM-loop "
+                       "clip must be numbered 0..N-1, because the loop continues "
+                       "the harness's numbering across every wrap and a gap would "
+                       "make the wrap arithmetic wrong. Refusing rather than "
+                       "renumbering it.",
+                       i, (unsigned long long)f.frame_seq);
+            goto refuse;
+        }
+        if (i == 0 && f.capture_ts_ns < 0) {
+            SW_LOG_ERR("RAM-loop clip starts at capture_ts_ns %lld: a negative base "
+                       "would make the wrap overflow check itself overflow",
+                       (long long)f.capture_ts_ns);
+            goto refuse;
+        }
+        if (i > 0 && f.capture_ts_ns <= meta[i - 1].capture_ts_ns) {
+            SW_LOG_ERR("RAM-loop clip capture time does not increase at frame %u "
+                       "(%lld after %lld); a loop over it could not increase "
+                       "either",
+                       i, (long long)f.capture_ts_ns,
+                       (long long)meta[i - 1].capture_ts_ns);
+            goto refuse;
+        }
+        memcpy(arena + (size_t)i * (size_t)frame_bytes, f.luma, (size_t)frame_bytes);
+        meta[i].capture_ts_ns = f.capture_ts_ns;
+        meta[i].time_sync_error_ms = f.time_sync_error_ms;
+    }
+    /* One more read, which MUST be the trailer: "a truncated stream is an
+     * ERROR, not a short clip" holds for a preload too. */
+    if (sw_inject_next(inject, &f) != 1) {
+        SW_LOG_ERR("RAM clip has no trailer after its %u declared frames",
+                   inject->frame_count);
+        goto refuse;
+    }
+
+    /* EXACT INTEGER cross-checks on the declared stride. The first is what
+     * guarantees capture time increases ACROSS the wrap and not merely within
+     * a pass; without it a mis-declared stride would fold the clip back onto
+     * itself and nothing downstream would notice. */
+    clip_span_ns = (uint64_t)(meta[inject->frame_count - 1].capture_ts_ns -
+                              meta[0].capture_ts_ns);
+    if ((uint64_t)pts_stride_ns <= clip_span_ns) {
+        SW_LOG_ERR("--ram-loop-pts-stride-ns %lld is not longer than the %llu ns "
+                   "clip it advances, so capture time would not increase across "
+                   "the wrap",
+                   (long long)pts_stride_ns, (unsigned long long)clip_span_ns);
+        goto refuse;
+    }
+    passes = (total_frames - 1) / (uint64_t)inject->frame_count;
+    if (passes > (uint64_t)((INT64_MAX - meta[inject->frame_count - 1].capture_ts_ns) /
+                            pts_stride_ns)) {
+        SW_LOG_ERR("%llu frames at a %lld ns per-pass stride would run capture time "
+                   "past INT64_MAX",
+                   (unsigned long long)total_frames, (long long)pts_stride_ns);
+        goto refuse;
+    }
+
+    /* Storage leaves the measured path here: the descriptor and the
+     * single-frame staging buffer are done, and one full frame of DDR is
+     * reclaimed before the loop starts. */
+    if (inject->fd >= 0) {
+        close(inject->fd);
+        inject->fd = -1;
+    }
+    free(inject->luma);
+    inject->luma = NULL;
+    inject->luma_capacity = 0;
+
+    inject->ram_arena = arena;
+    inject->ram_arena_bytes = (size_t)arena_bytes;
+    inject->ram_frame_bytes = (size_t)frame_bytes;
+    inject->ram_frames = inject->frame_count;
+    inject->ram_meta = meta;
+    inject->ram_total_frames = total_frames;
+    inject->ram_served = 0;
+    inject->ram_pts_stride_ns = pts_stride_ns;
+    inject->frames_read = 0;
+    /* LAST assignment, deliberately: set before the preload loop it would
+     * recurse into ram_next and read an arena nothing had filled. */
+    inject->ram_active = true;
+
+    SW_LOG_INFO("RAM loop: %u frames of %ux%u preloaded into a %llu B arena, "
+                "serving %llu frames",
+                inject->ram_frames, inject->proc_width, inject->proc_height,
+                (unsigned long long)arena_bytes, (unsigned long long)total_frames);
+    /* Loud at every startup, in the same register as the OVERRIDDEN warning
+     * above: this is the daemon's ONE sanctioned advance of a capture
+     * timestamp, and a run that did it quietly would eventually be read as
+     * evidence that the daemon never touches capture time. */
+    SW_LOG_WARN("RAM loop ADVANCES capture time: frame_seq is numbered "
+                "continuously across wraps and capture_ts_ns gains the harness's "
+                "DECLARED %lld ns stride once per pass, reproducing the harness's "
+                "own looping feed. The daemon reads no clock and computes no "
+                "timestamp; time_sync_error_ms is the clip's, untouched. The DDR "
+                "traffic profile differs from real ISP writes — a declared "
+                "systematic, recorded beside every result.",
+                (long long)pts_stride_ns);
+    return 0;
+
+refuse:
+    /* One exit for the eight refusals above. Every one of them happens with
+     * both blocks already taken and nothing published into `inject`, so the
+     * daemon leaves with the arena released rather than holding a clip it
+     * refused to serve. */
+    free(arena);
+    free(meta);
+    return -1;
+}
+
 int sw_inject_next(sw_inject_t *inject, sw_inject_frame_t *frame)
 {
     uint8_t record[FRAME_FIXED_LEN];
     uint32_t width, height, payload_len;
-    int status = sw_read_exact(inject->fd, record, 4);
+    int status;
+    if (inject->ram_active) {
+        return ram_next(inject, frame);
+    }
+    status = sw_read_exact(inject->fd, record, 4);
     if (status != 0) {
         SW_LOG_ERR("injection stream ended without a trailer after %u frames; a "
                    "truncated stream is an ERROR, not a short clip",
@@ -288,4 +517,11 @@ void sw_inject_close(sw_inject_t *inject)
     free(inject->luma);
     inject->luma = NULL;
     inject->luma_capacity = 0;
+    free(inject->ram_arena);
+    inject->ram_arena = NULL;
+    inject->ram_arena_bytes = 0;
+    free(inject->ram_meta);
+    inject->ram_meta = NULL;
+    inject->ram_frames = 0;
+    inject->ram_active = false;
 }

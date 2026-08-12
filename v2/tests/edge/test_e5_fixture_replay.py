@@ -586,7 +586,17 @@ def test_the_declared_tolerances_are_the_ones_the_report_quotes():
 
 
 def _table_rows(text: str, heading: str) -> dict:
-    """{axis label: declared bound} from the markdown table under `heading`."""
+    """{axis label: declared bound} from the markdown table under `heading`.
+
+    The break condition is ANY heading, not just a `###` one. It used to be
+    `###` alone, which meant a scan of section 6.2 ran straight through `## 7`
+    and `## 8` and collected their tables too — the 6.2 dict really did contain
+    `Scored frames -> 40` and `Thermal drift -> PENDING`. Nothing was wrong
+    with the assertions that used it, because they look up six specific labels;
+    but rows are stored last-write-wins, so a later table row with a colliding
+    label would have silently replaced a declared bound in the gate that exists
+    to stop exactly that. Found while adding the section 8.1 bounds table.
+    """
     lines = text.splitlines()
     try:
         start = next(i for i, line in enumerate(lines) if line.startswith(heading))
@@ -594,7 +604,7 @@ def _table_rows(text: str, heading: str) -> dict:
         return {}
     rows = {}
     for line in lines[start:]:
-        if line.startswith("###") and not line.startswith(heading):
+        if line.startswith("#") and not line.startswith(heading):
             break
         if not line.startswith("|"):
             continue
