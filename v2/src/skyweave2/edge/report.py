@@ -375,6 +375,11 @@ def generate(evidence: dict | None) -> str:
     # pure function of the repository plus the evidence dict, and an image
     # built on the Linux mirror is describable on a machine with no docker.
     manifest = image.load_manifest()
+    # Three of section 9's findings are about the build SCRIPT, not about any
+    # image it produced, so their status is read off the script for the same
+    # reason: a sentence saying a fix landed is a claim nothing in this
+    # repository could contradict.
+    fixes = image.build_script_fixes()
 
     # Read out of the committed fixtures, not typed in. Section 9's D8-F7
     # makes claims about these artifacts ("all N observations", "none of them
@@ -600,6 +605,11 @@ def generate(evidence: dict | None) -> str:
         if manifest.build_host:
             for key in sorted(manifest.build_host):
                 a(f"| Build host {key} | `{manifest.build_host[key]}` |")
+        elif fixes["f13_f14_emulation_probe"]:
+            a(f"| Build host | {metrics.NOT_MEASURED} — the manifest carries no "
+              "host block: it was written before `build-image.sh` grew the "
+              "probe that fills one, and it is not reissued on another machine "
+              "to fake one (D8-F14) |")
         else:
             a(f"| Build host | {metrics.NOT_MEASURED} — the manifest carries no "
               "host block; `build-image.sh` has no `uname`, `arch` or binfmt "
@@ -612,8 +622,14 @@ def generate(evidence: dict | None) -> str:
         a("stamps a copy with the wall clock, and this project does not put")
         a("wall-clock values in artifacts). More than one attempt means a")
         a("compile or link step died and the retry resumed after the")
-        a("magic-number sweep; on the emulated path that was `cc1`, and the")
-        a("script cannot tell that case from any other (D8-F13):")
+        a("magic-number sweep; on the emulated path that was `cc1`. This table")
+        if fixes["f13_ice_grep_scoped"]:
+            a("counts attempts and not causes: the script now diagnoses each")
+            a("failure from that attempt's own output (D8-F13), but the count is")
+            a("still a count.")
+        else:
+            a("counts attempts and not causes: the script cannot tell that case")
+            a("from any other (D8-F13).")
         a("")
         a("| Stage | Status | Attempts |")
         a("| --- | --- | --- |")
@@ -622,9 +638,20 @@ def generate(evidence: dict | None) -> str:
               f"{stage.get('attempts', 1)} |")
         a("")
         if manifest.files:
-            a("Every file the build produced, with the SHA-256 the brief asks")
-            a("for. The images themselves are gitignored — they are derived and")
-            a("large; this table is the record:")
+            if manifest.post_build:
+                # The caveat belongs WITH the heading. A reader who stops at
+                # the table must not have been told these are the build's
+                # bytes, because two of them are not.
+                changed = {step.get("file") for step in manifest.post_build}
+                a("Every file in the image set as it stands, with the SHA-256")
+                a(f"the brief asks for. {len(changed)} of them are NOT the")
+                a("build's own bytes — the post-build table under it says which")
+                a("and why. The images themselves are gitignored; this is the")
+                a("record:")
+            else:
+                a("Every file the build produced, with the SHA-256 the brief")
+                a("asks for. The images themselves are gitignored — they are")
+                a("derived and large; this table is the record:")
             a("")
             a("| Image file | Bytes | SHA-256 |")
             a("| --- | --- | --- |")
@@ -633,6 +660,120 @@ def generate(evidence: dict | None) -> str:
             a("")
             a(f"Total: {len(manifest.files)} files, {manifest.total_bytes} B.")
             a("")
+            # Derived from the manifest's own `RK_PARTITION_CMD_IN_ENV`, not
+            # measured off the image: a reader with no gigabytes on their
+            # machine can still see where each partition lands, and a card
+            # that disagrees with this table is the thing C0c must stop on.
+            # It is here because Phase B writes ONE of these files and the
+            # file list above does not say which, or what is inside it
+            # (D8-F15).
+            if manifest.post_build:
+                # A hash table that mixed built bytes with post-processed ones
+                # and said nothing would mislead exactly where it is trusted.
+                # Every file whose hash is not the container's is named here,
+                # with what changed it and what it was before.
+                a("**Which of those hashes are not the build's.** These files")
+                a("were changed after the container wrote them, and this is the")
+                a("whole of it — every other row above is the build's own bytes:")
+                a("")
+                a("| Step | File | Before | After | Tool | Host |")
+                a("| --- | --- | --- | --- | --- | --- |")
+                for step in manifest.post_build:
+                    a(f"| {step.get('step', '?')} | `{step.get('file', '?')}` | "
+                      f"{step.get('from_bytes', '?')} B | {step.get('to_bytes', '?')} B "
+                      f"| `{step.get('tool', '?')}` | "
+                      f"`{step.get('host') or metrics.NOT_MEASURED}` |")
+                a("")
+                for step in manifest.post_build:
+                    if step.get("note"):
+                        a(f"`{step.get('file', '?')}` ({step.get('step', '?')}): "
+                          f"{step['note']} Before "
+                          f"`{str(step.get('from_sha256'))[:16]}...`, after "
+                          f"`{str(step.get('to_sha256'))[:16]}...`.")
+                        a("")
+
+            layout = image.medium_layout(manifest)
+            sd_build = manifest.declared.get("RK_BOOT_MEDIUM") == "sd_card"
+            if layout:
+                a("Where those images land on the medium, from the partition")
+                a("cmdline this build declared:")
+                if sd_build:
+                    a("`sd_update.img` is that layout as one raw image, every")
+                    a("partition at its offset, and it is the file Phase B")
+                    a("writes to a card. The last partition grows to the end of")
+                    a("whatever card that is; the image stops after it.")
+                a("")
+                a("| Partition | Offset (B) | Declared | Image | Bytes | Reserved |")
+                a("| --- | --- | --- | --- | --- | --- |")
+                for part in layout:
+                    declared_size = "grows to end" if part.size is None else str(part.size)
+                    reserved = "-" if part.size is None else str(part.reserved_bytes)
+                    a(f"| {part.name} | {part.offset} | {declared_size} | "
+                      f"`{part.image}` | {part.image_bytes} | {reserved} |")
+                a("")
+                # A negative reserve means an image is bigger than the
+                # partition declared for it, which on a packed medium means it
+                # is written over the next partition. Said loudly, because the
+                # accounting below still closes when it happens — the sign
+                # cancels — and a table that only a careful reader would catch
+                # is not a check.
+                overflowing = [part for part in layout
+                               if part.size is not None and part.reserved_bytes < 0]
+                if overflowing:
+                    a("**OVERFULL PARTITIONS.** These images are larger than the")
+                    a("partitions declared for them, so a packed medium writes")
+                    a("each one over whatever follows it:")
+                    a("")
+                    for part in overflowing:
+                        a(f"- `{part.image}` is {part.image_bytes} B in a "
+                          f"{part.size} B `{part.name}` partition, over by "
+                          f"{-part.reserved_bytes} B")
+                    a("")
+                medium = next(
+                    (item for item in manifest.files if item.name == "sd_update.img"),
+                    None,
+                )
+                last = layout[-1]
+                content_end = last.offset + last.image_bytes
+                if medium is not None and sd_build:
+                    reserved_total = sum(part.reserved_bytes for part in layout)
+                    content_total = sum(part.image_bytes for part in layout)
+                    padding = medium.bytes - content_end
+                    # CHECKED before it is claimed. The identity holds when the
+                    # declared offsets are contiguous with the cumulative
+                    # sizes; a layout with an explicit `@offset` that leaves a
+                    # gap breaks it, and "accounts to the byte" over numbers
+                    # that do not add up is the kind of sentence this report
+                    # exists to not contain.
+                    if content_total + reserved_total + padding != medium.bytes:
+                        a(f"Those figures do NOT account for `{image.MEDIUM_NAME}`:")
+                        a(f"{content_total} B of image content plus")
+                        a(f"{reserved_total} B reserved plus {padding} B of")
+                        a(f"trailing zeros is not {medium.bytes} B. Either the")
+                        a("declared layout has a gap this file does not, or the")
+                        a("file is not this layout's — and both are worth")
+                        a("stopping for before a card is written.")
+                        a("")
+                    else:
+                        a(f"That accounts for `{image.MEDIUM_NAME}` to the byte:")
+                        a(f"{content_total} B of image content, {reserved_total} B")
+                        a("reserved inside declared partitions that their images")
+                        a(f"do not fill, {padding} B of zeros after the last one,")
+                        a(f"{medium.bytes} B in total. The reserved space is the")
+                        a("partition table's and not the packer's: it is where")
+                        a("`boot` and `userdata` are DECLARED to be, so shrinking")
+                        a("it means declaring a different card (D8-F15).")
+                        a("")
+                        budget = image.MEDIUM_MAX_BYTES
+                        margin = budget - medium.bytes
+                        a(f"Against the declared budget of {budget} B, that")
+                        a(f"leaves {margin} B of margin. The suite fails a")
+                        a("manifest that busts it, and so does the packer that")
+                        a("writes one. Those are the bytes a card receives; the")
+                        a("file itself is written with holes, so it costs a")
+                        a("fraction of that on disk and the two numbers are not")
+                        a("the same measurement.")
+                        a("")
         else:
             a("No image files were produced, so there is nothing to hash.")
             a("")
@@ -1623,19 +1764,40 @@ def generate(evidence: dict | None) -> str:
     a("belongs to the planning session, and it belongs there before Phase B.")
     a("")
 
-    a("### D8-F12 — the image build exits 0 on a build its own manifest")
-    a("calls FAILED")
-    a("")
-    a("`scripts/build-image.sh` writes its manifest from an inline python")
-    a("block, and that block re-derives the status: every stage passed but no")
-    a("image files were collected, so it sets `status = \"FAILED\"` with")
-    a("`failed = \"collect (no image files were produced)\"` — which is exactly")
-    a("the right judgement. But that `status` is a PYTHON-local name. The")
-    a("shell's `${status}` is still `complete`, so the guard on the last lines")
-    a("(`if [ \"${status}\" != \"complete\" ]`) does not fire and the script exits")
-    a("0.")
-    a("")
-    a("It is reachable rather than theoretical: the collect step is")
+    # Fixed or not is a property of the committed script, so it is READ off
+    # the script rather than asserted here. A finding that goes on describing
+    # an open defect after the fix lands, or announces a fix nothing in the
+    # repository can confirm, is the same literal-claim failure one level up.
+    f12_closed = fixes["f12_exit_follows_manifest"]
+    f13_closed = fixes["f13_ice_grep_scoped"] and fixes["f13_f14_emulation_probe"]
+
+    if f12_closed:
+        a("### D8-F12 — CLOSED: the image build exited 0 on a build its own")
+        a("manifest called FAILED")
+        a("")
+        a("`scripts/build-image.sh` writes its manifest from an inline python")
+        a("block, and that block re-derives the status: every stage passed but")
+        a("no image files were collected, so it set `status = \"FAILED\"` with")
+        a("`failed = \"collect (no image files were produced)\"` — the right")
+        a("judgement, reached and then dropped. That `status` was a PYTHON-local")
+        a("name; the shell's `${status}` was still `complete`, so the guard on")
+        a("the last lines never fired and the script exited 0.")
+        a("")
+    else:
+        a("### D8-F12 — the image build exits 0 on a build its own manifest")
+        a("calls FAILED")
+        a("")
+        a("`scripts/build-image.sh` writes its manifest from an inline python")
+        a("block, and that block re-derives the status: every stage passed but no")
+        a("image files were collected, so it sets `status = \"FAILED\"` with")
+        a("`failed = \"collect (no image files were produced)\"` — which is exactly")
+        a("the right judgement. But that `status` is a PYTHON-local name. The")
+        a("shell's `${status}` is still `complete`, so the guard on the last lines")
+        a("(`if [ \"${status}\" != \"complete\" ]`) does not fire and the script exits")
+        a("0.")
+        a("")
+    a(f"It {'was' if f12_closed else 'is'} reachable rather than theoretical: "
+      "the collect step is")
     a("`cp -f \"${SDK}/output/image/\"*` with its errors swallowed by")
     a("`2>/dev/null || true`, so a build whose stages all \"succeeded\" and whose")
     a("output directory is empty exits successfully, prints a manifest saying")
@@ -1644,33 +1806,74 @@ def generate(evidence: dict | None) -> str:
     a("stage table above is derived from the manifest rather than from an exit")
     a("code.")
     a("")
-    a("NOT FIXED HERE, deliberately. This phase is sanctioned to make exactly")
-    a("one fix (A3's) and this is not it. The fix is one line — export the")
-    a("python block's verdict and test THAT — and it is recorded with the lines")
-    a("so it is a decision, not an oversight.")
-    a("")
+    if f12_closed:
+        a("**Fixed.** The manifest block now ends with")
+        a("`sys.exit(0 if status == \"complete\" else 1)` and the shell runs it as")
+        a("the condition of an `if`, so the exit code IS the manifest's verdict")
+        a("and cannot be a second opinion about it. Tested both ways round and")
+        a("without docker: the suite extracts that python block from the")
+        a("committed script and runs it over a fabricated output directory —")
+        a("nothing collected exits 1 and writes FAILED, one file collected exits")
+        a("0 and writes complete.")
+        a("")
+    else:
+        a("NOT FIXED HERE, deliberately. This phase is sanctioned to make exactly")
+        a("one fix (A3's) and this is not it. The fix is one line — export the")
+        a("python block's verdict and test THAT — and it is recorded with the lines")
+        a("so it is a decision, not an oversight.")
+        a("")
 
-    a("### D8-F13 — the image container advertises an emulation check that")
-    a("does not exist, and the check it does have misreports after one crash")
+    if f13_closed:
+        a("### D8-F13 — CLOSED: the image container advertised an emulation check")
+        a("that did not exist, and the check it had misreported after one crash")
+    else:
+        a("### D8-F13 — the image container advertises an emulation check that")
+        a("does not exist, and the check it does have misreports after one crash")
     a("")
+    # One verb, not two copies of the paragraph: the mechanism is the same
+    # sentence whether or not it has been fixed, and only its tense moves.
+    did = "did" if f13_closed else "does"
+    was = "was" if f13_closed else "is"
     a("`docker/Dockerfile.image` says of the build script: \"The script says so")
-    a("out loud when it detects emulation.\" It does not. There is no `uname`,")
-    a("no `arch`, no qemu or binfmt probe anywhere in `build-image.sh`.")
+    a(f"out loud when it detects emulation.\" It {did} not. There {was} no")
+    a("`uname`, no `arch`, no qemu or binfmt probe anywhere in `build-image.sh`.")
     a("")
-    a("What exists is `grep -q \"internal compiler error\"` over the stage log,")
-    a("used only to choose between two console messages after a failure. And")
-    a("the stage log is APPENDED across attempts, so once any attempt within a")
-    a("stage has produced an ICE, every later failure in that stage is reported")
-    a("as \"emulated cc1 died\" whatever actually killed it — including, on a")
-    a("native host, a failure that has nothing to do with a compiler.")
+    if f13_closed:
+        a("What it had was `grep -q \"internal compiler error\"` over the stage")
+    else:
+        a("What exists is `grep -q \"internal compiler error\"` over the stage")
+    a("log, used only to choose between two console messages after a failure.")
+    a("And the stage log is APPENDED across attempts, so once any attempt")
+    a(f"within a stage {'had' if f13_closed else 'has'} produced an ICE, every")
+    a(f"later failure in that stage {was} reported as \"emulated cc1 died\"")
+    a("whatever actually killed it — including, on a native host, a failure")
+    a("that has nothing to do with a compiler.")
     a("")
     a("This is the D8-F6 class: a document and its code disagreeing, found by")
     a("running the thing rather than reading it. Consequence if shipped: an")
     a("operator debugging a native build failure is handed a diagnosis about")
-    a("emulation. NOT FIXED HERE for the same reason as D8-F12; the fix to the")
-    a("comment is a comment, and the fix to the grep is to scope it to the")
-    a("current attempt.")
+    a("emulation.")
     a("")
+    if f13_closed:
+        a("**Fixed, both halves.** The grep now reads only the bytes the")
+        a("CURRENT attempt appended, so the diagnosis is about the failure in")
+        a("hand. And `detect_build_host` makes the container's sentence true:")
+        a("`uname` alone cannot answer, because qemu reports the TARGET machine")
+        a("and an amd64 container on Apple Silicon says `x86_64` exactly like the")
+        a("Linux mirror does, so the probe compares that against `/proc/cpuinfo`,")
+        a("which the kernel writes about the HOST CPU and qemu-user does not")
+        a("fake. Measured on both container platforms of this project's Mac from")
+        a("the same pinned base: `linux/arm64` reports `emulated: no`,")
+        a("`linux/amd64` reports `emulated: yes`. The suite runs the probe")
+        a("function itself over fixture `/proc/cpuinfo` files, including the")
+        a("native-x86 case the mirror produces and this project's hardware")
+        a("cannot. An unrecognised pair answers `unknown` rather than guessing.")
+        a("")
+    else:
+        a("NOT FIXED HERE for the same reason as D8-F12; the fix to the")
+        a("comment is a comment, and the fix to the grep is to scope it to the")
+        a("current attempt.")
+        a("")
 
     # The heading and the closing status are DERIVED from the manifest for the
     # same reason the finding exists: a finding about a missing field that goes
@@ -1701,8 +1904,7 @@ def generate(evidence: dict | None) -> str:
         a("")
     else:
         if manifest is None:
-            a("No manifest is committed here yet, and the script that writes one")
-            a("has no host probe to put in it, so A2's stated precondition is")
+            a("No manifest is committed here yet, so A2's stated precondition is")
             a("evidenced by the procedure log and by no artifact in this")
             a("repository.")
         else:
@@ -1714,18 +1916,197 @@ def generate(evidence: dict | None) -> str:
         a("from the emulated-Mac paragraph earlier in that section, which")
         a("describes an attempt that was abandoned.")
         a("")
-        a("NOT FIXED HERE, deliberately, for the same reason as D8-F12 and")
-        a("D8-F13, plus one of its own: the fix writes a new field into a")
-        a("manifest, and the only way to produce a manifest carrying it is")
-        a("another image build. The hashes ARE the identity of the bytes and B2")
-        a("re-checks them against the flashed node, so a rebuild buys provenance")
-        a("for the build host and nothing else. The fix, for whoever runs the")
-        a("next build: add `\"build_host\": {\"uname\": ..., \"emulated\":")
-        a("<binfmt/qemu probe>}` beside `provenance` in the manifest python")
-        a("block. `edge/image.py` already reads `build_host` and section 2.1")
-        a("already prints whatever it finds there, so the report side needs no")
-        a("further change.")
-        a("")
+        if fixes["f13_f14_emulation_probe"]:
+            # The state between the fix and its first artifact, which is a
+            # state and not a failure: the script writes the block now, and
+            # the manifest in this repository was written before it did.
+            a("**Fixed in the script, not yet in an artifact.**")
+            a("`build-image.sh` now probes the host and writes a `build_host`")
+            a("block — `uname`, `emulated`, and the comparison the verdict came")
+            a("from — beside `provenance`. The manifest here predates that")
+            a("probe and stays empty in that field, and the reason is worth")
+            a("being exact about, because this manifest HAS since been")
+            a("reissued: the post-build steps in 2.1 re-hashed its file table")
+            a("on a Mac. Re-hashing a file table is not building an image. The")
+            a("`build_host` block answers \"which machine ran the build\", no")
+            a("build has run since the probe landed, and filling it from")
+            a("whatever host last touched the file would be this finding")
+            a("inverted. Each post-build step records its own machine instead.")
+            a("The field fills itself at the next image build.")
+            a("")
+        else:
+            a("NOT FIXED HERE, deliberately, for the same reason as D8-F12 and")
+            a("D8-F13, plus one of its own: the fix writes a new field into a")
+            a("manifest, and the only way to produce a manifest carrying it is")
+            a("another image build. The hashes ARE the identity of the bytes and")
+            a("B2 re-checks them against the flashed node, so a rebuild buys")
+            a("provenance for the build host and nothing else. The fix, for")
+            a("whoever runs the next build: add `\"build_host\": {\"uname\": ...,")
+            a("\"emulated\": <binfmt/qemu probe>}` beside `provenance` in the")
+            a("manifest python block. `edge/image.py` already reads `build_host`")
+            a("and section 2.1 already prints whatever it finds there, so the")
+            a("report side needs no further change.")
+            a("")
+
+    a("### D8-F15 — the image set is a bootable SD CARD, and Phase B's")
+    a("procedure describes flashing internal storage")
+    a("")
+    a("`image/sd_update.txt` writes `env`, `idblock`, `uboot`, `boot` and")
+    a("`userdata`, and never `rootfs`. Read on its own that is a flash path")
+    a("which leaves a node running whatever root filesystem it already had —")
+    a("a new kernel over somebody else's userspace, and the board comes up, so")
+    a("nothing announces it.")
+    a("")
+    a("It is not that, and the reason matters more than the reassurance. Those")
+    a("two `.txt` files are U-Boot scripts the SDK generates from the partition")
+    a("cmdline (`project/scripts/mk-tftp_sd_update.sh`), and it skips any")
+    a("partition declared with `-` — grow to the end of the medium — because it")
+    a("has no size to write: `Partition Name (rootfs) is growup partiton,")
+    a("ignore!!!`. This build declares `-(rootfs)`, so rootfs is absent by")
+    a("construction. And for `RK_BOOT_MEDIUM=sd_card` the SDK generates both")
+    a("files in `emmc` mode, so their `mmc write` commands address an eMMC no")
+    a("Pico Pro Max device tree enables: the kernel DTS leaves `&emmc`")
+    a("disabled and the board DTS does not re-enable it, while it does enable")
+    a("`&sfc` with a `spi-nand` child. (That is what the device trees support;")
+    a("nobody here has read a schematic.) They are in `image/` because the SDK")
+    a("writes them there and the")
+    a("manifest hashes everything the build produced. **On this board config")
+    a("they are not a flash path at all.** Their `mmc write` commands go to MMC")
+    a("device 0 — this SDK's `cmd/mmc.c` defaults `curr_device` to 0 in")
+    a("`do_mmcops` before dispatching any `mmc` subcommand, and the scripts")
+    a("never select another — and `mmc0` is the `&emmc` alias, which no Pico")
+    a("Pro Max kernel DTS enables. So the first write fails rather than")
+    a("half-updating a node; the partial update those files describe is a")
+    a("hazard on the boards they were written for, not on this one.")
+    a("")
+    a("The SD path is `sd_update.img`, and it is complete: a raw image of the")
+    a("declared layout with every partition at its offset, rootfs included and")
+    a("byte-identical to `rootfs.img`. Section 2.1's layout table is derived")
+    a("from the manifest and accounts for the file to the byte. Nothing is")
+    a("missing from the image. (It is the whole medium only for a card exactly")
+    a("its size: `-(rootfs)` grows to the end of the card it is written to, so")
+    a("on a larger card the rootfs PARTITION extends past the end of the ext4")
+    a("inside it, which is the normal state of a filesystem and not a fault.)")
+    a("")
+    a("All of that is read off artifacts. No board has been flashed, so what a")
+    a("card DOES on power-up is derived and not measured: the chain checks out")
+    a("— idblock at sector 0x40 where the BootROM looks, the env at offset 0")
+    a("with `CONFIG_ENVF` listing `sys_bootargs`, `mmc1 = &sdmmc` in the SoC")
+    a("DTS, `CONFIG_CMDLINE_PARTITION` and ext4 in the kernel defconfig — but")
+    a("a coherent chain is a prediction. B3 is what turns it into a result.")
+    a("")
+    a("Two smaller things a bench session should know. The card carries no MBR")
+    a("or GPT — sector 0 is the env partition — so a host OS will call a")
+    a("written card unreadable and offer to initialise it; that is correct and")
+    a("the offer must be declined. And `boot.img`'s FIT cmdline says")
+    a("`root=/dev/mmcblk1p7` while the env says `root=/dev/mmcblk1p6`, which is")
+    a("the partition rootfs actually is. It resolves to p6 because U-Boot's env")
+    a("filter REPLACES a bootargs item it has a value for rather than appending")
+    a("— so the env wins as long as the env partition loads. If it ever does")
+    a("not, the FIT default names a seventh partition this layout does not")
+    a("have, and the failure will look like a kernel that cannot find its root")
+    a("rather than like an env problem. Worth knowing before it costs an hour.")
+    a("")
+    a("**What is wrong is what happens next.** With `RK_BOOT_MEDIUM=sd_card`")
+    a("the card IS the system: the env this build wrote carries")
+    a("`blkdevparts=mmcblk1:...` and `root=/dev/mmcblk1p6`, no `mtdparts`, and")
+    a("the SoC DTS aliases `mmc1` to `&sdmmc` — so `mmcblk1` is the card, and")
+    a("nothing on the SD path addresses the SPI NAND. (`update.img` and")
+    a("`download.bin` are the USB/maskrom path and do reach other media, but")
+    a("`update.img`'s own table is env, idblock, uboot, boot, userdata,")
+    a("package-file and bootloader — no rootfs there either.) Runbook B2 says")
+    a("to let the self-flash complete, power off, **remove the card**, and")
+    a("power back up; C0c says to write internal storage one partition at a")
+    a("time, rootfs last. Neither is executable with these bytes. Removing the")
+    a("card removes this image entirely — root filesystem, kernel and U-Boot —")
+    a("and three boards would come up not running it, in a row, before anyone")
+    a("suspected the image was fine.")
+    a("")
+    a("B2 is not imagining the flow it describes: the SDK has one, and")
+    a("`sd_update.txt` is its script. It expects a card with a FAT filesystem")
+    a("holding those files, which U-Boot reads (`fatload mmc 1`) and replays.")
+    a("A card written from `sd_update.img` has no filesystem at all — sector 0")
+    a("is the env partition — so there is nothing for that flow to find. Two")
+    a("SD flows, one artifact, and the runbook describes the other one.")
+    a("")
+    a("**The board config is not the thing to change.** Samuel confirmed in the")
+    a("2026-08-14 session that the nodes run from SD cards, which is what this")
+    a("build already is; the alternative —")
+    a("`BoardConfig-SPI_NAND-Buildroot-RV1106_Luckfox_Pico_Pro_Max-IPC.mk`,")
+    a("a different layout with a 210M ubifs rootfs, needing a full rebuild")
+    a("because this ext4 is not writable to it — is not wanted. So what has to")
+    a("change is the PROCEDURE: B2 keeps the card in, and C0c cannot write")
+    a("internal storage because there is none in play. What C0c becomes is")
+    a("still open, and it is a real question rather than an editorial one: a")
+    a("node running from a card cannot rewrite the partition it is running")
+    a("from, so the standing update path is a second card, an A/B layout, or a")
+    a("write from a ramdisk. That belongs with the D8.2 OTA item, and it is")
+    a("recorded as unanswered rather than improvised here.")
+    a("")
+    a(f"**The {image.MEDIUM_MAX_BYTES // 1_000_000} MB budget, and what it "
+      "cost to meet it.** The medium the build")
+    a("produced was 488 MiB — 511,705,088 B — against a declared budget of")
+    a(f"{image.MEDIUM_MAX_BYTES} B, and the obvious reading of that file is")
+    a("wrong in a way worth writing down: about 212 MiB of it is image content,")
+    a("a zero-scan finds a 63 MiB run at the end, and it looks like a packer")
+    a("padding to a fixed size. It is not. That run is free space INSIDE the")
+    a("rootfs ext4, whose superblock spans its whole file, and the rest of the")
+    a("gap is where the partition cmdline puts `boot` (32M) and `userdata`")
+    a("(256M) — which is why the rootfs partition starts at 302,809,088 B and")
+    a("why 288,601,600 B of the medium is space reserved for partitions their")
+    a("images do not fill. The packer already trims: 473,088 B followed the")
+    a("last byte of content, alignment to a whole MiB and nothing more.")
+    a("")
+    a("That was checked rather than argued, once, while the SDK's own medium")
+    a("was still the one on disk: writing each partition image at the offset")
+    a("in 2.1's table and padding to the next whole MiB reproduced")
+    a("`sd_update.img` byte for byte —")
+    a("`9c88bf53e1f08eeaf256aabea97c008fb576ce7cf6110715b5c6a6a62eb96b64`,")
+    a("which is the `from_sha256` in 2.1's post-build table. That is what says")
+    a("the medium is its partitions and nothing else: no filesystem of its own,")
+    a("no metadata, no packer slack to reclaim, and a C0c-style per-partition")
+    a("write lands the same bytes as a whole-medium write. It also licensed the")
+    a("repack below — a packer that reproduces the SDK's output is one whose")
+    a("output can stand in for it.")
+    a("")
+    a("The shipped medium is this project's own pack of the shrunk rootfs, so")
+    a("that comparison cannot be repeated against it and the suite does not")
+    a("pretend otherwise. What the suite checks now is the weaker standing")
+    a("thing: that the medium on disk IS the composition of the partition")
+    a("images on disk, so a partition image that moves without a repack is")
+    a("caught before a card is written.")
+    a("")
+    a("So the only size this project can change without the Buildroot tree is")
+    a("the rootfs FILESYSTEM, which the build sizes to its partition rather")
+    a("than to its contents. `scripts/shrink-rootfs.sh` resizes it in the")
+    a("pinned base container and `python -m skyweave2.edge.image pack` repacks")
+    a("the medium and republishes the manifest; 2.1's post-build table records")
+    a("both, with the before and after hashes, because these bytes are no")
+    a("longer the ones the SDK wrote and a provenance record that hid that")
+    a("would be worse than no record.")
+    a("")
+    a("**What it costs the node: nothing, and that is checked rather than")
+    a("hoped.** The rootfs the build produced carries")
+    a("`/etc/init.d/S20linkmount` with `bootmedium=sd_card`, and for the")
+    a("partition whose mount point is `IGNORE` — which is what")
+    a("`RK_PARTITION_FS_TYPE_CFG` declares rootfs to be — and which is the")
+    a("device it booted from, it runs `resize2fs` on it at every boot. The")
+    a("filesystem grows to fill the partition, and the partition is `-(rootfs)`")
+    a("growing to the end of whatever card it is on. A smaller image therefore")
+    a("means a shorter card write, not a smaller `/`: the node ends up with the")
+    a("card it has either way, and 168 MiB is a shipping size with headroom,")
+    a("not a floor. The contents are unchanged — verified by mounting both")
+    a("images and comparing 3,462 tree entries with their modes, owners and")
+    a("symlink targets, and the SHA-256 of all 2,430 regular files.")
+    a("")
+    a("**The right fix, for the next build that has the SDK tree in front of")
+    a("it:** declare a smaller `userdata`. 256M of `/userdata` on a bring-up")
+    a("node buys nothing and costs 246 MB of reserved zeros in every card")
+    a("write, which is eight times what shrinking the rootfs recovered. That")
+    a("is a board-config change, it moves every partition after it, and it is")
+    a("a decision for the planning session rather than something to slip into")
+    a("a repack — the same reason the board-medium question above is one.")
+    a("")
 
     # ---------------------------------------------------------------- 10
     a("## 10. E-series status")

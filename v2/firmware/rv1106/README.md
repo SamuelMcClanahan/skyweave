@@ -88,6 +88,33 @@ the report's build-provenance section prints. `IMAGE_STAGES`, `BUILD_JOBS`,
 to `BoardConfig-SD_CARD-Buildroot-RV1106_Luckfox_Pico_Pro_Max-IPC.mk` and
 whatever it is set to is what the manifest records.
 
+With the SD_CARD board config, `image/sd_update.img` is not an updater despite
+its name: it is a raw image of the declared partition layout — every partition,
+rootfs included, at its offset — and the card it is written to becomes the
+system the node boots and runs from. The two `*_update.txt` files beside it are
+the SDK's U-Boot scripts for the OTHER SD flow, the one that reads them off a
+FAT card; on this board config they address an eMMC this board does not have
+and they omit the rootfs by construction. Report section 9's D8-F15 has the
+whole of it, and Phase B of the board runbook does not match it yet.
+
+The packed medium has a DECLARED size budget (`image.MEDIUM_MAX_BYTES`, 500 MB)
+and the build overshoots it, because the medium's size is the partition
+cmdline's geometry plus the rootfs image, and the build sizes the rootfs
+filesystem to its partition rather than to its contents. To fit:
+
+```sh
+# in a Linux container with e2fsprogs (see the script header), from firmware/rv1106
+./scripts/shrink-rootfs.sh
+# then on the host, from v2/
+uv run python -m skyweave2.edge.image pack
+```
+
+That resizes the ext4, repacks the medium from the partition images, re-hashes
+everything and records both steps in the manifest's `post_build` block, which
+is what report section 2.1 prints. The packer refuses to publish a manifest
+over budget. `uv run python -m skyweave2.edge.image verify` re-hashes what is on
+disk against the manifest, which is runbook J1.
+
 The daemon is NOT baked into the rootfs. Hand-start is the D8.1 arrangement;
 `skyweave2.edge.provision` is what does it.
 

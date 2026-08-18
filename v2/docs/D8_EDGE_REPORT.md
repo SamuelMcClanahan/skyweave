@@ -134,7 +134,7 @@ are that run's, and nothing above them describes it.
 | Toolchain | `arm-rockchip830-linux-uclibcgnueabihf` |
 | Partitions | `32K(env),512K@32K(idblock),256K(uboot),32M(boot),256M(userdata),-(rootfs)` |
 | Sensor IQ files | `sc4336_OT01_40IRC_F16.json sc3336_CMK-OT2119-PC1_30IRC-F16.json mis5001_CMK-OT2115-PC1_30IRC-F16.json` |
-| Build host | NOT-MEASURED — the manifest carries no host block; `build-image.sh` has no `uname`, `arch` or binfmt probe, and `provenance` describes the CONTAINER, which is identical native or emulated (D8-F14) |
+| Build host | NOT-MEASURED — the manifest carries no host block: it was written before `build-image.sh` grew the probe that fills one, and it is not reissued on another machine to fake one (D8-F14) |
 | Daemon baked into the rootfs | no |
 | Build status | complete |
 
@@ -142,8 +142,10 @@ Stages, in the order `build.sh all` runs them (`save` is omitted: it
 stamps a copy with the wall clock, and this project does not put
 wall-clock values in artifacts). More than one attempt means a
 compile or link step died and the retry resumed after the
-magic-number sweep; on the emulated path that was `cc1`, and the
-script cannot tell that case from any other (D8-F13):
+magic-number sweep; on the emulated path that was `cc1`. This table
+counts attempts and not causes: the script now diagnoses each
+failure from that attempt's own output (D8-F13), but the count is
+still a count.
 
 | Stage | Status | Attempts |
 | --- | --- | --- |
@@ -154,9 +156,11 @@ script cannot tell that case from any other (D8-F13):
 | app | ok | 1 |
 | firmware | ok | 1 |
 
-Every file the build produced, with the SHA-256 the brief asks
-for. The images themselves are gitignored — they are derived and
-large; this table is the record:
+Every file in the image set as it stands, with the SHA-256
+the brief asks for. 2 of them are NOT the
+build's own bytes — the post-build table under it says which
+and why. The images themselves are gitignored; this is the
+record:
 
 | Image file | Bytes | SHA-256 |
 | --- | --- | --- |
@@ -164,15 +168,61 @@ large; this table is the record:
 | `download.bin` | 268736 | `6f6b2e8adaa191efc5b858f994c16a1c44ba273032bb32074deeeed921c6cccb` |
 | `env.img` | 32768 | `5b60412eb56d854a8ca49f2881dee3523fddceacf958bd4ca1659fed6bfc4b60` |
 | `idblock.img` | 188416 | `7823eab4e9b911a69a972f11e4c47a2eaa51ab8209ecb6b33b486fd5d1bc14d5` |
-| `rootfs.img` | 208422912 | `8c1cb040db5b7c871ed5ae6ad71aff61939f545958b05715a346d8369cacdf71` |
-| `sd_update.img` | 511705088 | `9c88bf53e1f08eeaf256aabea97c008fb576ce7cf6110715b5c6a6a62eb96b64` |
+| `rootfs.img` | 176160768 | `0fecb3295d238cb1eea555d07bf8c38f5eb403f3962aa3f0bdfba8605906eb4a` |
+| `sd_update.img` | 479199232 | `2056bbf7e78f19f85aeff79a7457c82ff8d69dd57034a7638b7cdee01bdfe54f` |
 | `sd_update.txt` | 917 | `62da1666897c0bfb43a32b220362795dca3cc34d0112d91568e3ec9a58850130` |
 | `tftp_update.txt` | 878 | `a8df3eeaed92b900c48f455ba536c8ebad06bff9db619ec6d9ceeb9963ef1ab5` |
 | `uboot.img` | 262144 | `9e252dbe4269ca759065767d32a255195ce0a700e1a023c06bd36a610c518e91` |
 | `update.img` | 14752330 | `7170039bec8e4d76a5659384ff01f816573fcd714287c0252aa7c9f2253c9caa` |
 | `userdata.img` | 9999360 | `0ac0e0536c3d90b2a414896284980983f4a7e980233d28fbc7a456b47db9a646` |
 
-Total: 11 files, 749358349 B.
+Total: 11 files, 684590349 B.
+
+**Which of those hashes are not the build's.** These files
+were changed after the container wrote them, and this is the
+whole of it — every other row above is the build's own bytes:
+
+| Step | File | Before | After | Tool | Host |
+| --- | --- | --- | --- | --- | --- |
+| shrink-rootfs | `rootfs.img` | 208422912 B | 176160768 B | `resize2fs 1.47.0 (5-Feb-2023)` | `Linux 6.8.0-100-generic x86_64` |
+| pack-medium | `sd_update.img` | 511705088 B | 479199232 B | `skyweave2.edge.image.pack_medium` | `Darwin 25.5.0 arm64` |
+
+`rootfs.img` (shrink-rootfs): ext4 resized to 168M; the partition still grows to the end of the card. e2fsck clean; 3470 inodes and 113683 blocks still in use, 58349 free Before `8c1cb040db5b7c87...`, after `0fecb3295d238cb1...`.
+
+`sd_update.img` (pack-medium): every partition image at its declared offset, zeros elsewhere, padded to a whole MiB — the SDK packer's output reproduced Before `9c88bf53e1f08eea...`, after `2056bbf7e78f19f8...`.
+
+Where those images land on the medium, from the partition
+cmdline this build declared:
+`sd_update.img` is that layout as one raw image, every
+partition at its offset, and it is the file Phase B
+writes to a card. The last partition grows to the end of
+whatever card that is; the image stops after it.
+
+| Partition | Offset (B) | Declared | Image | Bytes | Reserved |
+| --- | --- | --- | --- | --- | --- |
+| env | 0 | 32768 | `env.img` | 32768 | 0 |
+| idblock | 32768 | 524288 | `idblock.img` | 188416 | 335872 |
+| uboot | 557056 | 262144 | `uboot.img` | 262144 | 0 |
+| boot | 819200 | 33554432 | `boot.img` | 3724800 | 29829632 |
+| userdata | 34373632 | 268435456 | `userdata.img` | 9999360 | 258436096 |
+| rootfs | 302809088 | grows to end | `rootfs.img` | 176160768 | - |
+
+That accounts for `sd_update.img` to the byte:
+190368256 B of image content, 288601600 B
+reserved inside declared partitions that their images
+do not fill, 229376 B of zeros after the last one,
+479199232 B in total. The reserved space is the
+partition table's and not the packer's: it is where
+`boot` and `userdata` are DECLARED to be, so shrinking
+it means declaring a different card (D8-F15).
+
+Against the declared budget of 500000000 B, that
+leaves 20800768 B of margin. The suite fails a
+manifest that busts it, and so does the packer that
+writes one. Those are the bytes a card receives; the
+file itself is written with holes, so it costs a
+fraction of that on disk and the two numbers are not
+the same measurement.
 
 ## 3. The recorded decisions, implemented
 
@@ -1013,19 +1063,18 @@ it. The first board session would meet the refusal, not the entry, and
 the clip length is a resolution decision made before C3 runs — so it
 belongs to the planning session, and it belongs there before Phase B.
 
-### D8-F12 — the image build exits 0 on a build its own manifest
-calls FAILED
+### D8-F12 — CLOSED: the image build exited 0 on a build its own
+manifest called FAILED
 
 `scripts/build-image.sh` writes its manifest from an inline python
-block, and that block re-derives the status: every stage passed but no
-image files were collected, so it sets `status = "FAILED"` with
-`failed = "collect (no image files were produced)"` — which is exactly
-the right judgement. But that `status` is a PYTHON-local name. The
-shell's `${status}` is still `complete`, so the guard on the last lines
-(`if [ "${status}" != "complete" ]`) does not fire and the script exits
-0.
+block, and that block re-derives the status: every stage passed but
+no image files were collected, so it set `status = "FAILED"` with
+`failed = "collect (no image files were produced)"` — the right
+judgement, reached and then dropped. That `status` was a PYTHON-local
+name; the shell's `${status}` was still `complete`, so the guard on
+the last lines never fired and the script exited 0.
 
-It is reachable rather than theoretical: the collect step is
+It was reachable rather than theoretical: the collect step is
 `cp -f "${SDK}/output/image/"*` with its errors swallowed by
 `2>/dev/null || true`, so a build whose stages all "succeeded" and whose
 output directory is empty exits successfully, prints a manifest saying
@@ -1034,31 +1083,48 @@ manifest — which is why the A2 procedure in this phase did, and why the
 stage table above is derived from the manifest rather than from an exit
 code.
 
-NOT FIXED HERE, deliberately. This phase is sanctioned to make exactly
-one fix (A3's) and this is not it. The fix is one line — export the
-python block's verdict and test THAT — and it is recorded with the lines
-so it is a decision, not an oversight.
+**Fixed.** The manifest block now ends with
+`sys.exit(0 if status == "complete" else 1)` and the shell runs it as
+the condition of an `if`, so the exit code IS the manifest's verdict
+and cannot be a second opinion about it. Tested both ways round and
+without docker: the suite extracts that python block from the
+committed script and runs it over a fabricated output directory —
+nothing collected exits 1 and writes FAILED, one file collected exits
+0 and writes complete.
 
-### D8-F13 — the image container advertises an emulation check that
-does not exist, and the check it does have misreports after one crash
+### D8-F13 — CLOSED: the image container advertised an emulation check
+that did not exist, and the check it had misreported after one crash
 
 `docker/Dockerfile.image` says of the build script: "The script says so
-out loud when it detects emulation." It does not. There is no `uname`,
-no `arch`, no qemu or binfmt probe anywhere in `build-image.sh`.
+out loud when it detects emulation." It did not. There was no
+`uname`, no `arch`, no qemu or binfmt probe anywhere in `build-image.sh`.
 
-What exists is `grep -q "internal compiler error"` over the stage log,
-used only to choose between two console messages after a failure. And
-the stage log is APPENDED across attempts, so once any attempt within a
-stage has produced an ICE, every later failure in that stage is reported
-as "emulated cc1 died" whatever actually killed it — including, on a
-native host, a failure that has nothing to do with a compiler.
+What it had was `grep -q "internal compiler error"` over the stage
+log, used only to choose between two console messages after a failure.
+And the stage log is APPENDED across attempts, so once any attempt
+within a stage had produced an ICE, every
+later failure in that stage was reported as "emulated cc1 died"
+whatever actually killed it — including, on a native host, a failure
+that has nothing to do with a compiler.
 
 This is the D8-F6 class: a document and its code disagreeing, found by
 running the thing rather than reading it. Consequence if shipped: an
 operator debugging a native build failure is handed a diagnosis about
-emulation. NOT FIXED HERE for the same reason as D8-F12; the fix to the
-comment is a comment, and the fix to the grep is to scope it to the
-current attempt.
+emulation.
+
+**Fixed, both halves.** The grep now reads only the bytes the
+CURRENT attempt appended, so the diagnosis is about the failure in
+hand. And `detect_build_host` makes the container's sentence true:
+`uname` alone cannot answer, because qemu reports the TARGET machine
+and an amd64 container on Apple Silicon says `x86_64` exactly like the
+Linux mirror does, so the probe compares that against `/proc/cpuinfo`,
+which the kernel writes about the HOST CPU and qemu-user does not
+fake. Measured on both container platforms of this project's Mac from
+the same pinned base: `linux/arm64` reports `emulated: no`,
+`linux/amd64` reports `emulated: yes`. The suite runs the probe
+function itself over fixture `/proc/cpuinfo` files, including the
+native-x86 case the mirror produces and this project's hardware
+cannot. An unrecognised pair answers `unknown` rather than guessing.
 
 ### D8-F14 — the image manifest does not record which machine built
 the image, and A2 makes that machine load-bearing
@@ -1080,17 +1146,177 @@ question un-asked, and the reader is not invited to infer the answer
 from the emulated-Mac paragraph earlier in that section, which
 describes an attempt that was abandoned.
 
-NOT FIXED HERE, deliberately, for the same reason as D8-F12 and
-D8-F13, plus one of its own: the fix writes a new field into a
-manifest, and the only way to produce a manifest carrying it is
-another image build. The hashes ARE the identity of the bytes and B2
-re-checks them against the flashed node, so a rebuild buys provenance
-for the build host and nothing else. The fix, for whoever runs the
-next build: add `"build_host": {"uname": ..., "emulated":
-<binfmt/qemu probe>}` beside `provenance` in the manifest python
-block. `edge/image.py` already reads `build_host` and section 2.1
-already prints whatever it finds there, so the report side needs no
-further change.
+**Fixed in the script, not yet in an artifact.**
+`build-image.sh` now probes the host and writes a `build_host`
+block — `uname`, `emulated`, and the comparison the verdict came
+from — beside `provenance`. The manifest here predates that
+probe and stays empty in that field, and the reason is worth
+being exact about, because this manifest HAS since been
+reissued: the post-build steps in 2.1 re-hashed its file table
+on a Mac. Re-hashing a file table is not building an image. The
+`build_host` block answers "which machine ran the build", no
+build has run since the probe landed, and filling it from
+whatever host last touched the file would be this finding
+inverted. Each post-build step records its own machine instead.
+The field fills itself at the next image build.
+
+### D8-F15 — the image set is a bootable SD CARD, and Phase B's
+procedure describes flashing internal storage
+
+`image/sd_update.txt` writes `env`, `idblock`, `uboot`, `boot` and
+`userdata`, and never `rootfs`. Read on its own that is a flash path
+which leaves a node running whatever root filesystem it already had —
+a new kernel over somebody else's userspace, and the board comes up, so
+nothing announces it.
+
+It is not that, and the reason matters more than the reassurance. Those
+two `.txt` files are U-Boot scripts the SDK generates from the partition
+cmdline (`project/scripts/mk-tftp_sd_update.sh`), and it skips any
+partition declared with `-` — grow to the end of the medium — because it
+has no size to write: `Partition Name (rootfs) is growup partiton,
+ignore!!!`. This build declares `-(rootfs)`, so rootfs is absent by
+construction. And for `RK_BOOT_MEDIUM=sd_card` the SDK generates both
+files in `emmc` mode, so their `mmc write` commands address an eMMC no
+Pico Pro Max device tree enables: the kernel DTS leaves `&emmc`
+disabled and the board DTS does not re-enable it, while it does enable
+`&sfc` with a `spi-nand` child. (That is what the device trees support;
+nobody here has read a schematic.) They are in `image/` because the SDK
+writes them there and the
+manifest hashes everything the build produced. **On this board config
+they are not a flash path at all.** Their `mmc write` commands go to MMC
+device 0 — this SDK's `cmd/mmc.c` defaults `curr_device` to 0 in
+`do_mmcops` before dispatching any `mmc` subcommand, and the scripts
+never select another — and `mmc0` is the `&emmc` alias, which no Pico
+Pro Max kernel DTS enables. So the first write fails rather than
+half-updating a node; the partial update those files describe is a
+hazard on the boards they were written for, not on this one.
+
+The SD path is `sd_update.img`, and it is complete: a raw image of the
+declared layout with every partition at its offset, rootfs included and
+byte-identical to `rootfs.img`. Section 2.1's layout table is derived
+from the manifest and accounts for the file to the byte. Nothing is
+missing from the image. (It is the whole medium only for a card exactly
+its size: `-(rootfs)` grows to the end of the card it is written to, so
+on a larger card the rootfs PARTITION extends past the end of the ext4
+inside it, which is the normal state of a filesystem and not a fault.)
+
+All of that is read off artifacts. No board has been flashed, so what a
+card DOES on power-up is derived and not measured: the chain checks out
+— idblock at sector 0x40 where the BootROM looks, the env at offset 0
+with `CONFIG_ENVF` listing `sys_bootargs`, `mmc1 = &sdmmc` in the SoC
+DTS, `CONFIG_CMDLINE_PARTITION` and ext4 in the kernel defconfig — but
+a coherent chain is a prediction. B3 is what turns it into a result.
+
+Two smaller things a bench session should know. The card carries no MBR
+or GPT — sector 0 is the env partition — so a host OS will call a
+written card unreadable and offer to initialise it; that is correct and
+the offer must be declined. And `boot.img`'s FIT cmdline says
+`root=/dev/mmcblk1p7` while the env says `root=/dev/mmcblk1p6`, which is
+the partition rootfs actually is. It resolves to p6 because U-Boot's env
+filter REPLACES a bootargs item it has a value for rather than appending
+— so the env wins as long as the env partition loads. If it ever does
+not, the FIT default names a seventh partition this layout does not
+have, and the failure will look like a kernel that cannot find its root
+rather than like an env problem. Worth knowing before it costs an hour.
+
+**What is wrong is what happens next.** With `RK_BOOT_MEDIUM=sd_card`
+the card IS the system: the env this build wrote carries
+`blkdevparts=mmcblk1:...` and `root=/dev/mmcblk1p6`, no `mtdparts`, and
+the SoC DTS aliases `mmc1` to `&sdmmc` — so `mmcblk1` is the card, and
+nothing on the SD path addresses the SPI NAND. (`update.img` and
+`download.bin` are the USB/maskrom path and do reach other media, but
+`update.img`'s own table is env, idblock, uboot, boot, userdata,
+package-file and bootloader — no rootfs there either.) Runbook B2 says
+to let the self-flash complete, power off, **remove the card**, and
+power back up; C0c says to write internal storage one partition at a
+time, rootfs last. Neither is executable with these bytes. Removing the
+card removes this image entirely — root filesystem, kernel and U-Boot —
+and three boards would come up not running it, in a row, before anyone
+suspected the image was fine.
+
+B2 is not imagining the flow it describes: the SDK has one, and
+`sd_update.txt` is its script. It expects a card with a FAT filesystem
+holding those files, which U-Boot reads (`fatload mmc 1`) and replays.
+A card written from `sd_update.img` has no filesystem at all — sector 0
+is the env partition — so there is nothing for that flow to find. Two
+SD flows, one artifact, and the runbook describes the other one.
+
+**The board config is not the thing to change.** Samuel confirmed in the
+2026-08-14 session that the nodes run from SD cards, which is what this
+build already is; the alternative —
+`BoardConfig-SPI_NAND-Buildroot-RV1106_Luckfox_Pico_Pro_Max-IPC.mk`,
+a different layout with a 210M ubifs rootfs, needing a full rebuild
+because this ext4 is not writable to it — is not wanted. So what has to
+change is the PROCEDURE: B2 keeps the card in, and C0c cannot write
+internal storage because there is none in play. What C0c becomes is
+still open, and it is a real question rather than an editorial one: a
+node running from a card cannot rewrite the partition it is running
+from, so the standing update path is a second card, an A/B layout, or a
+write from a ramdisk. That belongs with the D8.2 OTA item, and it is
+recorded as unanswered rather than improvised here.
+
+**The 500 MB budget, and what it cost to meet it.** The medium the build
+produced was 488 MiB — 511,705,088 B — against a declared budget of
+500000000 B, and the obvious reading of that file is
+wrong in a way worth writing down: about 212 MiB of it is image content,
+a zero-scan finds a 63 MiB run at the end, and it looks like a packer
+padding to a fixed size. It is not. That run is free space INSIDE the
+rootfs ext4, whose superblock spans its whole file, and the rest of the
+gap is where the partition cmdline puts `boot` (32M) and `userdata`
+(256M) — which is why the rootfs partition starts at 302,809,088 B and
+why 288,601,600 B of the medium is space reserved for partitions their
+images do not fill. The packer already trims: 473,088 B followed the
+last byte of content, alignment to a whole MiB and nothing more.
+
+That was checked rather than argued, once, while the SDK's own medium
+was still the one on disk: writing each partition image at the offset
+in 2.1's table and padding to the next whole MiB reproduced
+`sd_update.img` byte for byte —
+`9c88bf53e1f08eeaf256aabea97c008fb576ce7cf6110715b5c6a6a62eb96b64`,
+which is the `from_sha256` in 2.1's post-build table. That is what says
+the medium is its partitions and nothing else: no filesystem of its own,
+no metadata, no packer slack to reclaim, and a C0c-style per-partition
+write lands the same bytes as a whole-medium write. It also licensed the
+repack below — a packer that reproduces the SDK's output is one whose
+output can stand in for it.
+
+The shipped medium is this project's own pack of the shrunk rootfs, so
+that comparison cannot be repeated against it and the suite does not
+pretend otherwise. What the suite checks now is the weaker standing
+thing: that the medium on disk IS the composition of the partition
+images on disk, so a partition image that moves without a repack is
+caught before a card is written.
+
+So the only size this project can change without the Buildroot tree is
+the rootfs FILESYSTEM, which the build sizes to its partition rather
+than to its contents. `scripts/shrink-rootfs.sh` resizes it in the
+pinned base container and `python -m skyweave2.edge.image pack` repacks
+the medium and republishes the manifest; 2.1's post-build table records
+both, with the before and after hashes, because these bytes are no
+longer the ones the SDK wrote and a provenance record that hid that
+would be worse than no record.
+
+**What it costs the node: nothing, and that is checked rather than
+hoped.** The rootfs the build produced carries
+`/etc/init.d/S20linkmount` with `bootmedium=sd_card`, and for the
+partition whose mount point is `IGNORE` — which is what
+`RK_PARTITION_FS_TYPE_CFG` declares rootfs to be — and which is the
+device it booted from, it runs `resize2fs` on it at every boot. The
+filesystem grows to fill the partition, and the partition is `-(rootfs)`
+growing to the end of whatever card it is on. A smaller image therefore
+means a shorter card write, not a smaller `/`: the node ends up with the
+card it has either way, and 168 MiB is a shipping size with headroom,
+not a floor. The contents are unchanged — verified by mounting both
+images and comparing 3,462 tree entries with their modes, owners and
+symlink targets, and the SHA-256 of all 2,430 regular files.
+
+**The right fix, for the next build that has the SDK tree in front of
+it:** declare a smaller `userdata`. 256M of `/userdata` on a bring-up
+node buys nothing and costs 246 MB of reserved zeros in every card
+write, which is eight times what shrinking the rootfs recovered. That
+is a board-config change, it moves every partition after it, and it is
+a decision for the planning session rather than something to slip into
+a repack — the same reason the board-medium question above is one.
 
 ## 10. E-series status
 

@@ -40,14 +40,14 @@
       "sha256": "7823eab4e9b911a69a972f11e4c47a2eaa51ab8209ecb6b33b486fd5d1bc14d5"
     },
     {
-      "bytes": 208422912,
+      "bytes": 176160768,
       "name": "rootfs.img",
-      "sha256": "8c1cb040db5b7c871ed5ae6ad71aff61939f545958b05715a346d8369cacdf71"
+      "sha256": "0fecb3295d238cb1eea555d07bf8c38f5eb403f3962aa3f0bdfba8605906eb4a"
     },
     {
-      "bytes": 511705088,
+      "bytes": 479199232,
       "name": "sd_update.img",
-      "sha256": "9c88bf53e1f08eeaf256aabea97c008fb576ce7cf6110715b5c6a6a62eb96b64"
+      "sha256": "2056bbf7e78f19f85aeff79a7457c82ff8d69dd57034a7638b7cdee01bdfe54f"
     },
     {
       "bytes": 917,
@@ -73,6 +73,30 @@
       "bytes": 9999360,
       "name": "userdata.img",
       "sha256": "0ac0e0536c3d90b2a414896284980983f4a7e980233d28fbc7a456b47db9a646"
+    }
+  ],
+  "post_build": [
+    {
+      "file": "rootfs.img",
+      "from_bytes": 208422912,
+      "from_sha256": "8c1cb040db5b7c871ed5ae6ad71aff61939f545958b05715a346d8369cacdf71",
+      "host": "Linux 6.8.0-100-generic x86_64",
+      "note": "ext4 resized to 168M; the partition still grows to the end of the card. e2fsck clean; 3470 inodes and 113683 blocks still in use, 58349 free",
+      "step": "shrink-rootfs",
+      "to_bytes": 176160768,
+      "to_sha256": "0fecb3295d238cb1eea555d07bf8c38f5eb403f3962aa3f0bdfba8605906eb4a",
+      "tool": "resize2fs 1.47.0 (5-Feb-2023)"
+    },
+    {
+      "file": "sd_update.img",
+      "from_bytes": 511705088,
+      "from_sha256": "9c88bf53e1f08eeaf256aabea97c008fb576ce7cf6110715b5c6a6a62eb96b64",
+      "host": "Darwin 25.5.0 arm64",
+      "note": "every partition image at its declared offset, zeros elsewhere, padded to a whole MiB \u2014 the SDK packer's output reproduced",
+      "step": "pack-medium",
+      "to_bytes": 479199232,
+      "to_sha256": "2056bbf7e78f19f85aeff79a7457c82ff8d69dd57034a7638b7cdee01bdfe54f",
+      "tool": "skyweave2.edge.image.pack_medium"
     }
   ],
   "provenance": {

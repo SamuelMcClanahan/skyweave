@@ -2,3 +2,11 @@
 __pycache__/
 *.pyc
 .venv/
+site/
+# large local artifacts — never commit (output/ is ~61G)
+output/
+skyweave-last-online-test-frames/
+tmp/
+# broken convenience symlinks
+/skyweave
+/skyweave2

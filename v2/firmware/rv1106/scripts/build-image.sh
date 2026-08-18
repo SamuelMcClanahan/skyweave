@@ -30,6 +30,20 @@ SDK="${SKYWEAVE_SDK:-/opt/luckfox-pico}"
 OUT_DIR="${IMAGE_OUT_DIR:-image}"
 BUILD_USER="${IMAGE_BUILD_USER:-builder}"
 
+# The file the emulation probe reads (see detect_build_host). Overridable for
+# one reason: it is the only way to test the classification against a machine
+# this project does not own. The suite runs the real function over fixture
+# cpuinfos, including the native-x86 case the mirror produces and nothing here
+# can produce.
+PROC_CPUINFO="${PROC_CPUINFO:-/proc/cpuinfo}"
+
+# The container's provenance file, overridable for the same reason: the suite
+# runs THIS script end to end against a stub SDK and asserts the exit code it
+# gives a FAILED manifest (D8-F12). That test is the only thing standing
+# between the guard at the bottom of this file and a silent regression, and it
+# cannot run if the script insists on a path only the container has.
+PROVENANCE_FILE="${IMAGE_PROVENANCE:-/etc/skyweave-image-provenance}"
+
 # The board this project flashes. DECLARED here rather than chosen at a lunch
 # menu, because the menu's numbering is a property of the SDK's day and this
 # has to be the same board on the Mac, on the Linux mirror and in six months.
@@ -74,6 +88,72 @@ ATTEMPTS="${BUILD_ATTEMPTS:-8}"
 STAGES="${IMAGE_STAGES:-uboot kernel rootfs media app firmware}"
 
 say() { printf '\n=== %s\n' "$*"; }
+
+# WHICH machine this build ran on, and whether that machine was emulating
+# another one. Announced out loud and recorded in the manifest.
+#
+# Runbook A2 makes the answer load-bearing — "build on the Linux mirror
+# (native x86 Linux; the emulated-Mac path is what crashed)" — and nothing
+# else in the record can tell the two cases apart: `provenance` is the
+# CONTAINER's, byte-identical native or emulated, and `uname` alone is no help
+# because qemu reports the TARGET machine, so an amd64 container on Apple
+# Silicon says `x86_64` exactly like the mirror does (D8-F13, D8-F14).
+#
+# What does not lie is /proc/cpuinfo: the kernel writes it and it describes the
+# HOST CPU, which qemu-user does not fake. Measured on this project's Apple
+# Silicon Mac, two containers from the same pinned base image:
+#
+#   native arm64   uname -m=aarch64  cpuinfo: `CPU implementer`, no `flags`
+#   emulated amd64 uname -m=x86_64   cpuinfo: `CPU implementer`, no `flags`
+#
+# So the disagreement between the reported machine and the host CPU's family
+# IS the emulation, and a native x86 build disagrees with nothing. Unknown
+# stays unknown: a probe that cannot tell must not answer.
+detect_build_host() {
+    machine="$(uname -m)"
+    kernel="$(uname -s) $(uname -r)"
+
+    if grep -q '^flags[[:space:]]*:' "${PROC_CPUINFO}" 2>/dev/null ||
+        grep -q '^vendor_id' "${PROC_CPUINFO}" 2>/dev/null; then
+        host_cpu="x86"
+    elif grep -q '^CPU implementer' "${PROC_CPUINFO}" 2>/dev/null; then
+        host_cpu="arm"
+    else
+        host_cpu="unknown"
+    fi
+
+    case "${machine}" in
+        x86_64 | i?86) machine_cpu="x86" ;;
+        aarch64 | arm*) machine_cpu="arm" ;;
+        *) machine_cpu="unknown" ;;
+    esac
+
+    if [ "${machine_cpu}" = "unknown" ] || [ "${host_cpu}" = "unknown" ]; then
+        emulated="unknown"
+    elif [ "${machine_cpu}" = "${host_cpu}" ]; then
+        emulated="no"
+    else
+        emulated="yes"
+    fi
+
+    # Written as a file for the manifest block to parse, the same way the
+    # stage table and the container's provenance are: recorded once, read
+    # back, never retyped into two places that can disagree.
+    mkdir -p "${OUT_DIR}/logs"
+    {
+        printf 'uname\t%s %s\n' "${kernel}" "${machine}"
+        printf 'emulated\t%s\n' "${emulated}"
+        printf 'probe\tuname -m=%s, /proc/cpuinfo describes %s\n' \
+            "${machine}" "${host_cpu}"
+    } > "${OUT_DIR}/logs/build-host.tsv"
+
+    echo "build host: ${kernel} ${machine}"
+    echo "emulated: ${emulated} (uname -m=${machine}, /proc/cpuinfo describes ${host_cpu})"
+    if [ "${emulated}" = "yes" ]; then
+        echo "This build is EMULATED. Expect the SDK's cc1 to segfault on random"
+        echo "files and the retry loop below to earn its keep; expect hours."
+    fi
+}
 
 # A retry alone is not enough, and finding out why cost a build.
 #
@@ -124,7 +204,10 @@ PYTHON
 }
 
 say "build provenance"
-cat /etc/skyweave-image-provenance
+cat "${PROVENANCE_FILE}"
+
+say "build host"
+detect_build_host
 
 if [ ! -d "${SDK}/project/cfg/BoardConfig_IPC" ]; then
     echo "REFUSING: ${SDK} does not look like the Luckfox SDK. This script runs" >&2
@@ -171,12 +254,23 @@ for stage in ${STAGES}; do
         attempt=$((attempt + 1))
         echo "--- ${stage}: attempt ${attempt} of ${ATTEMPTS} (jobs=${JOBS})"
         touch "${OUT_DIR}/logs/.attempt-stamp"
+        # Where THIS attempt's output begins. The stage log is appended across
+        # attempts, so a whole-file grep reports every later failure in the
+        # stage as a dead cc1 once any earlier attempt produced one —
+        # including, on a native host, a failure with no compiler in it at all
+        # (D8-F13). The diagnosis has to be about the failure in hand.
+        if [ -f "${OUT_DIR}/logs/${stage}.log" ]; then
+            log_bytes_before=$(wc -c <"${OUT_DIR}/logs/${stage}.log")
+        else
+            log_bytes_before=0
+        fi
         if as_builder "cd '${SDK}' && ./build.sh ${stage}" \
                 >>"${OUT_DIR}/logs/${stage}.log" 2>&1; then
             stage_status="ok"
             break
         fi
-        if grep -q "internal compiler error" "${OUT_DIR}/logs/${stage}.log"; then
+        if tail -c "+$((log_bytes_before + 1))" "${OUT_DIR}/logs/${stage}.log" |
+                grep -q "internal compiler error"; then
             echo "--- ${stage}: emulated cc1 died; retrying (make resumes)"
         else
             echo "--- ${stage}: failed without a compiler crash; retrying anyway"
@@ -206,16 +300,27 @@ fi
 ls -l "${OUT_DIR}" || true
 
 say "writing ${OUT_DIR}/image-manifest.json"
-IMAGE_OUT_DIR="${OUT_DIR}" \
+# The manifest's verdict is this script's verdict (D8-F12).
+#
+# The block below can DOWNGRADE a build the shell believed had completed:
+# every stage returns zero and the collect step — a `cp` whose errors are
+# swallowed — produces nothing, which is a FAILED build that only the python
+# can see. It used to see it, write it, and exit 0, because `status` in there
+# is a python-local name while the shell's was still `complete`. So the block
+# now exits with its own verdict, and the guard below tests THAT rather than
+# the expectation the shell carried into it.
+if IMAGE_OUT_DIR="${OUT_DIR}" \
 IMAGE_STATUS="${status}" \
 IMAGE_FAILED_STAGE="${failed_stage}" \
 IMAGE_BOARD_CONFIG="${BOARD_CONFIG}" \
+IMAGE_PROVENANCE="${PROVENANCE_FILE}" \
 IMAGE_SDK="${SDK}" \
 python3 - <<'PYTHON'
 import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 out = Path(os.environ["IMAGE_OUT_DIR"])
@@ -224,7 +329,7 @@ board_config = os.environ["IMAGE_BOARD_CONFIG"]
 
 # The container's own provenance file, parsed rather than retyped.
 provenance = {}
-prov_path = Path("/etc/skyweave-image-provenance")
+prov_path = Path(os.environ.get("IMAGE_PROVENANCE", "/etc/skyweave-image-provenance"))
 if prov_path.exists():
     for line in prov_path.read_text(encoding="utf-8").splitlines():
         if "=" in line:
@@ -246,6 +351,17 @@ if config_path.exists():
         match = re.match(r"^export\s+([A-Z_0-9]+)=(.*)$", line.strip())
         if match and match.group(1) in wanted:
             declared[match.group(1)] = match.group(2).strip().strip('"')
+
+# The machine this build ran on, as the shell's probe measured it. Parsed
+# rather than retyped, same as the provenance file above: the row the report
+# prints is the probe's answer, not a second copy of it (D8-F13, D8-F14).
+build_host = {}
+host_file = out / "logs" / "build-host.tsv"
+if host_file.exists():
+    for line in host_file.read_text(encoding="utf-8").splitlines():
+        if "\t" in line:
+            key, value = line.split("\t", 1)
+            build_host[key.strip()] = value.strip()
 
 stages = []
 stage_file = out / "logs" / "stages.tsv"
@@ -296,6 +412,7 @@ manifest = {
     "board_config": board_config,
     "declared": declared,
     "provenance": provenance,
+    "build_host": build_host,
     "stages": stages,
     "files": files,
     "daemon_baked_in": False,
@@ -305,11 +422,15 @@ manifest = {
 )
 print(json.dumps({"status": status, "files": len(files), "failed_stage": failed},
                  indent=2))
+# The exit code IS the manifest's status. Anything else lets a build the
+# manifest calls FAILED leave a zero behind it (D8-F12).
+sys.exit(0 if status == "complete" else 1)
 PYTHON
-
-if [ "${status}" != "complete" ]; then
-    echo "IMAGE BUILD FAILED at stage '${failed_stage}'. The manifest records it." >&2
+then
+    say "done"
+else
+    echo "IMAGE BUILD FAILED. That verdict is the manifest block's own: read" >&2
+    echo "${OUT_DIR}/image-manifest.json for which stage, and if the block died" >&2
+    echo "before writing one, that is the failure." >&2
     exit 1
 fi
-
-say "done"

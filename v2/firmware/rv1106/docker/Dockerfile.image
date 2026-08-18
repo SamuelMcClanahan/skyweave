@@ -16,8 +16,14 @@
 # toolchain binaries are x86_64 ELF, so this is linux/amd64 and it runs under
 # emulation on Apple Silicon. A Buildroot build is four orders of magnitude
 # more compiler invocations than the daemon build, so what is merely slow
-# there is the difference between a laptop and a Linux PC here. The script
-# says so out loud when it detects emulation; see the report.
+# there is the difference between a laptop and a Linux PC here.
+#
+# The script says so out loud when it detects emulation, and it detects it by
+# comparing `uname -m` against the CPU family in /proc/cpuinfo — see
+# `detect_build_host` in scripts/build-image.sh. `uname` alone cannot answer:
+# qemu reports the TARGET machine, so this container says x86_64 on both
+# hosts. The verdict goes into the manifest's `build_host` block, which is
+# what the report's build-host row publishes (D8-F13, D8-F14).
 
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
