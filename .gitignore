@@ -10,3 +10,7 @@ tmp/
 # broken convenience symlinks
 /skyweave
 /skyweave2
+# agent-generated docs + logs (untracked for now)
+v2/docs/REMOTE_ACCESS_SETUP.md
+v2/docs/D8_1_C1_FINDINGS.md
+*.log
