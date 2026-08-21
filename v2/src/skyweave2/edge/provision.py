@@ -81,6 +81,11 @@ class NodeSpec:
     ssh_host: str = ""
     ssh_user: str = "root"
     ssh_port: int = 22
+    #: The node's uClibc loader has no ldconfig and no ld.so.cache, so the
+    #: media libraries under /oem/usr/lib (librve, librockit, librga,
+    #: librkaiq) resolve only if the launch environment says where they are
+    #: (F-C1-1). Empty = no env prefix, which is what a bare host run wants.
+    ld_library_path: str = "/oem/usr/lib"
 
     def as_dict(self) -> dict:
         return {
@@ -94,6 +99,7 @@ class NodeSpec:
             "ssh_host": self.ssh_host,
             "ssh_user": self.ssh_user,
             "ssh_port": self.ssh_port,
+            "ld_library_path": self.ld_library_path,
         }
 
 
@@ -415,7 +421,13 @@ def daemon_command(
             "frames, PTS stride, budget): a loop has no trailer, and a run "
             "bounded by a signal cannot be compared exactly"
         )
-    argv = [remote_binary]
+    argv = []
+    if spec.ld_library_path:
+        # F-C1-1: the node's loader finds the media libraries only through
+        # the environment, and spawn()'s `setsid nohup` wrapper preserves a
+        # prefix but sets nothing itself — so the launch command carries it.
+        argv += ["env", f"LD_LIBRARY_PATH={spec.ld_library_path}"]
+    argv.append(remote_binary)
     if ram_clip_remote is not None:
         # Spelled by the single builder in daemon.py, never retyped here.
         argv += ram_loop.as_daemon_args(ram_clip_remote)

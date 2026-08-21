@@ -22,6 +22,7 @@ void sw_config_defaults(sw_config_t *config)
     config->ram_loop_pts_stride_ns = 0;
     config->ram_loop_period_ns = 0;
     config->ram_budget_mb = SW_RAM_BUDGET_DEFAULT_MB;
+    snprintf(config->meminfo_path, sizeof(config->meminfo_path), "/proc/meminfo");
     snprintf(config->jetson_host, sizeof(config->jetson_host), "127.0.0.1");
     config->measurement_port = 5601;
     config->control_port = 5602;
@@ -209,6 +210,8 @@ void sw_config_usage(const char *argv0)
             "    --ram-loop-pts-stride-ns S capture_ts_ns advance per pass\n"
             "    --ram-loop-period-ns P     per-frame pace (0 = unpaced)\n"
             "    --ram-budget-mb N          clip+detector+fixed ceiling, decimal MB\n"
+            "    --meminfo-path PATH        where the heap preflight reads MemAvailable\n"
+            "                               (default /proc/meminfo; absent = skipped)\n"
             "\n"
             "  detector:\n"
             "    --detector soft|ive    portable C GMM2 (host) or RK_MPI_IVE_GMM2\n"
@@ -403,6 +406,12 @@ int sw_config_parse_args(sw_config_t *config, int argc, char **argv)
         } else if (strcmp(arg, "--ram-budget-mb") == 0) {
             NEED_VALUE(arg);
             config->ram_budget_mb = atoi(argv[++i]);
+        } else if (strcmp(arg, "--meminfo-path") == 0) {
+            NEED_VALUE(arg);
+            if (copy_arg(config->meminfo_path, sizeof(config->meminfo_path),
+                         argv[++i], "meminfo-path") != 0) {
+                return -1;
+            }
         } else if (strcmp(arg, "--capture-vi") == 0) {
             config->source = SW_SOURCE_VI;
             sources++;

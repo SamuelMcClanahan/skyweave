@@ -61,8 +61,7 @@ sw_detector_t *sw_detect_open_ive(const sw_detector_config_t *config)
 
 #include "rk_comm_ive.h"
 #include "rk_mpi_ive.h"
-#include "rk_mpi_mb.h"
-#include "rk_mpi_sys.h"
+#include "rk_mpi_mmz.h"
 
 typedef struct {
     sw_detector_config_t config;
@@ -76,6 +75,7 @@ typedef struct {
     MB_BLK match_blk;
     MB_BLK model_blk;
     MB_BLK blob_blk;
+    MB_BLK ccl_mem_blk;
 
     IVE_SRC_IMAGE_S src;
     IVE_DST_IMAGE_S fg;
@@ -83,6 +83,7 @@ typedef struct {
     IVE_DST_IMAGE_S match;
     IVE_MEM_INFO_S model;
     IVE_DST_MEM_INFO_S blob;
+    IVE_MEM_INFO_S ccl_mem;
 
     IVE_GMM2_CTRL_S gmm2_ctrl;
     IVE_CCL_CTRL_S ccl_ctrl;
@@ -137,23 +138,42 @@ static uint16_t to_u10q0(float value, const char *name)
     return (uint16_t)rounded;
 }
 
+/* The STANDALONE MMZ allocator, not rockit's. Rockit's RK_MPI_SYS_MmzAlloc
+ * hands back blocks whose RK_MPI_MB_Handle2PhysAddr is 0 even after a
+ * successful RK_MPI_SYS_Init (measured on a board, F-C1-5), and the RVE is a
+ * no-IOMMU AXI master whose kernel driver programs whatever address
+ * userspace supplies into the engine unvalidated — a DMA to physical 0 is
+ * the bus wedge that killed two boards. Rockchip's own IVE sample allocates
+ * every engine buffer exactly this way: CMA-typed, uncacheable, physical
+ * address from RK_MPI_MMZ_Handle2PhysAddr. */
 static int alloc_block(MB_BLK *blk, RK_U64 *phy, RK_U64 *vir, RK_U32 size)
 {
-    MB_EXT_CONFIG_S ext;
-    SW_UNUSED(ext);
-    if (RK_MPI_SYS_MmzAlloc(blk, NULL, NULL, size) != RK_SUCCESS) {
-        SW_LOG_ERR("RK_MPI_SYS_MmzAlloc failed for %u B", size);
+    if (RK_MPI_MMZ_Alloc(blk, size,
+                         RK_MMZ_ALLOC_TYPE_CMA | RK_MMZ_ALLOC_UNCACHEABLE) !=
+        RK_SUCCESS) {
+        SW_LOG_ERR("RK_MPI_MMZ_Alloc failed for %u B", size);
         return -1;
     }
-    *vir = (RK_U64)(uintptr_t)RK_MPI_MB_Handle2VirAddr(*blk);
-    *phy = RK_MPI_MB_Handle2PhysAddr(*blk);
+    *vir = (RK_U64)(uintptr_t)RK_MPI_MMZ_Handle2VirAddr(*blk);
+    *phy = RK_MPI_MMZ_Handle2PhysAddr(*blk);
+    /* F-C1-5 guard: an address the allocator cannot vouch for is a refusal,
+     * never a submission — the engine would wedge the SoC, not error. */
+    if (*phy == 0 || *vir == 0) {
+        SW_LOG_ERR("MMZ block of %u B came back phys 0x%llx / virt 0x%llx: an "
+                   "unverifiable address must not reach a no-IOMMU DMA engine "
+                   "(F-C1-5). Refusing before the bus wedges.",
+                   size, (unsigned long long)*phy, (unsigned long long)*vir);
+        RK_MPI_MMZ_Free(*blk);
+        *blk = NULL;
+        return -1;
+    }
     return 0;
 }
 
 static void free_block(MB_BLK *blk)
 {
     if (*blk != NULL) {
-        RK_MPI_SYS_MmzFree(*blk);
+        RK_MPI_MMZ_Free(*blk);
         *blk = NULL;
     }
 }
@@ -172,6 +192,7 @@ static void ive_release_blocks(ive_state_t *state)
     free_block(&state->match_blk);
     free_block(&state->model_blk);
     free_block(&state->blob_blk);
+    free_block(&state->ccl_mem_blk);
 }
 
 /* The block sizes ive_alloc asks MMZ for, in ONE place. ive_alloc allocates
@@ -201,8 +222,16 @@ static ive_geometry_t ive_geometry(const ive_state_t *state, int width, int heig
 
 static size_t ive_footprint_for(const ive_geometry_t *geometry)
 {
-    /* Four U8 planes (src, fg, bg, match), the model store, and the blob. */
-    return 4u * (size_t)geometry->plane + (size_t)geometry->model_bytes +
+    /* Four U8 planes (src, fg, bg, match), the model store, the blob, and
+     * CCL's staging memory. The staging term is the hardware's demand, not
+     * ours: librve refuses CCL outright with "at least (w * h) bytes of
+     * staging memory needed for ccl" (measured on a board, 2026-08-20), so
+     * one more plane joins the arithmetic — which makes the real per-pixel
+     * figure 41 B, not the 40 B the D8-F11 arithmetic declared. The
+     * harness-side mirror still says 40 B/px; the delta is recorded in
+     * D8_1_C1_FINDINGS.md for the planning session, and the daemon's budget
+     * check uses THIS figure, the one that allocates. */
+    return 5u * (size_t)geometry->plane + (size_t)geometry->model_bytes +
            sizeof(IVE_CCBLOB_S);
 }
 
@@ -224,7 +253,9 @@ static int ive_alloc(ive_state_t *state, int width, int height)
         alloc_block(&state->model_blk, &state->model.u64PhyAddr,
                     &state->model.u64VirAddr, model_bytes) != 0 ||
         alloc_block(&state->blob_blk, &state->blob.u64PhyAddr,
-                    &state->blob.u64VirAddr, (RK_U32)sizeof(IVE_CCBLOB_S)) != 0) {
+                    &state->blob.u64VirAddr, (RK_U32)sizeof(IVE_CCBLOB_S)) != 0 ||
+        alloc_block(&state->ccl_mem_blk, &state->ccl_mem.u64PhyAddr,
+                    &state->ccl_mem.u64VirAddr, plane) != 0) {
         SW_LOG_ERR("IVE allocation failed; releasing the blocks already taken "
                    "rather than orphaning them and retrying next frame");
         ive_release_blocks(state);
@@ -232,12 +263,13 @@ static int ive_alloc(ive_state_t *state, int width, int height)
         state->height = 0;
         return -1;
     }
-    /* Only after all six blocks succeeded: a partial allocation released
+    /* Only after all seven blocks succeeded: a partial allocation released
      * everything above and left the geometry at zero, so this stays zero too
      * rather than claiming memory nobody holds. */
     state->footprint_bytes = ive_footprint_for(&geometry);
     state->model.u32Size = model_bytes;
     state->blob.u32Size = (RK_U32)sizeof(IVE_CCBLOB_S);
+    state->ccl_mem.u32Size = plane;
     memset((void *)(uintptr_t)state->model.u64VirAddr, 0, model_bytes);
 
     state->src.au32Stride[0] = stride;
@@ -245,17 +277,32 @@ static int ive_alloc(ive_state_t *state, int width, int height)
     state->src.u32Height = (RK_U32)height;
     state->src.enType = IVE_IMAGE_TYPE_U8C1;
     state->fg = state->src;
-    state->fg.au64PhyAddr[0] = RK_MPI_MB_Handle2PhysAddr(state->fg_blk);
-    state->fg.au64VirAddr[0] = (RK_U64)(uintptr_t)RK_MPI_MB_Handle2VirAddr(state->fg_blk);
+    state->fg.au64PhyAddr[0] = RK_MPI_MMZ_Handle2PhysAddr(state->fg_blk);
+    state->fg.au64VirAddr[0] =
+        (RK_U64)(uintptr_t)RK_MPI_MMZ_Handle2VirAddr(state->fg_blk);
     state->bg = state->src;
-    state->bg.au64PhyAddr[0] = RK_MPI_MB_Handle2PhysAddr(state->bg_blk);
-    state->bg.au64VirAddr[0] = (RK_U64)(uintptr_t)RK_MPI_MB_Handle2VirAddr(state->bg_blk);
+    state->bg.au64PhyAddr[0] = RK_MPI_MMZ_Handle2PhysAddr(state->bg_blk);
+    state->bg.au64VirAddr[0] =
+        (RK_U64)(uintptr_t)RK_MPI_MMZ_Handle2VirAddr(state->bg_blk);
     state->match = state->src;
-    state->match.au64PhyAddr[0] = RK_MPI_MB_Handle2PhysAddr(state->match_blk);
+    state->match.au64PhyAddr[0] = RK_MPI_MMZ_Handle2PhysAddr(state->match_blk);
     state->match.au64VirAddr[0] =
-        (RK_U64)(uintptr_t)RK_MPI_MB_Handle2VirAddr(state->match_blk);
+        (RK_U64)(uintptr_t)RK_MPI_MMZ_Handle2VirAddr(state->match_blk);
     state->width = width;
     state->height = height;
+    /* The addresses the engine will master, on the record BEFORE the first
+     * submission: if a board still wedges, the last committed log line says
+     * whether these looked like CMA or like garbage (F-C1-5 forensics). */
+    SW_LOG_INFO("IVE MMZ blocks: src 0x%llx fg 0x%llx bg 0x%llx match 0x%llx "
+                "model 0x%llx (%u B) blob 0x%llx ccl 0x%llx — physical, from "
+                "RK_MPI_MMZ_Handle2PhysAddr; the RVE consumes these raw.",
+                (unsigned long long)state->src.au64PhyAddr[0],
+                (unsigned long long)state->fg.au64PhyAddr[0],
+                (unsigned long long)state->bg.au64PhyAddr[0],
+                (unsigned long long)state->match.au64PhyAddr[0],
+                (unsigned long long)state->model.u64PhyAddr, model_bytes,
+                (unsigned long long)state->blob.u64PhyAddr,
+                (unsigned long long)state->ccl_mem.u64PhyAddr);
     return 0;
 }
 
@@ -288,7 +335,11 @@ static void ive_configure(ive_state_t *state)
     state->ccl_ctrl.enMode = IVE_CCL_MODE_4C;
     state->ccl_ctrl.u16InitAreaThr = (RK_U16)state->config.min_area_px;
     state->ccl_ctrl.u16Step = 1;
-    state->ccl_ctrl.stMem = state->blob;
+    /* CCL's staging memory is its OWN plane-sized block, never the blob:
+     * stMem is the algorithm's working area (>= w*h bytes, enforced by
+     * librve), while the blob is the region-table output. Handing the 3 KB
+     * blob to both was the post-wedge failure mode of 2026-08-20. */
+    state->ccl_ctrl.stMem = state->ccl_mem;
 }
 
 static int ive_apply(sw_detector_t *self, const uint8_t *luma, int width, int height,

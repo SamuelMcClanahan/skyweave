@@ -1230,3 +1230,103 @@ def test_the_daemon_announces_the_advance_at_every_startup(edge_build_dir, tmp_p
     # advancing a synthetic timestamp does not make it a board clock.
     for envelope in _envelopes(run):
         assert envelope.clock_domain is ClockDomain.SYNTHETIC
+
+
+# ---------------------------------------------------------------------------
+# The heap preflight (F-C1-2)
+# ---------------------------------------------------------------------------
+
+
+def test_the_heap_preflight_refuses_when_the_heap_cannot_hold_the_arena(
+    edge_build_dir, tmp_path
+):
+    """The arithmetic budget is pool-blind; the arena malloc is not.
+
+    On the node the detector's term lives in the media heap while the clip
+    arena is a plain malloc, so a clip can pass the 160 MB arithmetic and
+    still be unservable from the ~29 MB of heap actually available — the
+    first board run was OOM-killed exactly there (F-C1-2). The daemon reads
+    MemAvailable from a declared path before the malloc and refuses with
+    every number named, leaving no stats file, like every refusal.
+    """
+    plan = _plan()
+    clip = _write_clip(tmp_path / "clip.swij", plan)
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:        1000 kB\nMemAvailable:      64 kB\n")
+    argv = list(_declaration(plan).as_daemon_args(str(clip)))
+    argv += ["--meminfo-path", str(meminfo)]
+    refused, stats_path = _run_raw(edge_build_dir, tmp_path / "starved", argv, plan)
+    assert refused.returncode != 0
+    assert not stats_path.exists(), "a refused run wrote counters for a run it did not do"
+    assert "heap preflight refuses" in refused.stderr
+    assert f"MemAvailable is {64 * 1024} B" in refused.stderr
+    arena = benchmark.ram_clip_bytes(*RAM_RESOLUTION, CLIP_FRAMES)
+    assert f"{arena} B arena" in refused.stderr
+
+
+def test_a_missing_meminfo_skips_the_preflight_and_says_so(
+    edge_build_dir, tmp_path
+):
+    """No MemAvailable (any non-Linux host) = no preflight, stated out loud.
+
+    Skipping silently would make "the preflight passed" and "the preflight
+    never ran" the same stderr, and the collected run.log is where a bench
+    session tells them apart.
+    """
+    plan = _plan()
+    clip = _write_clip(tmp_path / "clip.swij", plan)
+    argv = list(_declaration(plan).as_daemon_args(str(clip)))
+    argv += ["--meminfo-path", str(tmp_path / "no-such-meminfo")]
+    run, stats_path = _run_raw(edge_build_dir, tmp_path / "skipped", argv, plan)
+    assert run.returncode == 0, run.stderr
+    assert stats_path.exists()
+    assert "heap preflight skipped" in run.stderr
+
+
+def test_the_heap_preflight_reports_the_measured_value_it_read(
+    edge_build_dir, tmp_path
+):
+    """The passing line carries the number, labeled measured-at-preload.
+
+    Proved by pointing the daemon at a declared meminfo and reading the same
+    number back; /proc is not fixture material.
+    """
+    plan = _plan()
+    clip = _write_clip(tmp_path / "clip.swij", plan)
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        "MemTotal:      16000000 kB\n"
+        "MemFree:        8000000 kB\n"
+        "MemAvailable:   8000000 kB\n"
+    )
+    argv = list(_declaration(plan).as_daemon_args(str(clip)))
+    argv += ["--meminfo-path", str(meminfo)]
+    run, stats_path = _run_raw(edge_build_dir, tmp_path / "measured", argv, plan)
+    assert run.returncode == 0, run.stderr
+    assert stats_path.exists()
+    assert f"heap preflight: MemAvailable {8000000 * 1024} B" in run.stderr
+
+
+def test_the_default_meminfo_path_is_wired_without_the_flag(
+    edge_build_dir, tmp_path
+):
+    """No --meminfo-path: the daemon must reach for /proc/meminfo itself.
+
+    On a Linux host that file exists and the preflight line must appear; on a
+    host without /proc/meminfo the skip line must name the default path. A
+    typo in the default string would fail both branches — and would be
+    invisible to every other preflight test, because they all declare an
+    explicit path.
+    """
+    plan = _plan()
+    clip = _write_clip(tmp_path / "clip.swij", plan)
+    argv = list(_declaration(plan).as_daemon_args(str(clip)))
+    run, stats_path = _run_raw(edge_build_dir, tmp_path / "default", argv, plan)
+    assert run.returncode == 0, run.stderr
+    assert stats_path.exists()
+    if Path("/proc/meminfo").exists():
+        assert "heap preflight: MemAvailable" in run.stderr
+        assert "/proc/meminfo" in run.stderr
+    else:
+        assert ("heap preflight skipped: no MemAvailable at /proc/meminfo"
+                in run.stderr)

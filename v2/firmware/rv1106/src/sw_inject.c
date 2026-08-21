@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -251,11 +252,53 @@ static int ram_next(sw_inject_t *inject, sw_inject_frame_t *frame)
     return 0;
 }
 
+/* MemAvailable in BYTES from a meminfo-format file, 0 on success. Kept
+ * separate from the decision so the preflight reads as one block above the
+ * malloc it guards. */
+static int read_mem_available(const char *path, uint64_t *out_bytes)
+{
+    FILE *fp;
+    char line[128];
+    char *end;
+    unsigned long long kib;
+
+    if (path == NULL || path[0] == '\0') {
+        return -1;
+    }
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        return -1;
+    }
+    /* strtoull rather than sscanf's %llu: printf's ll qualifier is proven on
+     * this uClibc (the budget INFO line printed on a real board), scanf's is
+     * not, and a scanf that assigned 32 of these 64 bits would produce a
+     * wrong verdict rather than a loud failure. strtoull skips the leading
+     * whitespace itself. */
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (strncmp(line, "MemAvailable:", 13) != 0) {
+            continue;
+        }
+        end = NULL;
+        kib = strtoull(line + 13, &end, 10);
+        if (end == line + 13) {
+            break; /* a label with no number is "no MemAvailable" */
+        }
+        fclose(fp);
+        *out_bytes = (uint64_t)kib * 1024ULL;
+        return 0;
+    }
+    fclose(fp);
+    return -1;
+}
+
 int sw_inject_preload_ram(sw_inject_t *inject, uint64_t total_frames,
-                          int64_t pts_stride_ns, uint64_t byte_budget)
+                          int64_t pts_stride_ns, uint64_t byte_budget,
+                          const char *meminfo_path)
 {
     uint64_t frame_bytes;
     uint64_t arena_bytes;
+    uint64_t meta_bytes;
+    uint64_t heap_available;
     uint64_t clip_span_ns;
     uint64_t passes;
     uint8_t *arena;
@@ -304,6 +347,42 @@ int sw_inject_preload_ram(sw_inject_t *inject, uint64_t total_frames,
                    "can address",
                    (unsigned long long)arena_bytes);
         return -1;
+    }
+
+    /* HEAP PREFLIGHT (F-C1-2). The arithmetic budget the caller enforced is
+     * pool-blind: its detector term lives in the media heap, but the arena
+     * below is a plain malloc against the Linux heap, a far smaller pool on
+     * the node. The first board run passed 158.3 MB <= 160 MB and was then
+     * OOM-killed at a 35.8 MB malloc against ~29 MB of MemAvailable. So read
+     * the heap actually left and refuse LOUD, before the OOM killer refuses
+     * silently. No margin is applied: MemAvailable is itself an estimate,
+     * and this check catches pool-scale disconnects, not kilobyte edges. No
+     * MemAvailable at the declared path (any non-Linux host build) skips the
+     * check, out loud — the arithmetic budget still governs. */
+    meta_bytes = (uint64_t)inject->frame_count * sizeof(sw_inject_ram_meta_t);
+    if (read_mem_available(meminfo_path, &heap_available) == 0) {
+        SW_LOG_INFO("heap preflight: MemAvailable %llu B read from %s against a "
+                    "%llu B arena + %llu B metadata. Measured at preload, not "
+                    "part of the arithmetic budget.",
+                    (unsigned long long)heap_available, meminfo_path,
+                    (unsigned long long)arena_bytes,
+                    (unsigned long long)meta_bytes);
+        if (arena_bytes + meta_bytes > heap_available) {
+            SW_LOG_ERR("heap preflight refuses: the clip arena is a heap "
+                       "allocation, and MemAvailable is %llu B (%s), under the "
+                       "%llu B arena + %llu B metadata. The arithmetic budget "
+                       "models the daemon's total across pools; this malloc "
+                       "draws on the heap alone (F-C1-2).",
+                       (unsigned long long)heap_available, meminfo_path,
+                       (unsigned long long)arena_bytes,
+                       (unsigned long long)meta_bytes);
+            return -1;
+        }
+    } else {
+        SW_LOG_INFO("heap preflight skipped: no MemAvailable at %s; the "
+                    "arithmetic budget is the only gate on this host",
+                    (meminfo_path == NULL || meminfo_path[0] == '\0')
+                        ? "(no path)" : meminfo_path);
     }
 
     arena = (uint8_t *)malloc((size_t)arena_bytes);

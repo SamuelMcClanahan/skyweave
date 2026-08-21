@@ -423,7 +423,8 @@ int main(int argc, char **argv)
         }
         if (sw_inject_preload_ram(&inject, (uint64_t)config.ram_loop_frames,
                                   config.ram_loop_pts_stride_ns,
-                                  budget - det - fixed) != 0) {
+                                  budget - det - fixed,
+                                  config.meminfo_path) != 0) {
             exit_code = 1;
             goto cleanup;
         }

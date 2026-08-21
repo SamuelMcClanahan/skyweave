@@ -103,6 +103,13 @@ typedef struct {
     int64_t ram_loop_pts_stride_ns; /* capture_ts_ns advance per pass */
     int64_t ram_loop_period_ns;    /* per-frame pace; 0 = unpaced */
     int ram_budget_mb;             /* SW_RAM_BUDGET_DEFAULT_MB unless overridden */
+    /* Where the RAM loop's heap preflight reads MemAvailable. The budget
+     * above is pool-blind — its detector term lives in the media heap while
+     * the clip arena is a plain malloc — so before that malloc the daemon
+     * reads the heap actually left and refuses loud rather than letting the
+     * OOM killer refuse silently (F-C1-2). A path with no MemAvailable (any
+     * non-Linux host build) skips the check, out loud. */
+    char meminfo_path[256];        /* --meminfo-path; default /proc/meminfo */
 
     char jetson_host[64];
     int measurement_port;

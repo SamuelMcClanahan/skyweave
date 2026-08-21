@@ -105,9 +105,15 @@ int sw_inject_open_listen(sw_inject_t *inject, int port);
  * detector's real footprint; always BEFORE the frame loop, because there is
  * no allocation in the frame loop. Every parameter is a DECLARATION the
  * harness made. The file descriptor is CLOSED before this returns, so storage
- * leaves the measured path entirely. Returns 0 on success. */
+ * leaves the measured path entirely. Returns 0 on success.
+ *
+ * `meminfo_path` feeds the heap preflight (F-C1-2): the arena is a heap
+ * malloc while the budget's detector term is not, so the preload checks the
+ * arena against MemAvailable and refuses rather than OOM. No MemAvailable at
+ * that path = the check is skipped, and logged as skipped. */
 int sw_inject_preload_ram(sw_inject_t *inject, uint64_t total_frames,
-                          int64_t pts_stride_ns, uint64_t byte_budget);
+                          int64_t pts_stride_ns, uint64_t byte_budget,
+                          const char *meminfo_path);
 
 /* 0: a frame was read; 1: end of stream (a trailer, or the RAM loop's
  * declared frame budget); -1: error. */

@@ -292,7 +292,9 @@ def test_a_ram_clip_path_with_a_space_survives_the_shell():
         ),
     )
     parts = shlex.split(command)
-    assert parts[0] == "/root/sky weave/skyweave-edge"
+    # The F-C1-1 env prefix leads; the spaced binary path must survive after it.
+    assert parts[0] == "env"
+    assert parts[2] == "/root/sky weave/skyweave-edge"
     assert "/root/sky weave/ram.swij" in parts
     assert parts[parts.index("--inject-ram") + 1] == "/root/sky weave/ram.swij"
 
@@ -309,7 +311,9 @@ def test_paths_with_spaces_survive_the_shell():
         stream_remote="/root/sky weave/inject.swij",
     )
     parts = shlex.split(command)
-    assert parts[0] == "/root/sky weave/skyweave-edge"
+    # The F-C1-1 env prefix leads; the spaced binary path must survive after it.
+    assert parts[0] == "env"
+    assert parts[2] == "/root/sky weave/skyweave-edge"
     assert "/root/sky weave/inject.swij" in parts
 
 
@@ -332,7 +336,11 @@ def test_the_local_transport_translates_node_paths_including_spaced_ones(tmp_pat
         stream_remote="/root/sky weave/inject.swij",
     )
     parts = shlex.split(transport._translate(command))
-    assert parts[0] == f"{root}/root/sky weave/skyweave-edge"
+    # The env prefix is not a path: translation must leave `env` and the
+    # LD_LIBRARY_PATH= token alone while rewriting the absolute paths after it.
+    assert parts[0] == "env"
+    assert parts[1] == "LD_LIBRARY_PATH=/oem/usr/lib"
+    assert parts[2] == f"{root}/root/sky weave/skyweave-edge"
     assert f"{root}/root/sky weave/inject.swij" in parts
     # Relative paths and non-path arguments are left alone.
     assert "--detector" in parts and "ive" in parts
@@ -362,3 +370,41 @@ def test_the_ssh_transport_never_prompts_and_defaults_to_strict_host_keys():
     assert argv[-1] == "root@192.168.1.21"
     relaxed = provision.SshTransport(spec=spec, strict_host_key_checking="accept-new")
     assert "StrictHostKeyChecking=accept-new" in relaxed._ssh_argv()
+
+
+# ---------------------------------------------------------------------------
+# The loader path (F-C1-1)
+# ---------------------------------------------------------------------------
+
+
+def test_the_daemon_launch_sets_the_loader_path_the_node_needs(tmp_path):
+    """F-C1-1: /oem/usr/lib is not on the node's uClibc loader path.
+
+    There is no ldconfig and no ld.so.cache on the image, so librve and the
+    rockit stack resolve only through LD_LIBRARY_PATH. The launch command
+    carries it — spawn()'s ``setsid nohup`` wrapper preserves a prefix but
+    sets nothing itself — because a daemon that dies at the dynamic linker
+    looks exactly like a crash from the host side.
+    """
+    plan, _ = _stream(tmp_path)
+    config = benchmark.benchmark_config(192, 108, plan)
+    command = provision.daemon_command(
+        "/root/skyweave/skyweave-edge", config, _spec(tmp_path),
+        stream_remote="/root/skyweave/inject.swij",
+    )
+    assert command.startswith(
+        "env LD_LIBRARY_PATH=/oem/usr/lib /root/skyweave/skyweave-edge "
+    )
+
+
+def test_an_empty_loader_path_launches_with_no_env_prefix(tmp_path):
+    """A bare host exercise says so with an empty string, and gets no prefix."""
+    plan, _ = _stream(tmp_path)
+    config = benchmark.benchmark_config(192, 108, plan)
+    command = provision.daemon_command(
+        "/root/skyweave/skyweave-edge", config,
+        _spec(tmp_path, ld_library_path=""),
+        stream_remote="/root/skyweave/inject.swij",
+    )
+    assert command.startswith("/root/skyweave/skyweave-edge ")
+    assert "LD_LIBRARY_PATH" not in command
