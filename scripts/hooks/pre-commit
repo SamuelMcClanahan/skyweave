@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Secret guard — refuses a commit whose STAGED ADDITIONS look like a credential
+# or whose filenames should never be tracked. This is the local first line;
+# .github/workflows/secret-scan.yml (gitleaks) is the server-side backstop.
+#
+# Enable once per clone:   git config core.hooksPath scripts/hooks
+# Bypass a false positive: git commit --no-verify   (then fix the rule if it
+#                          keeps mis-firing — do not make bypassing a habit).
+set -u
+
+# Added lines only (leading '+', excluding the '+++' file header), across the
+# staged additions/modifications. Removing a secret must never be blocked.
+# The scanner's own files are excluded — their rule definitions contain the
+# very words the rules match, and are not themselves secrets.
+added="$(git diff --cached --unified=0 --diff-filter=AM -- . \
+  ':(exclude)scripts/hooks/*' ':(exclude).github/workflows/secret-scan.yml' \
+  | grep -E '^\+' | grep -vE '^\+\+\+' || true)"
+
+fail=0
+hit() { printf '  \342\234\227 %s\n' "$1"; fail=1; }
+
+# 1. Private key material — highest confidence.
+printf '%s' "$added" | grep -qE -- '-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----' \
+  && hit "private key block"
+
+# 2. Provider tokens with recognizable prefixes — high confidence, low noise.
+printf '%s' "$added" | grep -qE \
+  'ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|tskey-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|sk-[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}' \
+  && hit "provider API/service token"
+
+# 3. Tailscale interactive-auth URL (ephemeral, but never belongs in git).
+printf '%s' "$added" | grep -qE 'login\.tailscale\.com/[a-z]/[a-f0-9]+' \
+  && hit "Tailscale auth URL"
+
+# 4. A secret name next to a value: `password: x`, key="...", or `password `x``.
+#    Requires an assignment operator or a quote/backtick right after the name,
+#    so prose like "password rotation" does not trip it.
+printf '%s' "$added" | grep -qiE \
+  '(pass(word|wd)?|pwd|secret|api[_-]?key|access[_-]?(key|token)|auth[_-]?token|client[_-]?secret)["'"'"'`[:space:]]*[:=][[:space:]]*["'"'"'`]?[^[:space:]"'"'"'`]{4,}' \
+  && hit "hardcoded secret assignment"
+printf '%s' "$added" | grep -qiE \
+  '(pass(word|wd)?|pwd|secret)[[:space:]]+`[^`]{3,}`' \
+  && hit "credential in backtick-quoted value"
+
+# 5. Filenames that must never be tracked (AI logs churn + carry rig facts;
+#    key/cert files are secrets by nature). Mirrors .gitignore, belt-and-braces.
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  case "$f" in
+    *_LOG.md|*_FINDINGS.md|*_PROGRESS.md|*_HANDOFF.md|*.log \
+    |*.pem|*.key|*.pfx|*.p12|*.ppk|*id_rsa|*id_ed25519|*.env|*.env.*)
+      hit "disallowed file staged: $f (see .gitignore)";;
+  esac
+done < <(git diff --cached --name-only --diff-filter=A)
+
+if [ "$fail" -ne 0 ]; then
+  cat >&2 <<'EOF'
+
+COMMIT BLOCKED — the staged changes look like they contain a secret (above).
+  • Remove it, and rotate the credential if it was ever real.
+  • Genuine false positive? Re-run with:  git commit --no-verify
+EOF
+  exit 1
+fi
+exit 0
