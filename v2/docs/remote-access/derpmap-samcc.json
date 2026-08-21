@@ -1,0 +1,20 @@
+"derpMap": {
+  "OmitDefaultRegions": false,
+  "Regions": {
+    "900": {
+      "RegionID":   900,
+      "RegionCode": "skyweave",
+      "RegionName": "SkyWeave DERP",
+      "Nodes": [
+        {
+          "Name":     "1",
+          "RegionID": 900,
+          "HostName": "derp.samcc.work",
+          "IPv4":     "20.69.94.244",
+          "DERPPort": 443,
+          "STUNPort": 3478
+        }
+      ]
+    }
+  }
+}
