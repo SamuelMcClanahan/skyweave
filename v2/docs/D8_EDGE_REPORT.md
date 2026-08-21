@@ -529,7 +529,7 @@ detector term is not identical to this table's on the IVE arm, and the
 next paragraph is that difference rather than a footnote to it.
 
 **The daemon's detector term for the IVE arm is STRICTLY LARGER than the
-column below, by one `IVE_CCBLOB_S`.** `ive_footprint_for` sums four U8
+column below, by one `IVE_CCBLOB_S`.** `ive_footprint_for` sums five U8
 planes, the model store AND that blob; this table counts the first two.
 The blob is an SDK type that appears nowhere in this checkout and the IVE
 arm does not compile off the node, so the term cannot be written here —
@@ -578,14 +578,14 @@ the top row.
 
 | Resolution | IVE detector state | Clip frames (derived) | Clip bytes | Daemon fixed (bound) | Total | Budget |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2304x1296 | 119,439,360 B | 12 | 35,831,808 B | 3,051,520 B | 158,322,688 B | 160,000,000 B |
-| 1536x864 | 53,084,160 B | 78 | 103,514,112 B | 1,392,640 B | 157,990,912 B | 160,000,000 B |
-| 1152x648 | 29,859,840 B | 171 | 127,650,816 B | 812,032 B | 158,322,688 B | 160,000,000 B |
+| 2304x1296 | 122,425,344 B | 6 | 17,915,904 B | 3,051,520 B | 143,392,768 B | 160,000,000 B |
+| 1536x864 | 54,411,264 B | 18 | 23,887,872 B | 1,392,640 B | 79,691,776 B | 160,000,000 B |
+| 1152x648 | 30,606,336 B | 36 | 26,873,856 B | 812,032 B | 58,292,224 B | 160,000,000 B |
 
 The clip lengths are DERIVED, not chosen. At 2304x1296 a 24-frame
-clip would total 194,154,496 B against the 160,000,000 B
+clip would total 197,140,480 B against the 160,000,000 B
 line and does not clear it, which is why the derived length there is
-12. Each length is the longest that both fits the budget with
+6. Each length is the longest that both fits the budget with
 the detector and the daemon's fixed footprint counted AND makes
 `clip_frames * 1e9 / fps` a whole
 number of nanoseconds — the second condition is a correctness
@@ -940,7 +940,7 @@ link, a *sustained 30 fps* claim at any D4 resolution cannot be made on
 the board. What CAN be made is a detector-bound ceiling from a
 RAM-resident clip, with the frame count stated — and section 8 states
 it. The derived clip lengths are
-12 at 2304x1296, 78 at 1536x864, 171 at 1152x648,
+6 at 2304x1296, 18 at 1536x864, 36 at 1152x648,
 derived arithmetic and not Measured.
 
 ### D8-F9 — health and measurement share one port, so a monitor must
@@ -1013,10 +1013,10 @@ Worked from the allocators rather than from either document:
 
 | Term | Bytes at 2304x1296 | Where it comes from |
 | --- | --- | --- |
-| IVE detector state | 119,439,360 | `ive_alloc`: four U8 planes at `stride*height`, plus `plane * model_num * 12` at the compiled-in `model_num = 3`. EXCLUDES `ive_footprint_for`'s third term, `sizeof(IVE_CCBLOB_S)` — an SDK type absent from this checkout, declared at 65,536 B in section 8 |
+| IVE detector state | 122,425,344 | `ive_alloc`: five U8 planes at `stride*height` (src, fg, bg, match, CCL staging), plus `plane * model_num * 12` at the compiled-in `model_num = 3`. EXCLUDES `ive_footprint_for`'s third term, `sizeof(IVE_CCBLOB_S)` — an SDK type absent from this checkout, declared at 65,536 B in section 8 |
 | A 24-frame clip | 71,663,616 | `frames * proc_w * proc_h`, the arena the preload malloc's |
 | Daemon fixed | 3,051,520 | `inject.luma_capacity` (one luma frame) plus a DECLARED 65,536 B bound on the five `sizeof()` terms `main.c` adds |
-| Total | 194,154,496 | against a 160,000,000 B line |
+| Total | 197,140,480 | against a 160,000,000 B line |
 
 The D0 entry is not wrong about what it says: 72 MB IS within 256 MB,
 the node's PHYSICAL total, which is the budget that entry names. It is
@@ -1028,7 +1028,7 @@ budget. Both readings cannot govern the same clip.
 model bank. Its rows are the v1 ISP node's — a full-res NV12 ring, a
 quarter-res stream, RGA scratch, the RKNN runtime — and under RAM-loop
 injection the D8 daemon allocates none of them. What it does allocate —
-119,439,360 B at the top resolution — is larger than every row in
+122,425,344 B at the top resolution — is larger than every row in
 that table put together. The comparison A4 asks for is not like for
 like, in either direction.
 
@@ -1044,7 +1044,7 @@ clip + detector + fixed at startup, logs every term, and REFUSES rather
 than shortening the clip. The harness derives the longest clip that
 clears THAT SAME THREE-TERM SUM and keeps the looped PTS exact, and the
 derivation is in section 8 with every term. The answer at the top
-resolution is 12 frames, not 24.
+resolution is 6 frames, not 24.
 
 **The two sums were not the same sum when this finding was first
 written.** Its own text said "the daemon computes clip + detector +

@@ -1171,7 +1171,7 @@ def generate(evidence: dict | None) -> str:
     a("")
     blob_bound = benchmark.IVE_BLOB_DECLARED_BOUND_BYTES
     a("**The daemon's detector term for the IVE arm is STRICTLY LARGER than the")
-    a("column below, by one `IVE_CCBLOB_S`.** `ive_footprint_for` sums four U8")
+    a("column below, by one `IVE_CCBLOB_S`.** `ive_footprint_for` sums five U8")
     a("planes, the model store AND that blob; this table counts the first two.")
     a("The blob is an SDK type that appears nowhere in this checkout and the IVE")
     a("arm does not compile off the node, so the term cannot be written here —")
@@ -1702,7 +1702,8 @@ def generate(evidence: dict | None) -> str:
     a("| Term | Bytes at 2304x1296 | Where it comes from |")
     a("| --- | --- | --- |")
     a(f"| IVE detector state | {f11_detector:,} | "
-      "`ive_alloc`: four U8 planes at `stride*height`, plus "
+      "`ive_alloc`: five U8 planes at `stride*height` (src, fg, bg, match, "
+      "CCL staging), plus "
       "`plane * model_num * 12` at the compiled-in `model_num = 3`. EXCLUDES "
       "`ive_footprint_for`'s third term, `sizeof(IVE_CCBLOB_S)` — an SDK type "
       "absent from this checkout, declared at "

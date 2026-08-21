@@ -991,9 +991,9 @@ def test_the_budget_arithmetic_pins_the_derived_lengths_against_declared_literal
     frames" — that entry was reasoned against the 256 MB PHYSICAL total and is
     silent about both other terms. The derived lengths are what does clear it.
     """
-    assert benchmark.detector_state_bytes(2304, 1296, "ive") == 119_439_360
-    assert benchmark.detector_state_bytes(1536, 864, "ive") == 53_084_160
-    assert benchmark.detector_state_bytes(1152, 648, "ive") == 29_859_840
+    assert benchmark.detector_state_bytes(2304, 1296, "ive") == 122_425_344
+    assert benchmark.detector_state_bytes(1536, 864, "ive") == 54_411_264
+    assert benchmark.detector_state_bytes(1152, 648, "ive") == 30_606_336
     assert benchmark.detector_state_bytes(2304, 1296, "soft") == 137_355_264
 
     # The IVE stride rounds width up to 16, and all three D4 widths are already
@@ -1020,7 +1020,7 @@ def test_the_budget_arithmetic_pins_the_derived_lengths_against_declared_literal
         + benchmark.ram_clip_bytes(2304, 1296, 24)
         + benchmark.daemon_fixed_bytes(2304, 1296)
     )
-    assert full_res_24 == 194_154_496
+    assert full_res_24 == 197_140_480
     assert full_res_24 > benchmark.RAM_LOOP_BUDGET_BYTES
 
     # THREE terms, because the daemon sums three. `daemon_fixed_bytes` is one
@@ -1035,10 +1035,13 @@ def test_the_budget_arithmetic_pins_the_derived_lengths_against_declared_literal
             benchmark.DAEMON_STRUCT_ALLOWANCE_BYTES + width * height
         )
 
+    # Heap-bound derived lengths at USABLE_HEAP_BYTES = 28 MB (the measured
+    # value, board .104, 2026-08-20). On a 128 MB board the ~28 MB usable heap
+    # binds the clip everywhere — the 160 MB budget is inert for the derivation.
     derived = {
-        (2304, 1296): (12, 158_322_688),
-        (1536, 864): (78, 157_990_912),
-        (1152, 648): (171, 158_322_688),
+        (2304, 1296): (6, 143_392_768),
+        (1536, 864): (18, 79_691_776),
+        (1152, 648): (36, 58_292_224),
     }
     for (width, height), (frames, total) in derived.items():
         assert benchmark.ram_loop_max_frames(width, height, "ive") == frames
@@ -1053,18 +1056,33 @@ def test_the_budget_arithmetic_pins_the_derived_lengths_against_declared_literal
         assert row["fits"] is True
         assert "NOT a measurement" in row["basis"]
 
-    # The row this finding was written about. Without the fixed term the
-    # derivation returned 174 frames and 159,750,144 B, which `fits` called
-    # True and the daemon refused by 517,856 B.
-    naive = benchmark.detector_state_bytes(1152, 648, "ive") + benchmark.ram_clip_bytes(
-        1152, 648, 174
+    # 2304x1296's IVE state alone is ~122 MB against the 66 MB CMA pool, so the
+    # grid is UNREALIZABLE however short the clip: `fits` (the daemon's budget
+    # arithmetic) is still True above, but `realizable` (which also asks the
+    # detector's own pool) is False. The other two grids fit both pools. This is
+    # the second pool the pool-blind budget cannot see.
+    assert benchmark.detector_fits_cma(2304, 1296, "ive") is False
+    assert benchmark.detector_fits_cma(1536, 864, "ive") is True
+    assert benchmark.detector_fits_cma(1152, 648, "ive") is True
+    assert benchmark.ram_budget_row(2304, 1296, None, "ive")["realizable"] is False
+    assert benchmark.ram_budget_row(1536, 864, None, "ive")["realizable"] is True
+    assert benchmark.ram_budget_row(1152, 648, None, "ive")["realizable"] is True
+
+    # The finding this now records: the 160 MB budget is INERT on a 128 MB
+    # board — the heap floor is what shortens the clip. At 1152x648 the
+    # budget-only derivation (heap ceiling lifted above budget) allows 171
+    # period-exact frames, whose arena alone is 127,650,816 B; the ~28 MB usable
+    # heap holds 36. The daemon's heap preflight (sw_inject.c) refuses the
+    # 171-frame clip the pool-blind budget calls a fit, which is exactly why the
+    # harness derives against heap.
+    budget_only = benchmark.ram_loop_max_frames(
+        1152, 648, "ive", benchmark.RAM_LOOP_BUDGET_BYTES, 30.0,
+        usable_heap_bytes=benchmark.RAM_LOOP_BUDGET_BYTES,
     )
-    assert naive == 159_750_144
-    assert naive <= benchmark.RAM_LOOP_BUDGET_BYTES
-    assert naive + 1152 * 648 > benchmark.RAM_LOOP_BUDGET_BYTES, (
-        "the luma term alone puts the old 174-frame row over the line, on any "
-        "target, whatever the struct sizes are"
-    )
+    assert budget_only == 171
+    assert benchmark.ram_loop_max_frames(1152, 648, "ive") == 36
+    assert benchmark.ram_clip_bytes(1152, 648, budget_only) == 127_650_816
+    assert benchmark.ram_clip_bytes(1152, 648, budget_only) > benchmark.USABLE_HEAP_BYTES
 
 
 def test_the_omitted_ive_blob_term_cannot_move_a_derived_clip_length(monkeypatch):

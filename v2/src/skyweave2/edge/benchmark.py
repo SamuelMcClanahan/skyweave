@@ -134,6 +134,27 @@ SOURCE_MODES = (
 #: the daemon ships behind ``--ram-budget-mb``.
 RAM_LOOP_BUDGET_BYTES = 160_000_000
 
+#: The heap a 128 MB board actually leaves the daemon for the RAM-loop clip and
+#: its ``fixed`` residue. The IVE detector's state does NOT come from here — it
+#: is a CMA/MMZ allocation (:func:`detector_state_bytes`), a different pool — so
+#: the clip is bounded by THIS number while the detector is bounded by CMA, and
+#: the 160 MB ``--ram-budget-mb`` arithmetic the daemon enforces is a THIRD,
+#: pool-blind ceiling the clip must still clear. MEASURED from ``MemAvailable``
+#: on a live board (2026-08-20, board .104: ~36 MB at rest) and held
+#: conservatively below it; Chosen from that sweep, never a spec.
+#: ``sw_inject.c``'s heap preflight refuses at runtime when the arena+metadata
+#: exceed the real ``MemAvailable``; this is the harness twin that keeps a
+#: derived clip from being one the board would refuse.
+USABLE_HEAP_BYTES = 28_000_000
+
+#: The rk CMA/MMZ pool the IVE detector's state allocates from — a DIFFERENT
+#: pool from the heap the clip and ``fixed`` live in. A grid whose detector
+#: state exceeds this cannot run on the board however short the clip is, so it
+#: is UNREALIZABLE and the report says so rather than publishing a clip nobody
+#: can load. Set from the board's kernel cmdline ``rk_dma_heap_cma=66M`` (the
+#: whole CMA reserve is handed to the rk heap at boot).
+CMA_POOL_BYTES = 66_000_000
+
 #: Declared systematic, recorded beside every RAM-loop result. It is folded
 #: into no bound and appears in no tolerance table — a DDR read of a resident
 #: clip is not an ISP write, and pretending the difference is covered by a
@@ -212,7 +233,7 @@ def detector_state_bytes(
 
     ``ive`` mirrors ``ive_geometry`` / ``ive_footprint_for`` in
     ``sw_detect_ive.c`` for the first two of the C's three terms — stride
-    rounded up to 16, four U8 planes, plus 12 bytes per model per pixel — and
+    rounded up to 16, five U8 planes, plus 12 bytes per model per pixel — and
     DELIBERATELY OMITS the third, ``sizeof(IVE_CCBLOB_S)``. The omission is
     declared (:data:`IVE_BLOB_DECLARED_BOUND_BYTES`) rather than silent, and the
     reason it cannot be closed here is that the type is an SDK header's, absent
@@ -238,7 +259,11 @@ def detector_state_bytes(
     if detector == "ive":
         stride = (proc_width + 15) & ~15
         plane = stride * proc_height
-        return 4 * plane + plane * model_num * 12
+        # Five U8 planes: src, fg, bg, match, and the CCL staging buffer the C
+        # detector allocates (sw_detect_ive.c ccl_mem, plane-sized) — plus the
+        # per-model bytes. ~41 B/px at model_num 3, up from 40 before the
+        # staging buffer was added (F-C1-5 / F-C1-6 hardware bring-up).
+        return 5 * plane + plane * model_num * 12
     if detector == "soft":
         # 3 float planes per model, then fg, match, label and area.
         return proc_width * proc_height * (model_num * 3 * 4 + 1 + 1 + 4 + 4)
@@ -248,6 +273,25 @@ def detector_state_bytes(
 def ram_clip_bytes(proc_width: int, proc_height: int, clip_frames: int) -> int:
     """The arena a preloaded clip occupies: luma only, one contiguous block."""
     return frame_bytes(proc_width, proc_height) * clip_frames
+
+
+def detector_fits_cma(
+    proc_width: int,
+    proc_height: int,
+    detector: str = "ive",
+    cma_pool_bytes: int = CMA_POOL_BYTES,
+) -> bool:
+    """Whether the detector's OWN pool can hold its state on the board.
+
+    The IVE detector allocates from CMA/MMZ, not the heap the clip uses, so its
+    fit is a SEPARATE question from the budget/heap clip derivation — a grid can
+    have a perfectly good derived clip and still be unrunnable because its
+    detector state does not fit CMA. The soft arm allocates from the heap and
+    touches no CMA pool, so it always 'fits' this pool by not using it.
+    """
+    if detector != "ive":
+        return True
+    return detector_state_bytes(proc_width, proc_height, detector) <= cma_pool_bytes
 
 
 #: The five ``sizeof()`` terms in the daemon's ``fixed`` — components, event,
@@ -304,6 +348,7 @@ def ram_loop_max_frames(
     detector: str = "ive",
     budget_bytes: int = RAM_LOOP_BUDGET_BYTES,
     fps: float = 30.0,
+    usable_heap_bytes: int = USABLE_HEAP_BYTES,
 ) -> int:
     """The longest clip that fits the budget AND has an exact per-pass stride.
 
@@ -316,19 +361,31 @@ def ram_loop_max_frames(
     that is why the full-res clip is 12 frames and not the 13 the byte budget
     alone would allow.
 
-    The room is the budget less the detector's state AND less the daemon's
-    ``fixed`` term (:func:`daemon_fixed_bytes`), because the daemon's check is
-    ``clip + detector + fixed > budget``. Subtracting only the detector is what
-    made the published 1152x648 row a clip the daemon refuses.
+    The room is the SMALLER of two pools. The daemon's arithmetic check is
+    ``clip + detector + fixed > budget`` (pool-blind, the 160 MB ceiling), but
+    on a 128 MB board the clip malloc and the ``fixed`` residue both come from
+    the ~35 MB Linux heap while the detector's state is a CMA/MMZ allocation, a
+    different pool. So the clip may not exceed EITHER the arithmetic room OR the
+    heap the board actually has, and the room is the ``min`` of the two.
+    Subtracting only the detector from the budget is what made the published
+    1152x648 row a clip the daemon refuses; ignoring the heap is what made every
+    derived clip OOM on 128 MB hardware (F-C1-2).
 
-    Returns 0 when the detector's own state already spends the budget, which is
-    a true answer and not an error: the caller refuses with the arithmetic.
+    ``detector_state_bytes`` is NOT subtracted from the heap term — it is a CMA
+    allocation, not heap. Whether the detector's own pool holds its state is a
+    separate question, answered by :func:`detector_fits_cma`.
+
+    Returns 0 when a pool already spends its room, which is a true answer and
+    not an error: the caller refuses with the arithmetic.
     """
-    room = (
+    fixed = daemon_fixed_bytes(proc_width, proc_height)
+    budget_room = (
         budget_bytes
         - detector_state_bytes(proc_width, proc_height, detector)
-        - daemon_fixed_bytes(proc_width, proc_height)
+        - fixed
     )
+    heap_room = usable_heap_bytes - fixed
+    room = min(budget_room, heap_room)
     per_frame = frame_bytes(proc_width, proc_height)
     count = room // per_frame if room > 0 else 0
     while count > 0 and not _period_exact(count, fps):
@@ -371,6 +428,15 @@ def ram_budget_row(
         "total_bytes": state + clip + fixed,
         "budget_bytes": budget_bytes,
         "fits": state + clip + fixed <= budget_bytes,
+        # `fits` is the daemon's pool-blind budget arithmetic and stays exactly
+        # that (it is what the daemon-refusal tests pin). `realizable` also asks
+        # the SECOND pool: whether the detector's CMA state fits CMA. A grid can
+        # `fit` the 160 MB budget yet be unrealizable because its detector state
+        # exceeds the 66 MB CMA pool (2304x1296 on 128 MB hardware).
+        "cma_pool_bytes": CMA_POOL_BYTES,
+        "detector_fits_cma": detector_fits_cma(proc_width, proc_height, detector),
+        "realizable": (state + clip + fixed <= budget_bytes)
+        and detector_fits_cma(proc_width, proc_height, detector),
         "basis": (
             "derived arithmetic from the backend's own allocator sizes, the "
             "clip geometry and a DECLARED upper bound on the daemon's fixed "
@@ -1921,6 +1987,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "BenchmarkPlan",
+    "CMA_POOL_BYTES",
     "D4_RESOLUTIONS",
     "DAEMON_STRUCT_ALLOWANCE_BYTES",
     "DDR_PROFILE_NOTE",
@@ -1929,6 +1996,7 @@ __all__ = [
     "FULL_WIDTH",
     "RAM_LOOP_BUDGET_BYTES",
     "RAM_LOOP_SCENE_NOTE",
+    "USABLE_HEAP_BYTES",
     "Reproducibility",
     "Run",
     "SOURCE_MEDIA",
@@ -1944,6 +2012,7 @@ __all__ = [
     "compare_records",
     "compare_runs",
     "daemon_fixed_bytes",
+    "detector_fits_cma",
     "detector_state_bytes",
     "iter_scene_frames",
     "ram_budget_row",

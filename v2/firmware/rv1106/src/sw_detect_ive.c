@@ -152,6 +152,7 @@ static int alloc_block(MB_BLK *blk, RK_U64 *phy, RK_U64 *vir, RK_U32 size)
                          RK_MMZ_ALLOC_TYPE_CMA | RK_MMZ_ALLOC_UNCACHEABLE) !=
         RK_SUCCESS) {
         SW_LOG_ERR("RK_MPI_MMZ_Alloc failed for %u B", size);
+        *blk = NULL;  /* defensive: never leave a dirty handle for free_block */
         return -1;
     }
     *vir = (RK_U64)(uintptr_t)RK_MPI_MMZ_Handle2VirAddr(*blk);
@@ -421,8 +422,17 @@ static int ive_apply(sw_detector_t *self, const uint8_t *luma, int width, int he
          * a DROPPED FRAME, never as an empty one: "no blobs" and "the
          * labeller gave up" are different facts about the sky. */
         state->frames_label_failed++;
-        SW_LOG_WARN("IVE CCL reported label failure on frame %llu; frame dropped",
-                    (unsigned long long)state->frames);
+        /* Log the two fields that disambiguate WHY the labeller gave up
+         * (F-C1-6): u8RegionNum is how many components it did resolve, and
+         * u32CurAreaThr is how high the adaptive area floor climbed trying to
+         * fit the 254-region table. Read here because the successful-frame
+         * path below never runs on a failed frame, so "area threshold raised
+         * on N frames" is otherwise blind to exactly the frames that matter.
+         * Diagnostics only — no tuning, no behaviour change. */
+        SW_LOG_WARN("IVE CCL reported label failure on frame %llu; frame dropped "
+                    "(u8RegionNum %u, u32CurAreaThr %u, configured floor %d)",
+                    (unsigned long long)state->frames, blob->u8RegionNum,
+                    blob->u32CurAreaThr, state->config.min_area_px);
         return -1;
     }
     if (blob->u32CurAreaThr > (RK_U32)state->config.min_area_px) {
