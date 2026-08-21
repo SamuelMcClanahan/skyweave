@@ -10,7 +10,14 @@ tmp/
 # broken convenience symlinks
 /skyweave
 /skyweave2
-# agent-generated docs + logs (untracked for now)
-v2/docs/REMOTE_ACCESS_SETUP.md
-v2/docs/D8_1_C1_FINDINGS.md
+# AI-generated session logs, findings, and progress/handoff notes — never
+# commit. They churn every session and can carry rig facts/credentials.
+# Governed deliverables (reports, phase briefs, runbook, contracts) do NOT
+# match these suffixes and stay tracked.
 *.log
+*_LOG.md
+*_FINDINGS.md
+*_PROGRESS.md
+*_HANDOFF.md
+# kept explicit — a setup guide that does not match the suffixes above
+v2/docs/REMOTE_ACCESS_SETUP.md
