@@ -5,31 +5,30 @@
  * fallback: a build that silently substituted the portable detector would
  * make every number in the D8 tolerance table unattributable.
  *
- * FOUR STRUCTURAL DIVERGENCES from the host `ive_approx` oracle, all read
- * out of the SDK headers rather than guessed, all declared in the D8 report
- * BEFORE any board run. They are properties of the hardware, not defects:
+ * FOUR STRUCTURAL DIVERGENCES from the host `ive_approx` oracle, declared in
+ * the D8 report before the original board run from exposed SDK interfaces and
+ * representations. They are diagnostics, not defects or claims about opaque
+ * vendor-library internals:
  *
  *   1. CONNECTIVITY. `rk_mpi_ive.h` documents IVE_CCL as "Only 8-Connected
  *      method is supported", while the host uses cv2 connectivity=4. Blobs
  *      that touch only diagonally are ONE component on the board and TWO on
- *      the host. The daemon therefore requests IVE_CCL_MODE_4C and reports
- *      what the hardware actually did, rather than assuming it honoured it.
+ *      the host. The daemon therefore selects IVE_CCL_MODE_8C explicitly;
+ *      the host retains both its authoritative 4C and diagnostic 8C views.
  *
  *   2. NO CENTROID FROM HARDWARE. IVE_REGION_S carries u32Area and the four
  *      bbox edges and nothing else. The centroid is a first moment over the
- *      LABEL IMAGE, computed on the A7 inside each region's bbox — which is
- *      exactly the "bytes proportional to motion" rule, but it means the
- *      centroid is ours and the area is the hardware's, and the two can
- *      disagree about a pixel on the boundary.
+ *      preserved post-morph BINARY MASK, computed on the A7 inside each
+ *      accepted bbox. The centroid is ours and the area remains the
+ *      hardware's CCL/flood-fill area; overlapping bboxes can therefore
+ *      measure some of the same nonzero mask pixels.
  *
- *   3. ADAPTIVE AREA THRESHOLD. IVE_CCL_CTRL_S carries u16InitAreaThr and
- *      u16Step and the hardware RAISES the threshold until the region count
- *      fits IVE_MAX_REGION_NUM (254), reporting the value it settled on in
- *      u32CurAreaThr. The effective min_area_px on the board is therefore
- *      max(config, u32CurAreaThr) and it MOVES on cluttered frames. The
- *      daemon reads it back every frame and counts the frames where it rose
- *      above the configured floor, because a silently-raised threshold looks
- *      exactly like a quiet sky.
+ *   3. REPORTED AREA THRESHOLD. IVE_CCL_CTRL_S carries u16InitAreaThr and
+ *      u16Step, while IVE_CCBLOB_S reports u32CurAreaThr. The daemon retains
+ *      that SDK telemetry every frame and counts the frames where it exceeds
+ *      the configured floor. The pinned headers do not prove the vendor
+ *      library's internal threshold-selection algorithm, so this diagnostic
+ *      must not be treated as a causal explanation by itself.
  *
  *   4. FIXED-POINT CONTROLS. GMM2's knobs are u8q2 / u10q0 fixed point, so
  *      the host's float learn_rate, bg_ratio and weights are QUANTISED on
@@ -38,17 +37,35 @@
  *      what the oracle ran instead of against what was asked for.
  */
 
+#include <float.h>
+#include <inttypes.h>
+#include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "sw_ccl_measure.h"
 #include "sw_common.h"
 #include "sw_detect.h"
 
+#if FLT_RADIX != 2 || DBL_MANT_DIG != 53 || DBL_MAX_EXP != 1024
+#error "CCL centroid provenance requires IEEE 754 binary64 double"
+#endif
+
+SW_STATIC_ASSERT(sizeof(double) == sizeof(uint64_t),
+                 centroid_binary64_storage_width);
+
 #ifndef SKYWEAVE_HAVE_RKMPI
 
-sw_detector_t *sw_detect_open_ive(const sw_detector_config_t *config)
+sw_detector_t *sw_detect_open_ive(const sw_detector_config_t *config,
+                                  const char *ccl_log_path,
+                                  const char *fg_mask_log_path,
+                                  uint32_t fg_mask_limit)
 {
     SW_UNUSED(config);
+    SW_UNUSED(ccl_log_path);
+    SW_UNUSED(fg_mask_log_path);
+    SW_UNUSED(fg_mask_limit);
     SW_LOG_ERR("this build has no RKMPI/IVE SDK, so the hardware GMM2 detector "
                "does not exist in it. Refusing rather than substituting the "
                "portable detector: the D8 tolerance table is only meaningful if "
@@ -62,6 +79,9 @@ sw_detector_t *sw_detect_open_ive(const sw_detector_config_t *config)
 #include "rk_comm_ive.h"
 #include "rk_mpi_ive.h"
 #include "rk_mpi_mmz.h"
+
+SW_STATIC_ASSERT(SW_MAX_COMPONENTS == IVE_MAX_REGION_NUM,
+                 component_bound_matches_ive_table);
 
 typedef struct {
     sw_detector_config_t config;
@@ -87,12 +107,16 @@ typedef struct {
 
     IVE_GMM2_CTRL_S gmm2_ctrl;
     IVE_CCL_CTRL_S ccl_ctrl;
+    IVE_ERODE_CTRL_S erode_ctrl;
+    IVE_DILATE_CTRL_S dilate_ctrl;
+
+    FILE *ccl_log;
+    FILE *fg_mask_log;
+    uint32_t fg_mask_limit;
 
     /* Divergence bookkeeping, reported at the end of a run. */
     uint64_t frames;
-    uint64_t frames_area_threshold_raised;
-    uint32_t max_area_threshold;
-    uint64_t frames_label_failed;
+    sw_detector_diagnostics_t diagnostics;
 
     /* What ive_alloc actually asked MMZ for, summed from the same
      * expressions the alloc_block calls use. The RAM-budget check reads this
@@ -101,6 +125,28 @@ typedef struct {
      * harness samples: the two numbers are different quantities and must
      * never be added. */
     size_t footprint_bytes;
+
+    /* Intra-frame timing, accumulated on EVERY frame whether or not
+     * --profile-stats will emit it: the whole cost is 16-18 clock_gettime
+     * calls per post-warm ~69 ms frame (morphology off/on) — each recorded
+     * span pays an explicit start read plus the read inside
+     * sw_profile_record, and on this vDSO-less uClibc each is a real
+     * syscall (~1-5 us on the 1 GHz A7), an honest ~20-90 us, still
+     * <= 0.13% of the frame — and a profiler that only runs when watched
+     * measures a different detector than the one that runs unwatched. The
+     * stage indices come from sw_profile_stage at open() and are stored
+     * rather than assumed, so registration order and emission order cannot
+     * drift apart. */
+    sw_profile_t profile;
+    int stage_src_copy;
+    int stage_gmm2;
+    int stage_erode;
+    int stage_dilate;
+    int stage_mask_preserve;
+    int stage_ccl;
+    int stage_region_scan;
+    int stage_diag_io;
+    int stage_frame_total;
 } ive_state_t;
 
 /* u8q2: unsigned, two fractional bits. Rounds to nearest, saturates at the
@@ -330,10 +376,10 @@ static void ive_configure(ive_state_t *state)
     state->gmm2_ctrl.u8VarThr = (RK_U8)(p->match_sigmas * p->match_sigmas + 0.5f);
 
     memset(&state->ccl_ctrl, 0, sizeof(state->ccl_ctrl));
-    /* Asked for 4-connected to match the host oracle. The header says only
-     * 8-connected is supported, so what the hardware DOES is recorded as a
-     * declared divergence rather than assumed away. */
-    state->ccl_ctrl.enMode = IVE_CCL_MODE_4C;
+    /* The pinned SDK says only 8-connected CCL is supported. Select that
+     * mode explicitly so Phase 1 never relies on an unsupported 4C request
+     * being ignored by the implementation. */
+    state->ccl_ctrl.enMode = IVE_CCL_MODE_8C;
     state->ccl_ctrl.u16InitAreaThr = (RK_U16)state->config.min_area_px;
     state->ccl_ctrl.u16Step = 1;
     /* CCL's staging memory is its OWN plane-sized block, never the blob:
@@ -341,22 +387,226 @@ static void ive_configure(ive_state_t *state)
      * librve), while the blob is the region-table output. Handing the 3 KB
      * blob to both was the post-wedge failure mode of 2026-08-20. */
     state->ccl_ctrl.stMem = state->ccl_mem;
+
+    /* OpenCV's 3x3 ellipse is this cross. IVE only accepts a 5x5 control
+     * array, so embed the cross in its centre; every other tap stays zero. */
+    memset(&state->erode_ctrl, 0, sizeof(state->erode_ctrl));
+    memset(&state->dilate_ctrl, 0, sizeof(state->dilate_ctrl));
+    state->erode_ctrl.au8Mask[1 * 5 + 2] = 255;
+    state->erode_ctrl.au8Mask[2 * 5 + 1] = 255;
+    state->erode_ctrl.au8Mask[2 * 5 + 2] = 255;
+    state->erode_ctrl.au8Mask[2 * 5 + 3] = 255;
+    state->erode_ctrl.au8Mask[3 * 5 + 2] = 255;
+    memcpy(state->dilate_ctrl.au8Mask, state->erode_ctrl.au8Mask,
+           sizeof(state->dilate_ctrl.au8Mask));
 }
 
-static int ive_apply(sw_detector_t *self, const uint8_t *luma, int width, int height,
-                     bool warming_up, sw_component_t *out, int out_capacity,
-                     double *occupancy)
+/* --ccl-log JSONL schema. Every actual post-warm CCL call gets one row.
+ * Completed calls carry the hardware s8/u8/u32 fields; an API/query failure
+ * has api_failure=true and a null s8 label status because no hardware label
+ * result exists. Successful rows retain the exhaustive count of nonzero table
+ * slots, the raw u8RegionNum telemetry, their explicit disagreement bit, and
+ * the area-gated accepted component list. */
+static void ive_log_ccl_attempt(ive_state_t *state, uint64_t frame_seq,
+                                bool api_failure, int label_status,
+                                uint32_t region_num,
+                                uint32_t area_threshold,
+                                uint32_t nonzero_region_slots,
+                                const sw_component_t *components,
+                                int accepted_count,
+                                uint64_t overlap_pairs)
+{
+    int i;
+    if (state->ccl_log == NULL) {
+        return;
+    }
+    fprintf(state->ccl_log,
+            "{\"frame_seq\":%llu,\"api_failure\":%s,"
+            "\"s8_label_status\":",
+            (unsigned long long)frame_seq, api_failure ? "true" : "false");
+    if (api_failure) {
+        fputs("null", state->ccl_log);
+    } else {
+        fprintf(state->ccl_log, "%d", label_status);
+    }
+    fprintf(state->ccl_log,
+            ",\"u8_region_num\":%u,\"u32_cur_area_thr\":%u,"
+            "\"nonzero_region_slots\":%u,\"region_count_mismatch\":%s,"
+            "\"accepted_components\":%d,"
+            "\"overlap_pairs\":%llu",
+            region_num, area_threshold,
+            (!api_failure && label_status == 0) ? nonzero_region_slots : 0,
+            (!api_failure && label_status == 0 &&
+             region_num != nonzero_region_slots) ? "true" : "false",
+            (!api_failure && label_status == 0) ? accepted_count : 0,
+            (unsigned long long)overlap_pairs);
+    if (!api_failure && label_status == 0) {
+        fputs(",\"components\":[", state->ccl_log);
+        for (i = 0; i < accepted_count; ++i) {
+            uint64_t centroid_u_bits;
+            uint64_t centroid_v_bits;
+            if (i > 0) {
+                fputc(',', state->ccl_log);
+            }
+            memcpy(&centroid_u_bits, &components[i].centroid_u,
+                   sizeof(centroid_u_bits));
+            memcpy(&centroid_v_bits, &components[i].centroid_v,
+                   sizeof(centroid_v_bits));
+            fprintf(state->ccl_log,
+                    "{\"centroid_u\":%.17g,"
+                    "\"centroid_u_bits\":\"%016" PRIx64 "\","
+                    "\"centroid_v\":%.17g,"
+                    "\"centroid_v_bits\":\"%016" PRIx64 "\","
+                    "\"bbox_x\":%d,\"bbox_y\":%d,\"bbox_w\":%u,"
+                    "\"bbox_h\":%u,\"area_px\":%u}",
+                    components[i].centroid_u, centroid_u_bits,
+                    components[i].centroid_v, centroid_v_bits,
+                    components[i].bbox_x, components[i].bbox_y,
+                    components[i].bbox_w, components[i].bbox_h,
+                    components[i].area_px);
+        }
+        fputc(']', state->ccl_log);
+    }
+    fputs("}\n", state->ccl_log);
+    if (fflush(state->ccl_log) != 0 || ferror(state->ccl_log)) {
+        SW_LOG_ERR("write failed for --ccl-log; disabling the diagnostic stream");
+        fclose(state->ccl_log);
+        state->ccl_log = NULL;
+    }
+}
+
+static void store_be32(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)(value >> 24);
+    dst[1] = (uint8_t)(value >> 16);
+    dst[2] = (uint8_t)(value >> 8);
+    dst[3] = (uint8_t)value;
+}
+
+static void store_be64(uint8_t *dst, uint64_t value)
+{
+    store_be32(dst, (uint32_t)(value >> 32));
+    store_be32(dst + 4, (uint32_t)value);
+}
+
+/* --fg-mask-log record (all integers big-endian):
+ *   4 B "SWFM", u8 version=1, 3 B reserved,
+ *   u64 frame_seq, u32 width, u32 height, u32 payload_len,
+ *   then width*height raw final-mask bytes with stride padding removed.
+ */
+static void ive_log_failed_mask(ive_state_t *state, uint64_t frame_seq,
+                                const uint8_t *mask, uint32_t stride)
+{
+    uint8_t header[28] = {'S', 'W', 'F', 'M', 1, 0, 0, 0};
+    uint64_t payload;
+    int row;
+    if (state->fg_mask_log == NULL ||
+        state->diagnostics.fg_masks_written >= state->fg_mask_limit) {
+        return;
+    }
+    payload = (uint64_t)(uint32_t)state->width * (uint64_t)(uint32_t)state->height;
+    if (payload > UINT32_MAX) {
+        goto write_failed;
+    }
+    store_be64(header + 8, frame_seq);
+    store_be32(header + 16, (uint32_t)state->width);
+    store_be32(header + 20, (uint32_t)state->height);
+    store_be32(header + 24, (uint32_t)payload);
+    if (fwrite(header, 1, sizeof(header), state->fg_mask_log) != sizeof(header)) {
+        goto write_failed;
+    }
+    for (row = 0; row < state->height; ++row) {
+        if (fwrite(mask + (size_t)row * stride, 1, (size_t)state->width,
+                   state->fg_mask_log) != (size_t)state->width) {
+            goto write_failed;
+        }
+    }
+    if (fflush(state->fg_mask_log) != 0 || ferror(state->fg_mask_log)) {
+        goto write_failed;
+    }
+    state->diagnostics.fg_masks_written++;
+    return;
+
+write_failed:
+    state->diagnostics.fg_mask_write_failures++;
+    SW_LOG_ERR("write failed for --fg-mask-log; disabling the bounded mask stream");
+    fclose(state->fg_mask_log);
+    state->fg_mask_log = NULL;
+}
+
+static int ive_prepare_ccl_mask(ive_state_t *state, uint64_t frame_seq)
+{
+    IVE_HANDLE handle = 0;
+    bool finished = false;
+    size_t plane = (size_t)state->src.au32Stride[0] * (size_t)state->height;
+    uint64_t stage_start_ns;
+    if (state->config.open_radius_px == 1) {
+        /* Each morphology stage records only when its op AND its Query
+         * completed; a failed op returns unrecorded, and frame_total (in the
+         * ive_apply wrapper) still carries the frame. No control flow, error
+         * path or counter changes hands here — the timers are bystanders. */
+        stage_start_ns = sw_profile_now_ns();
+        if (RK_MPI_IVE_Erode(&handle, &state->fg, &state->bg,
+                             &state->erode_ctrl, RK_TRUE) != RK_SUCCESS) {
+            SW_LOG_ERR("RK_MPI_IVE_Erode failed on frame %llu",
+                       (unsigned long long)frame_seq);
+            return -1;
+        }
+        if (RK_MPI_IVE_Query(handle, &finished, RK_TRUE) != RK_SUCCESS) {
+            SW_LOG_ERR("RK_MPI_IVE_Query failed after Erode on frame %llu",
+                       (unsigned long long)frame_seq);
+            return -1;
+        }
+        sw_profile_record(&state->profile, state->stage_erode, stage_start_ns);
+        stage_start_ns = sw_profile_now_ns();
+        if (RK_MPI_IVE_Dilate(&handle, &state->bg, &state->match,
+                              &state->dilate_ctrl, RK_TRUE) != RK_SUCCESS) {
+            SW_LOG_ERR("RK_MPI_IVE_Dilate failed on frame %llu",
+                       (unsigned long long)frame_seq);
+            return -1;
+        }
+        if (RK_MPI_IVE_Query(handle, &finished, RK_TRUE) != RK_SUCCESS) {
+            SW_LOG_ERR("RK_MPI_IVE_Query failed after Dilate on frame %llu",
+                       (unsigned long long)frame_seq);
+            return -1;
+        }
+        sw_profile_record(&state->profile, state->stage_dilate, stage_start_ns);
+    } else {
+        /* Morphology off still preserves the GMM2 final mask in `match` so
+         * in-place CCL can never destroy the pixels used for the moment. */
+        stage_start_ns = sw_profile_now_ns();
+        memcpy((void *)(uintptr_t)state->match.au64VirAddr[0],
+               (const void *)(uintptr_t)state->fg.au64VirAddr[0], plane);
+        sw_profile_record(&state->profile, state->stage_mask_preserve,
+                          stage_start_ns);
+    }
+    /* mask_preserve counts each fg/match plane copy as its own sample, so
+     * its count is 2x the frame count with morphology off and 1x with it on
+     * — the copies are what is being measured, not the frames. */
+    stage_start_ns = sw_profile_now_ns();
+    memcpy((void *)(uintptr_t)state->fg.au64VirAddr[0],
+           (const void *)(uintptr_t)state->match.au64VirAddr[0], plane);
+    sw_profile_record(&state->profile, state->stage_mask_preserve, stage_start_ns);
+    return 0;
+}
+
+static int ive_apply_frame(sw_detector_t *self, const uint8_t *luma, int width,
+                           int height, bool warming_up, uint64_t frame_seq,
+                           sw_component_t *out, int out_capacity,
+                           double *occupancy)
 {
     ive_state_t *state = (ive_state_t *)self->state;
     IVE_HANDLE handle = 0;
     bool finished = false;
     const IVE_CCBLOB_S *blob;
-    const uint8_t *labels;
+    const uint8_t *mask;
     RK_U32 stride;
+    const int capacity = out_capacity < SW_MAX_COMPONENTS ? out_capacity
+                                                          : SW_MAX_COMPONENTS;
     int count = 0;
     int row;
-    unsigned region;
     uint64_t foreground = 0;
+    uint64_t stage_start_ns;
 
     if (!state->initialised) {
         if (ive_alloc(state, width, height) != 0) {
@@ -375,22 +625,32 @@ static int ive_apply(sw_detector_t *self, const uint8_t *luma, int width, int he
      * the IVE stride is 16-byte aligned and the caller's is not. On the
      * capture path this copy does not exist: the VI hands over a dma-buf and
      * the source image points straight at it (sw_capture.c). */
+    stage_start_ns = sw_profile_now_ns();
     for (row = 0; row < height; ++row) {
         memcpy((uint8_t *)(uintptr_t)state->src.au64VirAddr[0] + (size_t)row * stride,
                luma + (size_t)row * width, (size_t)width);
     }
+    sw_profile_record(&state->profile, state->stage_src_copy, stage_start_ns);
 
+    /* Each stage below records only when its work COMPLETED — a failed op
+     * or Query returns unrecorded while frame_total (in the ive_apply
+     * wrapper) still carries the frame, and diag_io still measures whichever
+     * logging a failure path performs. The timers change no control flow,
+     * error path or counter. */
+    stage_start_ns = sw_profile_now_ns();
     if (RK_MPI_IVE_GMM2(&handle, &state->src, NULL, &state->fg, &state->bg,
                         &state->match, &state->model, &state->gmm2_ctrl, RK_TRUE) !=
         RK_SUCCESS) {
         SW_LOG_ERR("RK_MPI_IVE_GMM2 failed on frame %llu",
-                   (unsigned long long)state->frames);
+                   (unsigned long long)frame_seq);
         return -1;
     }
     if (RK_MPI_IVE_Query(handle, &finished, RK_TRUE) != RK_SUCCESS) {
-        SW_LOG_ERR("RK_MPI_IVE_Query failed after GMM2");
+        SW_LOG_ERR("RK_MPI_IVE_Query failed after GMM2 on frame %llu",
+                   (unsigned long long)frame_seq);
         return -1;
     }
+    sw_profile_record(&state->profile, state->stage_gmm2, stage_start_ns);
     state->gmm2_ctrl.u8FirstFrameFlag = 0;
     state->frames++;
 
@@ -401,97 +661,191 @@ static int ive_apply(sw_detector_t *self, const uint8_t *luma, int width, int he
         return 0;
     }
 
-    /* CCL is IN PLACE on the foreground image: input binary mask, output
-     * label image. The labels are what the centroid moment is taken over. */
+    /* The ccl stage spans mask preparation through CCL's Query: erode,
+     * dilate and mask_preserve are its interior stages (they run inside
+     * ive_prepare_ccl_mask), so ccl deliberately OVERLAPS them the same way
+     * frame_total overlaps everything — the stage table is a set of spans,
+     * not a partition, and summing it double-counts by design. */
+    stage_start_ns = sw_profile_now_ns();
+    if (ive_prepare_ccl_mask(state, frame_seq) != 0) {
+        return -1;
+    }
+    mask = (const uint8_t *)(uintptr_t)state->match.au64VirAddr[0];
+
+    /* Empty every slot before CCL. Successful region records are documented
+     * as non-contiguous; a full-table scan can only distinguish a genuine
+     * empty slot from last frame's record if unused areas begin at zero. */
+    memset((void *)(uintptr_t)state->blob.u64VirAddr, 0, sizeof(IVE_CCBLOB_S));
+    state->diagnostics.ccl_attempts++;
+
+    /* CCL is IN PLACE on fg. `match` remains the final binary mask. */
     if (RK_MPI_IVE_CCL(&handle, &state->fg, &state->blob, &state->ccl_ctrl, RK_TRUE) !=
         RK_SUCCESS) {
         SW_LOG_ERR("RK_MPI_IVE_CCL failed on frame %llu",
-                   (unsigned long long)state->frames);
+                   (unsigned long long)frame_seq);
+        state->diagnostics.ccl_api_failures++;
+        stage_start_ns = sw_profile_now_ns();
+        ive_log_ccl_attempt(state, frame_seq, true, 0, 0, 0, 0, NULL, 0, 0);
+        ive_log_failed_mask(state, frame_seq, mask, stride);
+        sw_profile_record(&state->profile, state->stage_diag_io, stage_start_ns);
         return -1;
     }
     if (RK_MPI_IVE_Query(handle, &finished, RK_TRUE) != RK_SUCCESS) {
-        SW_LOG_ERR("RK_MPI_IVE_Query failed after CCL");
+        SW_LOG_ERR("RK_MPI_IVE_Query failed after CCL on frame %llu",
+                   (unsigned long long)frame_seq);
+        state->diagnostics.ccl_api_failures++;
+        stage_start_ns = sw_profile_now_ns();
+        ive_log_ccl_attempt(state, frame_seq, true, 0, 0, 0, 0, NULL, 0, 0);
+        ive_log_failed_mask(state, frame_seq, mask, stride);
+        sw_profile_record(&state->profile, state->stage_diag_io, stage_start_ns);
         return -1;
     }
+    sw_profile_record(&state->profile, state->stage_ccl, stage_start_ns);
 
     blob = (const IVE_CCBLOB_S *)(uintptr_t)state->blob.u64VirAddr;
-    labels = (const uint8_t *)(uintptr_t)state->fg.au64VirAddr[0];
+
+    /* Count a reported current threshold above the configured initial value
+     * on every completed CCL attempt, including a label failure. Returning
+     * first would make this aggregate contradict the retained per-attempt
+     * u32CurAreaThr telemetry. */
+    if (blob->u32CurAreaThr > (RK_U32)state->config.min_area_px) {
+        state->diagnostics.frames_area_threshold_raised++;
+        if (blob->u32CurAreaThr > state->diagnostics.max_area_threshold) {
+            state->diagnostics.max_area_threshold = blob->u32CurAreaThr;
+        }
+        SW_LOG_WARN("IVE CCL reported area threshold %u above configured floor %d "
+                    "on frame %llu",
+                    blob->u32CurAreaThr, state->config.min_area_px,
+                    (unsigned long long)frame_seq);
+    }
 
     if (blob->s8LabelStatus != 0) {
         /* The hardware could not label this frame. Counted and reported as
          * a DROPPED FRAME, never as an empty one: "no blobs" and "the
          * labeller gave up" are different facts about the sky. */
-        state->frames_label_failed++;
-        /* Log the two fields that disambiguate WHY the labeller gave up
-         * (F-C1-6): u8RegionNum is how many components it did resolve, and
-         * u32CurAreaThr is how high the adaptive area floor climbed trying to
-         * fit the 254-region table. Read here because the successful-frame
-         * path below never runs on a failed frame, so "area threshold raised
-         * on N frames" is otherwise blind to exactly the frames that matter.
-         * Diagnostics only — no tuning, no behaviour change. */
+        state->diagnostics.ccl_label_failures++;
+        if (blob->u32CurAreaThr > (RK_U32)state->config.min_area_px) {
+            state->diagnostics.ccl_label_failures_with_raised_threshold++;
+        }
+        if (blob->u8RegionNum == 0) {
+            state->diagnostics.ccl_threshold_runaway_failures++;
+        } else if (blob->u8RegionNum < SW_MAX_COMPONENTS) {
+            state->diagnostics.ccl_sub_cap_failures++;
+        } else {
+            state->diagnostics.ccl_other_failures++;
+        }
+        /* Log the two fields that classify the reported failure mode
+         * (F-C1-6). u8RegionNum is opaque vendor telemetry rather than a
+         * proven table cardinality; u32CurAreaThr is SDK-reported threshold
+         * telemetry. Diagnostics only — no tuning, no behaviour change. */
         SW_LOG_WARN("IVE CCL reported label failure on frame %llu; frame dropped "
                     "(u8RegionNum %u, u32CurAreaThr %u, configured floor %d)",
-                    (unsigned long long)state->frames, blob->u8RegionNum,
+                    (unsigned long long)frame_seq, blob->u8RegionNum,
                     blob->u32CurAreaThr, state->config.min_area_px);
+        stage_start_ns = sw_profile_now_ns();
+        ive_log_ccl_attempt(state, frame_seq, false,
+                            (int)blob->s8LabelStatus, blob->u8RegionNum,
+                            blob->u32CurAreaThr, 0, NULL, 0, 0);
+        ive_log_failed_mask(state, frame_seq, mask, stride);
+        sw_profile_record(&state->profile, state->stage_diag_io, stage_start_ns);
         return -1;
     }
-    if (blob->u32CurAreaThr > (RK_U32)state->config.min_area_px) {
-        state->frames_area_threshold_raised++;
-        if (blob->u32CurAreaThr > state->max_area_threshold) {
-            state->max_area_threshold = blob->u32CurAreaThr;
+    /* BUG A: IVE says valid records are stored non-contiguously. Real RV1106
+     * output proves u8RegionNum does not reliably equal the number of nonzero
+     * records, so it is never a scan bound. Inspect all 254 slots and skip only
+     * records whose area is zero, matching the pinned vendor samples. */
+    stage_start_ns = sw_profile_now_ns();
+    {
+        uint16_t populated_slots[SW_MAX_COMPONENTS];
+        const size_t populated_count = sw_collect_nonzero_u32_slots(
+            blob->astRegion, sizeof(blob->astRegion[0]),
+            offsetof(IVE_REGION_S, u32Area), SW_MAX_COMPONENTS,
+            populated_slots, SW_MAX_COMPONENTS);
+        const uint32_t nonzero_region_slots = (uint32_t)populated_count;
+        if ((uint32_t)blob->u8RegionNum != nonzero_region_slots) {
+            state->diagnostics.ccl_region_count_mismatch_frames++;
         }
-        SW_LOG_WARN("IVE CCL raised its area threshold to %u (configured floor %d) "
-                    "on frame %llu: the frame was crowded enough that the hardware "
-                    "discarded small regions to fit its 254-region table",
-                    blob->u32CurAreaThr, state->config.min_area_px,
-                    (unsigned long long)state->frames);
-    }
-
-    for (region = 0; region < blob->u8RegionNum && count < out_capacity; ++region) {
-        const IVE_REGION_S *r = &blob->astRegion[region];
-        double sum_u = 0.0;
-        double sum_v = 0.0;
-        uint32_t area = 0;
-        int x, y;
-        if (r->u32Area == 0) {
-            continue; /* "non-continuous stored": empty slots are skipped */
-        }
-        if ((int)r->u32Area < state->config.min_area_px ||
-            (int)r->u32Area > state->config.max_area_px) {
-            continue;
-        }
-        /* First moment over the label image, inside the region's own bbox.
-         * `label = ArrayIndex + 1` per the SDK header. */
-        for (y = r->u16Top; y <= (int)r->u16Bottom; ++y) {
-            for (x = r->u16Left; x <= (int)r->u16Right; ++x) {
-                if (labels[(size_t)y * stride + (size_t)x] == region + 1) {
-                    sum_u += (double)x;
-                    sum_v += (double)y;
-                    area++;
-                }
+        size_t populated;
+        for (populated = 0; populated < populated_count; ++populated) {
+            const uint32_t region = populated_slots[populated];
+            const IVE_REGION_S *r = &blob->astRegion[region];
+            sw_bbox_t bbox;
+            sw_mask_moment_t moment;
+            int measured;
+            if ((int)r->u32Area < state->config.min_area_px ||
+                (int)r->u32Area > state->config.max_area_px) {
+                continue;
             }
+            if (r->u16Right < r->u16Left || r->u16Bottom < r->u16Top) {
+                SW_LOG_WARN("region slot %u has inverted bbox (%u,%u)-(%u,%u)",
+                            region, r->u16Left, r->u16Top, r->u16Right,
+                            r->u16Bottom);
+                continue;
+            }
+            bbox.x = r->u16Left;
+            bbox.y = r->u16Top;
+            bbox.w = (uint32_t)(r->u16Right - r->u16Left + 1);
+            bbox.h = (uint32_t)(r->u16Bottom - r->u16Top + 1);
+            measured = sw_mask_moment_nonzero(mask, width, height, stride, &bbox,
+                                              &moment);
+            if (measured != 1) {
+                SW_LOG_WARN("region slot %u declares area %u but its final-mask "
+                            "bbox (%d,%d %ux%u) is invalid or empty",
+                            region, r->u32Area, bbox.x, bbox.y, bbox.w, bbox.h);
+                continue;
+            }
+            if (moment.pixel_count != r->u32Area) {
+                SW_LOG_DEBUG("region slot %u: hardware area %u, nonzero pixels "
+                             "in final-mask bbox %llu",
+                             region, r->u32Area,
+                             (unsigned long long)moment.pixel_count);
+            }
+            if (count >= capacity) {
+                continue;
+            }
+            out[count].centroid_u = moment.centroid_u;
+            out[count].centroid_v = moment.centroid_v;
+            out[count].area_px = r->u32Area;
+            out[count].bbox_x = bbox.x;
+            out[count].bbox_y = bbox.y;
+            out[count].bbox_w = bbox.w;
+            out[count].bbox_h = bbox.h;
+            count++;
+            /* Occupancy keeps CCL/flood-fill area semantics too. */
+            foreground += r->u32Area;
         }
-        if (area == 0) {
-            SW_LOG_WARN("region %u declares area %u but no pixel carries its label",
-                        region, r->u32Area);
-            continue;
+        {
+            sw_bbox_t boxes[SW_MAX_COMPONENTS];
+            uint64_t pairs;
+            int i;
+            for (i = 0; i < count; ++i) {
+                boxes[i].x = out[i].bbox_x;
+                boxes[i].y = out[i].bbox_y;
+                boxes[i].w = out[i].bbox_w;
+                boxes[i].h = out[i].bbox_h;
+            }
+            pairs = sw_count_overlapping_bbox_pairs(boxes, (size_t)count);
+            state->diagnostics.overlapping_bbox_pairs += pairs;
+            if (pairs > 0) {
+                state->diagnostics.frames_with_overlapping_bboxes++;
+            }
+            /* region_scan ends where the diagnostic FILE write begins:
+             * diag_io covers only the --ccl-log/--fg-mask-log writes, the
+             * split that says whether a slow frame was the scan or the SD
+             * card. Honestly, though: the per-slot stderr WARN/DEBUG lines
+             * above (inverted bbox, invalid final-mask bbox, the area
+             * mismatch debug) are emitted DURING the scan, so on an
+             * anomalous frame region_scan includes that stderr I/O, not
+             * pure compute. */
+            sw_profile_record(&state->profile, state->stage_region_scan,
+                              stage_start_ns);
+            stage_start_ns = sw_profile_now_ns();
+            ive_log_ccl_attempt(state, frame_seq, false, 0,
+                                blob->u8RegionNum, blob->u32CurAreaThr,
+                                nonzero_region_slots, out, count, pairs);
+            sw_profile_record(&state->profile, state->stage_diag_io,
+                              stage_start_ns);
         }
-        if (area != r->u32Area) {
-            /* The hardware's area and our moment disagree. Reported, not
-             * reconciled: it is exactly the kind of divergence the D8
-             * tolerance table exists to carry. */
-            SW_LOG_DEBUG("region %u: hardware area %u, label-image area %u", region,
-                         r->u32Area, area);
-        }
-        out[count].centroid_u = sum_u / (double)area;
-        out[count].centroid_v = sum_v / (double)area;
-        out[count].area_px = r->u32Area;
-        out[count].bbox_x = r->u16Left;
-        out[count].bbox_y = r->u16Top;
-        out[count].bbox_w = (uint32_t)(r->u16Right - r->u16Left + 1);
-        out[count].bbox_h = (uint32_t)(r->u16Bottom - r->u16Top + 1);
-        count++;
-        foreground += area;
     }
     if (occupancy != NULL) {
         *occupancy = (double)foreground / ((double)width * (double)height);
@@ -499,19 +853,52 @@ static int ive_apply(sw_detector_t *self, const uint8_t *luma, int width, int he
     return count;
 }
 
+static int ive_apply(sw_detector_t *self, const uint8_t *luma, int width, int height,
+                     bool warming_up, uint64_t frame_seq, sw_component_t *out,
+                     int out_capacity, double *occupancy)
+{
+    /* Thin timing shell so frame_total covers EVERY exit of the real body —
+     * failures included — without a record call before each return. The
+     * inner function is the detector; this is a stopwatch around it. */
+    ive_state_t *state = (ive_state_t *)self->state;
+    const uint64_t frame_start_ns = sw_profile_now_ns();
+    const int result = ive_apply_frame(self, luma, width, height, warming_up,
+                                       frame_seq, out, out_capacity, occupancy);
+    sw_profile_record(&state->profile, state->stage_frame_total, frame_start_ns);
+    return result;
+}
+
 static void ive_losses(const sw_detector_t *self, sw_detector_losses_t *out)
 {
     const ive_state_t *state = (const ive_state_t *)self->state;
-    /* The hardware sheds by RAISING its area threshold, so what it dropped
-     * is not individually countable — only the frames on which it happened
-     * are. Reported as frames with a zero component count rather than as an
-     * invented number: an estimate here would be a fabricated measurement.
-     * Frames the labeller failed are counted too; those lost everything. */
+    /* A reported current threshold above the configured initial value is
+     * conservatively counted as a shed frame. The exact number excluded is
+     * not available, so components_shed stays zero rather than inventing a
+     * measurement. Frames the labeller failed are counted too; those lost
+     * everything. */
     out->components_shed = 0;
-    out->frames_shed = state != NULL
-                           ? state->frames_area_threshold_raised +
-                                 state->frames_label_failed
-                           : 0;
+    out->frames_shed =
+        state != NULL
+            ? state->diagnostics.frames_area_threshold_raised +
+                  state->diagnostics.ccl_label_failures -
+                  state->diagnostics.ccl_label_failures_with_raised_threshold
+            : 0;
+}
+
+static void ive_diagnostics(const sw_detector_t *self,
+                            sw_detector_diagnostics_t *out)
+{
+    const ive_state_t *state = (const ive_state_t *)self->state;
+    memset(out, 0, sizeof(*out));
+    if (state != NULL) {
+        *out = state->diagnostics;
+    }
+}
+
+static const sw_profile_t *ive_profile(const sw_detector_t *self)
+{
+    const ive_state_t *state = (const ive_state_t *)self->state;
+    return state != NULL ? &state->profile : NULL;
 }
 
 static size_t ive_footprint_bytes(const sw_detector_t *self)
@@ -539,19 +926,44 @@ static void ive_close(sw_detector_t *self)
     }
     state = (ive_state_t *)self->state;
     if (state != NULL) {
-        SW_LOG_INFO("IVE detector: %llu frames, area threshold raised on %llu, "
-                    "max threshold %u, label failures %llu",
+        SW_LOG_INFO("IVE detector: %llu frames, %llu post-warm CCL attempts, "
+                    "%llu CCL API failures, %llu label failures (%llu "
+                    "threshold-runaway, %llu sub-cap, %llu other), %llu "
+                    "successful region-count mismatches, %llu "
+                    "overlapping bbox pairs across %llu frames, area threshold "
+                    "reported above floor on %llu, max threshold %u",
                     (unsigned long long)state->frames,
-                    (unsigned long long)state->frames_area_threshold_raised,
-                    state->max_area_threshold,
-                    (unsigned long long)state->frames_label_failed);
+                    (unsigned long long)state->diagnostics.ccl_attempts,
+                    (unsigned long long)state->diagnostics.ccl_api_failures,
+                    (unsigned long long)state->diagnostics.ccl_label_failures,
+                    (unsigned long long)
+                        state->diagnostics.ccl_threshold_runaway_failures,
+                    (unsigned long long)state->diagnostics.ccl_sub_cap_failures,
+                    (unsigned long long)state->diagnostics.ccl_other_failures,
+                    (unsigned long long)
+                        state->diagnostics.ccl_region_count_mismatch_frames,
+                    (unsigned long long)state->diagnostics.overlapping_bbox_pairs,
+                    (unsigned long long)
+                        state->diagnostics.frames_with_overlapping_bboxes,
+                    (unsigned long long)
+                        state->diagnostics.frames_area_threshold_raised,
+                    state->diagnostics.max_area_threshold);
+        if (state->ccl_log != NULL) {
+            fclose(state->ccl_log);
+        }
+        if (state->fg_mask_log != NULL) {
+            fclose(state->fg_mask_log);
+        }
         ive_release_blocks(state);
         free(state);
     }
     free(self);
 }
 
-sw_detector_t *sw_detect_open_ive(const sw_detector_config_t *config)
+sw_detector_t *sw_detect_open_ive(const sw_detector_config_t *config,
+                                  const char *ccl_log_path,
+                                  const char *fg_mask_log_path,
+                                  uint32_t fg_mask_limit)
 {
     sw_detector_t *detector = (sw_detector_t *)calloc(1, sizeof(sw_detector_t));
     ive_state_t *state = (ive_state_t *)calloc(1, sizeof(ive_state_t));
@@ -562,12 +974,51 @@ sw_detector_t *sw_detect_open_ive(const sw_detector_config_t *config)
         return NULL;
     }
     state->config = *config;
+    state->fg_mask_limit = fg_mask_limit;
+    if (ccl_log_path != NULL && ccl_log_path[0] != '\0') {
+        state->ccl_log = fopen(ccl_log_path, "w");
+        if (state->ccl_log == NULL) {
+            SW_LOG_ERR("cannot open CCL log %s", ccl_log_path);
+            free(detector);
+            free(state);
+            return NULL;
+        }
+    }
+    if (fg_mask_log_path != NULL && fg_mask_log_path[0] != '\0') {
+        state->fg_mask_log = fopen(fg_mask_log_path, "wb");
+        if (state->fg_mask_log == NULL) {
+            SW_LOG_ERR("cannot open failed-mask log %s", fg_mask_log_path);
+            if (state->ccl_log != NULL) {
+                fclose(state->ccl_log);
+            }
+            free(detector);
+            free(state);
+            return NULL;
+        }
+    }
+    /* Stage registration order is emission order in --stats. Capacity is 12
+     * and this registers 9, so none of these can return -1; the indices are
+     * stored anyway because sw_profile_record tolerates -1 and an assumed
+     * index is exactly the kind of drift the accumulator exists to rule out. */
+    sw_profile_init(&state->profile);
+    state->stage_src_copy = sw_profile_stage(&state->profile, "src_copy");
+    state->stage_gmm2 = sw_profile_stage(&state->profile, "gmm2");
+    state->stage_erode = sw_profile_stage(&state->profile, "erode");
+    state->stage_dilate = sw_profile_stage(&state->profile, "dilate");
+    state->stage_mask_preserve =
+        sw_profile_stage(&state->profile, "mask_preserve");
+    state->stage_ccl = sw_profile_stage(&state->profile, "ccl");
+    state->stage_region_scan = sw_profile_stage(&state->profile, "region_scan");
+    state->stage_diag_io = sw_profile_stage(&state->profile, "diag_io");
+    state->stage_frame_total = sw_profile_stage(&state->profile, "frame_total");
     detector->apply = ive_apply;
     detector->close = ive_close;
     detector->losses = ive_losses;
+    detector->diagnostics = ive_diagnostics;
     detector->footprint_bytes = ive_footprint_bytes;
     detector->name = "ive-gmm2";
     detector->state = state;
+    detector->profile = ive_profile;
     return detector;
 }
 

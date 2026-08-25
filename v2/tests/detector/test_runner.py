@@ -8,6 +8,7 @@ import pytest
 from skyweave2.contracts import full_to_proc, proc_to_full
 from skyweave2.contracts.serialize import pack, unpack
 from skyweave2.detector import components as components_mod
+from skyweave2.detector.cap import DetectorStats
 from skyweave2.detector.config import Backend
 from skyweave2.detector.runner import detect_clip, run_detector, scorecard_for_detections
 from skyweave2.eval.labels import TruthLabel
@@ -127,6 +128,53 @@ def test_k8_cv2_absent_refusal(monkeypatch, tmp_path, base_config):
     clip_dir, _ = moving_blob_clip(tmp_path)
     with pytest.raises(RuntimeError, match="OpenCV"):
         run_detector(clip_dir, base_config)
+
+
+def test_runner_records_each_frames_accepted_bbox_overlap_pairs(
+    monkeypatch, tmp_path, base_config
+):
+    from skyweave2.detector import runner as runner_mod
+    from skyweave2.eval.clips import write_clip
+
+    class NestedMaskBackend:
+        def apply(self, frame, warming_up):
+            mask = np.zeros(frame.shape, dtype=bool)
+            mask[1, 1:8] = True
+            mask[7, 1:8] = True
+            mask[2:7, 1] = True
+            mask[2:7, 7] = True
+            mask[4, 3] = True
+            return mask
+
+    monkeypatch.setattr(runner_mod, "make_backend", lambda _config: NestedMaskBackend())
+    clip_dir = tmp_path / "overlap-clip"
+    write_clip(
+        [np.zeros((12, 12), dtype=np.uint8) for _ in range(3)],
+        clip_dir,
+        fps=30.0,
+        source="overlap-counter-test",
+    )
+    config = base_config.model_copy(
+        update={
+            "proc_width": 12,
+            "proc_height": 12,
+            "warmup_frames": 0,
+            "open_radius_px": 0,
+            "min_area_px": 1,
+            "persistence_frames": 1,
+        }
+    )
+    stats = DetectorStats()
+
+    results = run_detector(clip_dir, config, stats=stats)
+
+    assert [result.overlapping_bbox_pairs for result in results] == [1, 1, 1]
+    assert stats.frames_with_overlapping_bboxes == 3
+    assert stats.overlapping_bbox_pairs == 3
+    assert "overlapping_bbox_pairs" not in stats.as_dict()
+    diagnostics = stats.as_dict(include_overlap_diagnostics=True)
+    assert diagnostics["frames_with_overlapping_bboxes"] == 3
+    assert diagnostics["overlapping_bbox_pairs"] == 3
 
 
 def test_cli_writes_observation_stream(tmp_path, base_config, capsys):

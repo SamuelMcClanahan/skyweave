@@ -23,6 +23,7 @@ import hashlib
 import io
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -109,9 +110,14 @@ def test_the_stream_is_identical_in_a_separate_process(scene_clips, tmp_path):
     )
     path = tmp_path / "child.py"
     path.write_text(script, encoding="utf-8")
+    staged_source = str(Path(__file__).resolve().parents[2] / "src")
     completed = subprocess.run(
         [sys.executable, str(path)], capture_output=True, text=True, check=False,
-        env={"PYTHONHASHSEED": "1", "PATH": "/usr/bin:/bin"},
+        env={
+            "PYTHONHASHSEED": "1",
+            "PATH": "/usr/bin:/bin",
+            "PYTHONPATH": staged_source,
+        },
     )
     assert completed.returncode == 0, completed.stderr
     profile = PtsProfile(offset_ms=1.5, drift_ppm=25.0, jitter_ms_sigma=0.2, seed=7)

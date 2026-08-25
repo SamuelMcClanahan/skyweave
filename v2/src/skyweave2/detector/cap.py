@@ -105,11 +105,9 @@ def rank_key(item: Emitted) -> tuple[float, float, float, float]:
        (RV1106_EDGE_NODE.md section 8) as closely as a model-free detector
        can. When a real confidence model lands, level 1 starts disagreeing
        with level 2 and outranks it, which is the point of the order.
-    3. ``centroid_v`` then 4. ``centroid_u`` — raster order, purely to make
-       the choice TOTAL. Without them two equal-area blobs would be ordered
-       by list position, which is stable in CPython and meaningless as a
-       rule; the C daemon sorts the same key and must not have to reproduce
-       an accident of Python's sort.
+    3. ``centroid_v`` then 4. ``centroid_u`` — raster order. Exact ties retain
+       offered order through Python's stable sort; the C daemon makes that
+       final offered-index tie-break explicit because ``qsort`` is unstable.
     """
     component, persistence_count, _blob_id = item
     return (
@@ -177,18 +175,28 @@ class DetectorStats:
     components_emitted: int = 0
     components_dropped_over_cap: int = 0
     max_components_offered: int = 0
+    # Bounding-box overlap is measured on accepted components before
+    # persistence or the wire cap.  It is diagnostic evidence about the
+    # mask-moment centroid rule, not a loss and not a cap event.
+    frames_with_overlapping_bboxes: int = 0
+    overlapping_bbox_pairs: int = 0
 
-    def record(self, result: CapResult) -> None:
+    def record(self, result: CapResult, *, overlapping_bbox_pairs: int = 0) -> None:
+        if overlapping_bbox_pairs < 0:
+            raise ValueError("overlapping_bbox_pairs cannot be negative")
         self.frames += 1
         self.components_offered += result.offered
         self.components_emitted += len(result.kept)
         self.components_dropped_over_cap += result.dropped
         self.max_components_offered = max(self.max_components_offered, result.offered)
+        self.overlapping_bbox_pairs += overlapping_bbox_pairs
+        if overlapping_bbox_pairs:
+            self.frames_with_overlapping_bboxes += 1
         if result.at_cap:
             self.frames_at_cap += 1
 
-    def as_dict(self) -> dict[str, int]:
-        return {
+    def as_dict(self, *, include_overlap_diagnostics: bool = False) -> dict[str, int]:
+        payload = {
             "frames": self.frames,
             "frames_at_cap": self.frames_at_cap,
             "components_offered": self.components_offered,
@@ -196,6 +204,18 @@ class DetectorStats:
             "components_dropped_over_cap": self.components_dropped_over_cap,
             "max_components_offered": self.max_components_offered,
         }
+        # Fixture stats predate this campaign diagnostic and E2 pins their key
+        # schema.  Campaign artifacts request the new counters explicitly;
+        # ordinary fixture regeneration therefore remains byte-inert when no
+        # observation changed.
+        if include_overlap_diagnostics:
+            payload.update(
+                {
+                    "frames_with_overlapping_bboxes": self.frames_with_overlapping_bboxes,
+                    "overlapping_bbox_pairs": self.overlapping_bbox_pairs,
+                }
+            )
+        return payload
 
 
 __all__ = [

@@ -58,20 +58,37 @@ _NOT_PASSED = {
 _SCALAR_FLAGS = {
     "warmup_frames": "--warmup",
     "max_components_per_frame": "--cap",
+    # C-001 whitelist. These are passed even at their defaults: an artifact's
+    # argv must say which side of an off/on morphology experiment ran, and the
+    # board must never infer a campaign knob from a compiled-in value.
+    "open_radius_px": "--morph-open",
+    "min_area_px": "--min-area-px",
 }
 
-# ive_approx knobs the daemon reads from its own defaults, which mirror
-# IveApproxParams field for field. They are asserted equal rather than passed:
-# a flag per Gaussian-mixture knob would be eight more places to drift, and
-# the assertion catches the drift the flags would have papered over.
+# ive_approx knobs that remain frozen in C-001. The two whitelisted GMM2
+# controls are deliberately absent and travel through _GMM2_FLAGS below.
 _GMM2_DEFAULTS = {
     "model_num": 3,
     "var_init": 225.0,
-    "var_min": 25.0,
     "learn_rate": 0.005,
     "bg_ratio": 0.9,
-    "match_sigmas": 2.5,
     "weight_init": 0.05,
+}
+
+_GMM2_FLAGS = {
+    "var_min": "--gmm2-var-min",
+    "match_sigmas": "--gmm2-match-sigmas",
+}
+
+# Structural DetectorConfig fields the daemon implements with the shared
+# defaults but which C-001 does not authorize as knobs. They are checked, not
+# silently ignored: changing one on the oracle while the node keeps its
+# compiled-in value would make the parity result about two configurations.
+_STRUCTURAL_DEFAULTS = {
+    "max_area_px": 10000,
+    "persistence_frames": 2,
+    "persistence_gate_px": 12.0,
+    "centroid_cov_floor_px2": 0.25,
 }
 
 
@@ -133,14 +150,7 @@ def daemon_args(config: DetectorConfig, detector: str = "soft") -> list[str]:
         "ive_approx",
         "proc_width",
         "proc_height",
-        # Structural knobs the daemon hard-codes to the host's defaults; the
-        # equality check below is what keeps them honest.
-        "open_radius_px",
-        "min_area_px",
-        "max_area_px",
-        "persistence_frames",
-        "persistence_gate_px",
-        "centroid_cov_floor_px2",
+        *_STRUCTURAL_DEFAULTS,
     }
     unmapped = set(DetectorConfig.model_fields) - known
     if unmapped:
@@ -166,9 +176,19 @@ def daemon_args(config: DetectorConfig, detector: str = "soft") -> list[str]:
                 "in firmware/rv1106/src/sw_config.c too, and this assertion is how "
                 "you find out."
             )
+    for name, expected in _STRUCTURAL_DEFAULTS.items():
+        actual = getattr(config, name)
+        if actual != expected:
+            raise AssertionError(
+                f"{name} is {actual}, the daemon compiles in {expected}. "
+                "C-001 freezes this field, so it cannot be changed through the "
+                "campaign runner."
+            )
     args = ["--detector", detector, "--proc", f"{config.proc_width}x{config.proc_height}"]
     for field, flag in _SCALAR_FLAGS.items():
         args += [flag, str(getattr(config, field))]
+    for field, flag in _GMM2_FLAGS.items():
+        args += [flag, str(getattr(config.ive_approx, field))]
     return args
 
 

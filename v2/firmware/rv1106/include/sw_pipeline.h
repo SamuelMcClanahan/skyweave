@@ -49,6 +49,11 @@ typedef struct {
 
 void sw_pipeline_init(sw_pipeline_t *pipeline, const sw_detector_config_t *config);
 
+/* A detector-failed frame breaks the declared consecutive-frame persistence
+ * chain. It is not a scored pipeline frame and changes no cap counters, but
+ * old tracks must not survive across the missing measurement. */
+void sw_pipeline_reset_persistence(sw_pipeline_t *pipeline);
+
 /* Turn one frame's components into a capture event.
  *
  * `scale_x`/`scale_y` are full/proc, per the D0 scaling law. `event->count`

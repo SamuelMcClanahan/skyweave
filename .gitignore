@@ -21,3 +21,6 @@ tmp/
 *_HANDOFF.md
 # kept explicit — a setup guide that does not match the suffixes above
 v2/docs/REMOTE_ACCESS_SETUP.md
+v2/docs/campaigns/C-001/
+v2/docs/campaigns/C-001-shifts/
+v2/docs/campaigns/C-002/

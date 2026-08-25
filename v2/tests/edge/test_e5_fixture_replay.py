@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import pytest
 
-from skyweave2.edge import daemon, tolerance
+from skyweave2.edge import daemon, fixtures, tolerance
 from skyweave2.edge.injection import PtsProfile, build_injection_stream
+from skyweave2.edge.obsfixture import encode_fixture, group_by_capture_event
 from skyweave2.edge.tolerance import HOST_SOFT_TOLERANCE, compare_to_oracle
 from skyweave2.transport import codec
 from skyweave2.transport.wire import DATAGRAM_CEILING_BYTES, unframe
@@ -124,6 +125,33 @@ def test_the_portable_detector_is_currently_byte_exact(replays, name):
         "the declared-tolerance test: if that one passes, this is a precision "
         "finding, not a defect."
     )
+
+
+@pytest.mark.parametrize("name", REPLAYABLE_FIXTURES)
+def test_mask_moment_rule_does_not_move_committed_synthetic_fixture_bytes(
+    scene_clips, name
+):
+    """Regenerate in memory and prove the sanctioned centroid rule is inert.
+
+    The committed scenes contain no accepted components with overlapping
+    bounding boxes.  Their centroids, observations, and packet bytes therefore
+    remain exactly what is checked in, and no fixture rewrite is warranted.
+    """
+    build = fixtures.build_fixture(
+        name,
+        scene_clips[name],
+        load_config(name),
+        seed=fixtures.SCENE_SEED,
+    )
+
+    assert build.stats.frames_with_overlapping_bboxes == 0
+    assert build.stats.overlapping_bbox_pairs == 0
+    produced_observations = encode_fixture(group_by_capture_event(build.observations))
+    committed_observations = (
+        fixtures.FIXTURE_ROOT / name / "observations.swob"
+    ).read_bytes()
+    assert produced_observations == committed_observations
+    assert build.packets == load_packets(name)
 
 
 # ---------------------------------------------------------------------------

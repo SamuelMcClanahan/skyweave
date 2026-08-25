@@ -2,6 +2,8 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +30,7 @@ void sw_config_defaults(sw_config_t *config)
     config->control_port = 5602;
     config->health_period_ms = 1000; /* the brief: 1 Hz health packet */
     config->camera_id = 0;
+    config->profile_stats = false;
 
     /* Every default below is DetectorConfig's, verbatim. */
     config->detector.gmm2.model_num = 3;
@@ -73,6 +76,37 @@ const char *sw_source_name(sw_source_kind_t source)
     return "unknown";
 }
 
+static int validate_artifact_paths_are_distinct(const sw_config_t *config)
+{
+    struct named_path {
+        const char *name;
+        const char *path;
+    } paths[] = {
+        {"injection input", config->inject_path},
+        {"packet log", config->packet_log_path},
+        {"stats", config->stats_path},
+        {"CCL log", config->ccl_log_path},
+        {"foreground-mask log", config->fg_mask_log_path},
+    };
+    size_t i;
+    size_t j;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        if (paths[i].path[0] == '\0') {
+            continue;
+        }
+        for (j = i + 1; j < sizeof(paths) / sizeof(paths[0]); ++j) {
+            if (paths[j].path[0] != '\0' &&
+                strcmp(paths[i].path, paths[j].path) == 0) {
+                SW_LOG_ERR("%s and %s must use distinct paths (both are %s)",
+                           paths[i].name, paths[j].name, paths[i].path);
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 int sw_config_validate(const sw_config_t *config)
 {
     const sw_detector_config_t *d = &config->detector;
@@ -108,6 +142,31 @@ int sw_config_validate(const sw_config_t *config)
     }
     if (d->min_area_px < 1 || d->max_area_px < d->min_area_px) {
         SW_LOG_ERR("area gate [%d, %d] is empty", d->min_area_px, d->max_area_px);
+        return -1;
+    }
+    if (d->open_radius_px != 0 && d->open_radius_px != 1) {
+        SW_LOG_ERR("morph_open %d is not 0 or 1", d->open_radius_px);
+        return -1;
+    }
+    if (!isfinite(d->gmm2.match_sigmas) || d->gmm2.match_sigmas <= 0.0f) {
+        SW_LOG_ERR("GMM2 match_sigmas must be finite and positive, got %.9g",
+                   (double)d->gmm2.match_sigmas);
+        return -1;
+    }
+    if (!isfinite(d->gmm2.var_min) || d->gmm2.var_min <= 0.0f) {
+        SW_LOG_ERR("GMM2 var_min must be finite and positive, got %.9g",
+                   (double)d->gmm2.var_min);
+        return -1;
+    }
+    if (config->detector_kind == SW_DETECTOR_IVE &&
+        d->gmm2.match_sigmas * d->gmm2.match_sigmas > 255.0f) {
+        SW_LOG_ERR("IVE GMM2 match_sigmas %.9g squares beyond its u8 control",
+                   (double)d->gmm2.match_sigmas);
+        return -1;
+    }
+    if (config->detector_kind == SW_DETECTOR_IVE && d->gmm2.var_min > 1023.0f) {
+        SW_LOG_ERR("IVE GMM2 var_min %.9g exceeds its u10q0 control",
+                   (double)d->gmm2.var_min);
         return -1;
     }
     if (d->persistence_frames < 1) {
@@ -191,6 +250,30 @@ int sw_config_validate(const sw_config_t *config)
                    (long long)config->ram_loop_period_ns, config->health_period_ms);
         return -1;
     }
+    if (config->fg_mask_log_path[0] != '\0' && config->fg_mask_limit == 0) {
+        SW_LOG_ERR("--fg-mask-log requires --fg-mask-limit N (1..%u); an unbounded "
+                   "raw-mask artifact is refused",
+                   SW_FG_MASK_LOG_MAX_RECORDS);
+        return -1;
+    }
+    if (config->fg_mask_log_path[0] == '\0' && config->fg_mask_limit != 0) {
+        SW_LOG_ERR("--fg-mask-limit requires --fg-mask-log PATH");
+        return -1;
+    }
+    if (config->fg_mask_limit > SW_FG_MASK_LOG_MAX_RECORDS) {
+        SW_LOG_ERR("--fg-mask-limit %u exceeds the hard artifact bound %u",
+                   config->fg_mask_limit, SW_FG_MASK_LOG_MAX_RECORDS);
+        return -1;
+    }
+    if (validate_artifact_paths_are_distinct(config) != 0) {
+        return -1;
+    }
+    if ((config->ccl_log_path[0] != '\0' ||
+         config->fg_mask_log_path[0] != '\0') &&
+        config->detector_kind != SW_DETECTOR_IVE) {
+        SW_LOG_ERR("CCL and foreground-mask diagnostics require --detector ive");
+        return -1;
+    }
     return 0;
 }
 
@@ -218,6 +301,10 @@ void sw_config_usage(const char *argv0)
             "    --proc WxH             processing resolution\n"
             "    --warmup N             warm-up frames before any observation\n"
             "    --cap N                per-frame component cap (<= wire bound)\n"
+            "    --min-area-px N        positive CCL area floor\n"
+            "    --morph-open 0|1       exact 3x3-cross erode then dilate\n"
+            "    --gmm2-match-sigmas X  finite positive match gate (IVE: X^2<=255)\n"
+            "    --gmm2-var-min X       finite positive variance (IVE: <=1023)\n"
             "\n"
             "  output:\n"
             "    --jetson HOST          measurement/health destination\n"
@@ -226,6 +313,10 @@ void sw_config_usage(const char *argv0)
             "    --health-period-ms N\n"
             "    --packet-log PATH      hex datagrams, one per line (fixture gate)\n"
             "    --stats PATH           end-of-run counters as JSON\n"
+            "    --profile-stats        add per-stage frame timing to the stats JSON\n"
+            "    --ccl-log PATH         post-warm IVE CCL attempts as JSONL\n"
+            "    --fg-mask-log PATH     binary final masks for failed IVE CCL frames\n"
+            "    --fg-mask-limit N      required record bound, 1..%u\n"
             "\n"
             "  identity:\n"
             "    --camera-id N\n"
@@ -234,7 +325,7 @@ void sw_config_usage(const char *argv0)
             "    --calibration-rev R\n"
             "\n"
             "    -v                     more logging (repeatable)\n",
-            argv0);
+            argv0, SW_FG_MASK_LOG_MAX_RECORDS);
 }
 
 static int parse_wxh(const char *text, int *width, int *height)
@@ -308,6 +399,43 @@ static int parse_u32_arg(const char *text, uint32_t *out, const char *flag)
         return -1;
     }
     *out = (uint32_t)value;
+    return 0;
+}
+
+static int parse_int_arg(const char *text, int *out, const char *flag)
+{
+    char *end = NULL;
+    long value;
+    if (text[0] == '\0' || isspace((unsigned char)text[0])) {
+        SW_LOG_ERR("%s wants a whole decimal integer, got \"%s\"", flag, text);
+        return -1;
+    }
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || value < INT_MIN ||
+        value > INT_MAX) {
+        SW_LOG_ERR("%s wants a whole decimal integer, got \"%s\"", flag, text);
+        return -1;
+    }
+    *out = (int)value;
+    return 0;
+}
+
+static int parse_float_arg(const char *text, float *out, const char *flag)
+{
+    char *end = NULL;
+    float value;
+    if (text[0] == '\0' || isspace((unsigned char)text[0])) {
+        SW_LOG_ERR("%s wants a finite number, got \"%s\"", flag, text);
+        return -1;
+    }
+    errno = 0;
+    value = strtof(text, &end);
+    if (errno != 0 || end == text || *end != '\0' || !isfinite(value)) {
+        SW_LOG_ERR("%s wants a finite number, got \"%s\"", flag, text);
+        return -1;
+    }
+    *out = value;
     return 0;
 }
 
@@ -439,6 +567,30 @@ int sw_config_parse_args(sw_config_t *config, int argc, char **argv)
         } else if (strcmp(arg, "--cap") == 0) {
             NEED_VALUE(arg);
             config->detector.max_components_per_frame = atoi(argv[++i]);
+        } else if (strcmp(arg, "--min-area-px") == 0) {
+            NEED_VALUE(arg);
+            if (parse_int_arg(argv[++i], &config->detector.min_area_px,
+                              "--min-area-px") != 0) {
+                return -1;
+            }
+        } else if (strcmp(arg, "--morph-open") == 0) {
+            NEED_VALUE(arg);
+            if (parse_int_arg(argv[++i], &config->detector.open_radius_px,
+                              "--morph-open") != 0) {
+                return -1;
+            }
+        } else if (strcmp(arg, "--gmm2-match-sigmas") == 0) {
+            NEED_VALUE(arg);
+            if (parse_float_arg(argv[++i], &config->detector.gmm2.match_sigmas,
+                                "--gmm2-match-sigmas") != 0) {
+                return -1;
+            }
+        } else if (strcmp(arg, "--gmm2-var-min") == 0) {
+            NEED_VALUE(arg);
+            if (parse_float_arg(argv[++i], &config->detector.gmm2.var_min,
+                                "--gmm2-var-min") != 0) {
+                return -1;
+            }
         } else if (strcmp(arg, "--jetson") == 0) {
             NEED_VALUE(arg);
             if (copy_arg(config->jetson_host, sizeof(config->jetson_host), argv[++i],
@@ -464,6 +616,27 @@ int sw_config_parse_args(sw_config_t *config, int argc, char **argv)
             NEED_VALUE(arg);
             if (copy_arg(config->stats_path, sizeof(config->stats_path), argv[++i],
                          "stats") != 0) {
+                return -1;
+            }
+        } else if (strcmp(arg, "--profile-stats") == 0) {
+            config->profile_stats = true;
+        } else if (strcmp(arg, "--ccl-log") == 0) {
+            NEED_VALUE(arg);
+            if (copy_arg(config->ccl_log_path, sizeof(config->ccl_log_path),
+                         argv[++i], "ccl-log") != 0) {
+                return -1;
+            }
+        } else if (strcmp(arg, "--fg-mask-log") == 0) {
+            NEED_VALUE(arg);
+            if (copy_arg(config->fg_mask_log_path,
+                         sizeof(config->fg_mask_log_path), argv[++i],
+                         "fg-mask-log") != 0) {
+                return -1;
+            }
+        } else if (strcmp(arg, "--fg-mask-limit") == 0) {
+            NEED_VALUE(arg);
+            if (parse_u32_arg(argv[++i], &config->fg_mask_limit,
+                              "--fg-mask-limit") != 0) {
                 return -1;
             }
         } else if (strcmp(arg, "--camera-id") == 0) {

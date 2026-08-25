@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include "sw_capture.h"
+#include "sw_ccl_measure.h"
 #include "sw_common.h"
 #include "sw_config.h"
 #include "sw_detect.h"
@@ -107,11 +108,16 @@ static void write_stats(const char *path, const sw_config_t *config,
                         const sw_inject_t *inject)
 {
     sw_detector_losses_t losses;
+    sw_detector_diagnostics_t diagnostics;
     FILE *fh;
     losses.components_shed = 0;
     losses.frames_shed = 0;
+    memset(&diagnostics, 0, sizeof(diagnostics));
     if (detector != NULL && detector->losses != NULL) {
         detector->losses(detector, &losses);
+    }
+    if (detector != NULL && detector->diagnostics != NULL) {
+        detector->diagnostics(detector, &diagnostics);
     }
     if (path == NULL || path[0] == '\0') {
         return;
@@ -144,7 +150,16 @@ static void write_stats(const char *path, const sw_config_t *config,
             "  \"pace_max_late_ns\": %lld,\n"
             "  \"proc_width\": %d,\n"
             "  \"proc_height\": %d,\n"
+            "  \"warmup_frames\": %d,\n"
             "  \"max_components_per_frame\": %d,\n"
+            "  \"min_area_px\": %d,\n"
+            "  \"max_area_px\": %d,\n"
+            "  \"morph_open\": %d,\n"
+            "  \"persistence_frames\": %d,\n"
+            "  \"persistence_gate_px\": %.17g,\n"
+            "  \"gmm2_match_sigmas\": %.9g,\n"
+            "  \"gmm2_var_min\": %.9g,\n"
+            "  \"fg_mask_limit\": %u,\n"
             "  \"wire_observations_max_count\": %zu,\n"
             "  \"frames_in\": %llu,\n"
             "  \"frames_detector_failed\": %llu,\n"
@@ -168,8 +183,20 @@ static void write_stats(const char *path, const sw_config_t *config,
             "  \"control_rejected\": %llu,\n"
             "  \"components_shed_by_detector\": %llu,\n"
             "  \"frames_shed_by_detector\": %llu,\n"
-            "  \"health_drops_total\": %llu\n"
-            "}\n",
+            "  \"ccl_attempts\": %llu,\n"
+            "  \"ccl_api_failures\": %llu,\n"
+            "  \"ccl_label_failures\": %llu,\n"
+            "  \"ccl_label_failures_with_raised_threshold\": %llu,\n"
+            "  \"ccl_threshold_runaway_failures\": %llu,\n"
+            "  \"ccl_sub_cap_failures\": %llu,\n"
+            "  \"ccl_other_failures\": %llu,\n"
+            "  \"ccl_region_count_mismatch_frames\": %llu,\n"
+            "  \"overlapping_bbox_pairs\": %llu,\n"
+            "  \"frames_with_overlapping_bboxes\": %llu,\n"
+            "  \"frames_area_threshold_raised\": %llu,\n"
+            "  \"max_area_threshold\": %u,\n"
+            "  \"fg_masks_written\": %llu,\n"
+            "  \"fg_mask_write_failures\": %llu,\n",
             config->camera_id, detector_name, sw_source_name(config->source),
             (unsigned long long)stats->source_bytes_served,
             (unsigned long long)(config->source == SW_SOURCE_INJECT_RAM
@@ -182,7 +209,14 @@ static void write_stats(const char *path, const sw_config_t *config,
             (long long)config->ram_loop_period_ns, config->ram_budget_mb,
             (unsigned long long)stats->pace_late_frames,
             (long long)stats->pace_max_late_ns, config->detector.proc_width,
-            config->detector.proc_height, config->detector.max_components_per_frame,
+            config->detector.proc_height, config->detector.warmup_frames,
+            config->detector.max_components_per_frame,
+            config->detector.min_area_px, config->detector.max_area_px,
+            config->detector.open_radius_px,
+            config->detector.persistence_frames,
+            config->detector.persistence_gate_px,
+            (double)config->detector.gmm2.match_sigmas,
+            (double)config->detector.gmm2.var_min, config->fg_mask_limit,
             (size_t)SW_OBSERVATIONS_MAX, (unsigned long long)stats->frames_in,
             (unsigned long long)stats->frames_detector_failed,
             (unsigned long long)pipeline->frames_at_cap,
@@ -205,6 +239,54 @@ static void write_stats(const char *path, const sw_config_t *config,
             (unsigned long long)control->rejected,
             (unsigned long long)losses.components_shed,
             (unsigned long long)losses.frames_shed,
+            (unsigned long long)diagnostics.ccl_attempts,
+            (unsigned long long)diagnostics.ccl_api_failures,
+            (unsigned long long)diagnostics.ccl_label_failures,
+            (unsigned long long)
+                diagnostics.ccl_label_failures_with_raised_threshold,
+            (unsigned long long)diagnostics.ccl_threshold_runaway_failures,
+            (unsigned long long)diagnostics.ccl_sub_cap_failures,
+            (unsigned long long)diagnostics.ccl_other_failures,
+            (unsigned long long)diagnostics.ccl_region_count_mismatch_frames,
+            (unsigned long long)diagnostics.overlapping_bbox_pairs,
+            (unsigned long long)diagnostics.frames_with_overlapping_bboxes,
+            (unsigned long long)diagnostics.frames_area_threshold_raised,
+            diagnostics.max_area_threshold,
+            (unsigned long long)diagnostics.fg_masks_written,
+            (unsigned long long)diagnostics.fg_mask_write_failures);
+    /* The per-stage frame timing, OPT-IN and byte-stable when off: without
+     * --profile-stats nothing at all is printed here, so the stats file is
+     * byte-identical to what existing consumers already parse. The object
+     * sits between the detector-diagnostics keys and health_drops_total
+     * because that last key is the one line of this hand-written JSON with
+     * no trailing comma; every line above it ends with one, and this block
+     * follows the same rule in both branches. The `profile` hook is the
+     * struct's only optional entry (sw_detect.h), so both the pointer and
+     * its answer are tested rather than assumed. Stage names are emitted
+     * unescaped because they are the detectors' own string literals, never
+     * input. */
+    if (config->profile_stats && detector != NULL && detector->profile != NULL) {
+        const sw_profile_t *profile = detector->profile(detector);
+        if (profile != NULL) {
+            int i;
+            fputs("  \"profile\": {", fh);
+            for (i = 0; i < profile->stage_count; ++i) {
+                const sw_profile_stage_t *stage = &profile->stages[i];
+                fprintf(fh,
+                        "%s\n    \"%s\": {\"count\": %llu, \"total_ns\": %llu, "
+                        "\"min_ns\": %llu, \"max_ns\": %llu}",
+                        i > 0 ? "," : "", stage->name,
+                        (unsigned long long)stage->count,
+                        (unsigned long long)stage->total_ns,
+                        (unsigned long long)stage->min_ns,
+                        (unsigned long long)stage->max_ns);
+            }
+            fputs("\n  },\n", fh);
+        }
+    }
+    fprintf(fh,
+            "  \"health_drops_total\": %llu\n"
+            "}\n",
             (unsigned long long)total_drops(stats, pipeline, sender, detector));
     fclose(fh);
 }
@@ -254,6 +336,18 @@ static void send_health(const sw_config_t *config, const sw_envelope_t *envelope
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--self-test-ccl-measure") == 0) {
+        const int selftest = sw_ccl_measure_selftest();
+        if (selftest != 0) {
+            fprintf(stderr, "CCL structural self-test failed at check %d\n", selftest);
+            return selftest;
+        }
+        puts("{\"schema\":\"skyweave-ccl-selftest/1\","
+             "\"full_254_slot_region_scan\":true,"
+             "\"mask_moment_centroid\":true,"
+             "\"overlap_counter\":true}");
+        return 0;
+    }
     sw_config_t config;
     sw_run_stats_t stats;
     sw_pipeline_t pipeline;
@@ -447,10 +541,14 @@ int main(int argc, char **argv)
     }
 
     SW_LOG_INFO("skyweave-edge: camera %u, detector %s, proc %dx%d, cap %d/frame, "
-                "wire bound %zu/event",
+                "wire bound %zu/event, min area %d px, morph open %d, "
+                "GMM2 match sigmas %.3f, var min %.3f",
                 config.camera_id, detector->name, config.detector.proc_width,
                 config.detector.proc_height, config.detector.max_components_per_frame,
-                (size_t)SW_OBSERVATIONS_MAX);
+                (size_t)SW_OBSERVATIONS_MAX, config.detector.min_area_px,
+                config.detector.open_radius_px,
+                (double)config.detector.gmm2.match_sigmas,
+                (double)config.detector.gmm2.var_min);
 
     started_ns = sw_monotonic_ns();
     last_health_ns = started_ns;
@@ -507,8 +605,9 @@ int main(int argc, char **argv)
         stats.source_bytes_served += (uint64_t)width * (uint64_t)height;
 
         warming = (int64_t)envelope.frame_seq < (int64_t)config.detector.warmup_frames;
-        component_count = detector->apply(detector, luma, width, height, warming,
-                                          components, SW_MAX_COMPONENTS, &occupancy);
+        component_count = detector->apply(
+            detector, luma, width, height, warming, envelope.frame_seq, components,
+            SW_MAX_COMPONENTS, &occupancy);
         if (component_count < 0) {
             /* A failed frame still owes the Jetson a health packet. Skipping
              * housekeeping here meant that a detector failing on EVERY frame
@@ -516,6 +615,10 @@ int main(int argc, char **argv)
              * on the health plane, which reads exactly like a dead node with
              * none of the information. */
             stats.frames_detector_failed++;
+            /* Persistence is consecutive-frame evidence. A detector failure
+             * is a missing measurement, so it terminates every live chain;
+             * otherwise success -> failure -> success could emit count 2. */
+            sw_pipeline_reset_persistence(&pipeline);
             goto housekeeping;
         }
         if (warming) {

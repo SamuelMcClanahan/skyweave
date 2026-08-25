@@ -62,6 +62,13 @@ void sw_pipeline_init(sw_pipeline_t *pipeline, const sw_detector_config_t *confi
     pipeline->config = *config;
 }
 
+void sw_pipeline_reset_persistence(sw_pipeline_t *pipeline)
+{
+    if (pipeline != NULL) {
+        pipeline->track_count = 0;
+    }
+}
+
 /* D0 section 2: u_full = (u_proc + 0.5) * s - 0.5. */
 static double proc_to_full(double value, double scale)
 {
@@ -187,10 +194,10 @@ static int persistence_update(sw_pipeline_t *pipeline, const sw_component_t *com
  *   2. -area_px      (today's confidence is a monotone function of area, so
  *                     this level never contradicts level 1; it is what
  *                     separates the components that saturate at 1.0)
- *   3. centroid_v then 4. centroid_u  (raster order, purely to make the
- *                     choice TOTAL — without them two equal-area blobs
- *                     would be ordered by list position, which is an
- *                     accident of the host's sort and not a rule).
+ *   3. centroid_v then 4. centroid_u  (raster order), then
+ *   5. offered index  (Python's sort is stable, so exact ties keep their
+ *                     input order; qsort is not stable and must make that
+ *                     final rule explicit).
  *
  * `confidence` is the UNNARROWED double for the same reason the host ranks
  * on a Python float: ranking on the binary32 wire value could tie two
@@ -220,6 +227,9 @@ static int compare_ranked(const void *lhs, const void *rhs)
     }
     if (a->centroid_u != b->centroid_u) {
         return a->centroid_u < b->centroid_u ? -1 : 1;
+    }
+    if (a->index != b->index) {
+        return a->index < b->index ? -1 : 1;
     }
     return 0;
 }

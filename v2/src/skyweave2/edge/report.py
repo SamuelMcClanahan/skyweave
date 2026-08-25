@@ -1030,10 +1030,11 @@ def generate(evidence: dict | None) -> str:
     ):
         a(f"| {label} | {bound} | PENDING (D8.2) |")
     a("")
-    a("Wider than the host bounds on every axis because four structural")
-    a("divergences are known IN ADVANCE, read out of the SDK headers rather")
-    a("than guessed. They are properties of the hardware, not defects, and")
-    a("each is named in `firmware/rv1106/src/sw_detect_ive.c`:")
+    a("Wider than the host bounds on every axis because four interface and")
+    a("representation differences were declared IN ADVANCE from the SDK headers and")
+    a("host design rather than fitted to board results. The vendor library's internal")
+    a("algorithms remain opaque. Each diagnostic is named in")
+    a("`firmware/rv1106/src/sw_detect_ive.c`:")
     a("")
     a("| # | Divergence | Why it moves a number |")
     a("| --- | --- | --- |")
@@ -1041,13 +1042,15 @@ def generate(evidence: dict | None) -> str:
       "supported\"; the host oracle uses cv2 connectivity 4 | blobs touching "
       "only diagonally are ONE component on the board and TWO on the host |")
     a("| 2 | `IVE_REGION_S` carries area and the four bbox edges — no centroid | "
-      "the centroid is a first moment the A7 takes over the label image, so "
-      "the area is the hardware's and the centroid is ours, and they can "
-      "disagree about a boundary pixel |")
-    a("| 3 | `IVE_CCL_CTRL_S` has `u16InitAreaThr`/`u16Step` and the hardware "
-      "RAISES its area threshold until the region count fits 254 | the "
-      "effective `min_area_px` MOVES on crowded frames; the daemon reads "
-      "`u32CurAreaThr` back every frame and counts the frames it rose |")
+      "the centroid is a first moment the A7 takes over the final binary "
+      "foreground mask inside that bbox; the area remains the hardware's, and "
+      "overlapping bbox pairs are counted because their moments can share mask "
+      "pixels |")
+    a("| 3 | `IVE_CCL_CTRL_S` exposes `u16InitAreaThr`/`u16Step`, and "
+      "`IVE_CCBLOB_S` reports `u32CurAreaThr`; the internal selection algorithm "
+      "is not documented by the pinned headers | the daemon retains the "
+      "reported threshold every frame and counts values above the configured "
+      "floor without treating the telemetry as a proven cause |")
     a("| 4 | GMM2's controls are u8q2/u10q0 fixed point | the host's float "
       "learn rate, background ratio and weights are QUANTISED on the way in; "
       "the daemon logs what it actually programmed |")
@@ -1085,7 +1088,19 @@ def generate(evidence: dict | None) -> str:
     a("")
 
     # ---------------------------------------------------------------- 8
-    a("## 8. Board benchmark and deployment resolution — PENDING (D8.1)")
+    # Board benchmark evidence arrives as evidence["board_benchmark"], built
+    # by `campaign_c002 report-evidence` from the retained C-002 artifacts —
+    # never typed here. Shape: {"board", "campaign", "sweep_rows": {"WxH":
+    # {"source_mode","source_byte_rate","fps","peak_rss","ddr","cpu",
+    # "thermals","verdict"}}, "soak": {"resolution","source_mode","duration",
+    # "frames","drops","thermal_drift"}, "narrative": [str, ...]}. Absent
+    # block = every cell PENDING, exactly as before a board existed.
+    board_bench = (evidence or {}).get("board_benchmark")
+    if board_bench is None:
+        a("## 8. Board benchmark and deployment resolution — PENDING (D8.1)")
+    else:
+        a("## 8. Board benchmark and deployment resolution — Measured "
+          f"({board_bench['campaign']}, {board_bench['board']})")
     a("")
     a("The benchmark sweeps GMM2 at the three D4 resolutions and the surviving")
     a("one gets a one-hour soak. All three pass the D4 HOST gate, so the board")
@@ -1108,18 +1123,39 @@ def generate(evidence: dict | None) -> str:
       "DDR bandwidth | A7 utilisation | Thermals | Verdict |")
     a("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for width, height in D4_RESOLUTIONS:
-        a(f"| {width}x{height} | PENDING | PENDING | PENDING | PENDING | PENDING | "
-          "PENDING | PENDING | PENDING |")
+        key = f"{width}x{height}"
+        row = (board_bench or {}).get("sweep_rows", {}).get(key)
+        if row is None:
+            a(f"| {key} | PENDING | PENDING | PENDING | PENDING | PENDING | "
+              "PENDING | PENDING | PENDING |")
+        else:
+            a(f"| {key} | {row['source_mode']} | {row['source_byte_rate']} | "
+              f"{row['fps']} | {row['peak_rss']} | {row['ddr']} | "
+              f"{row['cpu']} | {row['thermals']} | {row['verdict']} |")
     a("")
+    soak_block = (board_bench or {}).get("soak")
+
+    def _soak_cell(name: str, pending: str = "PENDING") -> str:
+        if soak_block is None:
+            return pending
+        return str(soak_block[name])
+
     a("| Soak | Value |")
     a("| --- | --- |")
-    a("| Resolution | PENDING |")
-    a("| Source mode | PENDING |")
-    a("| Duration | 1 h (declared) |")
-    a("| Frames | PENDING |")
-    a("| Drops | PENDING |")
-    a("| Thermal drift | PENDING |")
+    a(f"| Resolution | {_soak_cell('resolution')} |")
+    a(f"| Source mode | {_soak_cell('source_mode')} |")
+    a(f"| Duration | {_soak_cell('duration', '1 h (declared)')} |")
+    a(f"| Frames | {_soak_cell('frames')} |")
+    a(f"| Drops | {_soak_cell('drops')} |")
+    a(f"| Thermal drift | {_soak_cell('thermal_drift')} |")
     a("")
+    if board_bench is not None:
+        # The campaign's own words about what the numbers mean — quoted from
+        # the evidence block, because a narrative typed here would be a
+        # second copy of the campaign findings that could drift from them.
+        for paragraph in board_bench.get("narrative", []):
+            a(paragraph)
+            a("")
     a("Two DECLARED SYSTEMATICS travel with any row whose source mode is")
     a("`inject-ram`. They are quoted here from the constants the harness")
     a("writes into every run record, not retyped: a declaration that exists")
@@ -2875,6 +2911,12 @@ def main(argv: list[str] | None = None) -> None:
 
     generate_parser = sub.add_parser("generate", help="write the report")
     generate_parser.add_argument("--evidence", default=str(DEFAULT_EVIDENCE))
+    generate_parser.add_argument(
+        "--board-evidence",
+        default=None,
+        help="board benchmark block built by `campaign_c002 report-evidence`; "
+        "absent, section 8 stays PENDING",
+    )
     generate_parser.add_argument("--out", default=str(DEFAULT_REPORT))
 
     args = parser.parse_args(argv)
@@ -2896,6 +2938,10 @@ def main(argv: list[str] | None = None) -> None:
     evidence = json.loads(evidence_path.read_text()) if evidence_path.exists() else None
     if evidence is None:
         print(f"no evidence at {evidence_path}: measured rows will read PENDING")
+    if args.board_evidence:
+        board_block = json.loads(Path(args.board_evidence).read_text())
+        evidence = dict(evidence or {})
+        evidence["board_benchmark"] = board_block
     Path(args.out).write_text(generate(evidence), encoding="utf-8")
     print(f"wrote {args.out}")
 

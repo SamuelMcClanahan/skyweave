@@ -248,9 +248,9 @@ HOST_SOFT_TOLERANCE = DetectorTolerance(
 #: the anti-tuning rule. Wider than the host bounds because four structural
 #: divergences are known in advance and named in `sw_detect_ive.c`:
 #: 8-connected CCL against the oracle's 4-connected, a centroid computed by
-#: the A7 over the label image rather than by the labeller, an adaptive area
-#: threshold the hardware may raise on crowded frames, and fixed-point
-#: quantisation of every GMM2 control.
+#: the A7 over the label image rather than by the labeller, SDK-reported area
+#: threshold telemetry whose internal selection mechanism is opaque, and
+#: fixed-point quantisation of every GMM2 control.
 BOARD_IVE_TOLERANCE = DetectorTolerance(
     match_radius_px=6.0,
     centroid_mean_px=1.00,

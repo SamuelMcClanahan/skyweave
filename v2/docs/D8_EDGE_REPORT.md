@@ -415,16 +415,17 @@ detection error.
 | extra per capture event | 0.5 | PENDING (D8.2) |
 | count-mismatch fraction | 0.5 | PENDING (D8.2) |
 
-Wider than the host bounds on every axis because four structural
-divergences are known IN ADVANCE, read out of the SDK headers rather
-than guessed. They are properties of the hardware, not defects, and
-each is named in `firmware/rv1106/src/sw_detect_ive.c`:
+Wider than the host bounds on every axis because four interface and
+representation differences were declared IN ADVANCE from the SDK headers and
+host design rather than fitted to board results. The vendor library's internal
+algorithms remain opaque. Each diagnostic is named in
+`firmware/rv1106/src/sw_detect_ive.c`:
 
 | # | Divergence | Why it moves a number |
 | --- | --- | --- |
 | 1 | `rk_mpi_ive.h` documents IVE_CCL as "Only 8-Connected method is supported"; the host oracle uses cv2 connectivity 4 | blobs touching only diagonally are ONE component on the board and TWO on the host |
-| 2 | `IVE_REGION_S` carries area and the four bbox edges — no centroid | the centroid is a first moment the A7 takes over the label image, so the area is the hardware's and the centroid is ours, and they can disagree about a boundary pixel |
-| 3 | `IVE_CCL_CTRL_S` has `u16InitAreaThr`/`u16Step` and the hardware RAISES its area threshold until the region count fits 254 | the effective `min_area_px` MOVES on crowded frames; the daemon reads `u32CurAreaThr` back every frame and counts the frames it rose |
+| 2 | `IVE_REGION_S` carries area and the four bbox edges — no centroid | the centroid is a first moment the A7 takes over the final binary foreground mask inside that bbox; the area remains the hardware's, and overlapping bbox pairs are counted because their moments can share mask pixels |
+| 3 | `IVE_CCL_CTRL_S` exposes `u16InitAreaThr`/`u16Step`, and `IVE_CCBLOB_S` reports `u32CurAreaThr`; the internal selection algorithm is not documented by the pinned headers | the daemon retains the reported threshold every frame and counts values above the configured floor without treating the telemetry as a proven cause |
 | 4 | GMM2's controls are u8q2/u10q0 fixed point | the host's float learn rate, background ratio and weights are QUANTISED on the way in; the daemon logs what it actually programmed |
 
 D8.2 reports the measured divergence against these bounds. Exceeding
@@ -453,7 +454,7 @@ failure and a lost measurement (D7-F1).
 components the cap removed, plus events that could not be encoded — and
 finding D8-F2 records why it is not a breakdown.
 
-## 8. Board benchmark and deployment resolution — PENDING (D8.1)
+## 8. Board benchmark and deployment resolution — Measured (C-002, board-104)
 
 The benchmark sweeps GMM2 at the three D4 resolutions and the surviving
 one gets a one-hour soak. All three pass the D4 HOST gate, so the board
@@ -476,16 +477,18 @@ the one the link carried whenever the source loops.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2304x1296 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
 | 1536x864 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
-| 1152x648 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 1152x648 | inject-ram | 10.7 / 10.6 MB/s (DDR-resident) | 14.48 / 14.47 (unpaced ceiling) | 29.9 / 30.0 MB | NOT-MEASURED | 0.106 / 0.106 core | 54.1 / 52.3 C | E8 fail: bounded axes agree, exact counters diverge (F-C2-1) |
 
 | Soak | Value |
 | --- | --- |
-| Resolution | PENDING |
-| Source mode | PENDING |
-| Duration | 1 h (declared) |
-| Frames | PENDING |
-| Drops | PENDING |
-| Thermal drift | PENDING |
+| Resolution | 1152x648 |
+| Source mode | inject-ram |
+| Duration | 1 h declared at 30 fps; measured 113.0 / 124.9 min (duty cycle is ceiling-bound, F-C2-2) |
+| Frames | 108000 of 108000 (both runs) |
+| Drops | 19 / 0 |
+| Thermal drift | 0.0 C / 5.3 C |
+
+The sweep pair's E8 verdict is **fail** and the soak pair's is **fail** (soak objective soak_e8_pass = 0). The three bounded axes agreed across every compared pair (largest relative difference 0.03734 against bounds of 0.05-0.25); the exact detector counters did not. That divergence is finding F-C2-1 in the C-002 campaign findings: the board IVE detector is not run-to-run deterministic on identical input, so the 8.1 exact-counter rule cannot be met by any correct pair on this hardware. Whether that rule is amended is a planning-session decision; this report publishes the measured facts under the declared terms.
 
 Two DECLARED SYSTEMATICS travel with any row whose source mode is
 `inject-ram`. They are quoted here from the constants the harness

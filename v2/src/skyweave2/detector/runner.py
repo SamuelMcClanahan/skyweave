@@ -47,6 +47,7 @@ from skyweave2.detector.cap import (
 from skyweave2.detector.components import (
     MaskComponent,
     _require_cv2,
+    count_overlapping_bbox_pairs,
     find_components,
     open_mask,
 )
@@ -74,6 +75,9 @@ class FrameDetections:
     # inferred from `len(emitted)`, because the cap and the persistence
     # filter drop for different reasons and only one of them is a policy.
     dropped_over_cap: int = 0
+    # Unordered overlapping-bbox pairs among ``components``: accepted,
+    # post-morphology components before persistence and the wire cap.
+    overlapping_bbox_pairs: int = 0
 
     @property
     def offered(self) -> int:
@@ -110,6 +114,7 @@ def run_detector(
             continue
         mask = open_mask(mask, config.open_radius_px)
         components = find_components(mask, config.min_area_px, config.max_area_px)
+        overlapping_bbox_pairs = count_overlapping_bbox_pairs(components)
         # Persistence runs on ALL components: the cap decides what is SENT,
         # never what the detector remembers. Capping first would make a
         # crowded frame amnesiac about the blobs it dropped, and their
@@ -118,7 +123,7 @@ def run_detector(
             persistence.update(components), config.max_components_per_frame
         )
         if stats is not None:
-            stats.record(capped)
+            stats.record(capped, overlapping_bbox_pairs=overlapping_bbox_pairs)
         results.append(
             FrameDetections(
                 seq,
@@ -127,6 +132,7 @@ def run_detector(
                 float(mask.mean()),
                 time.perf_counter() - start,
                 dropped_over_cap=capped.dropped,
+                overlapping_bbox_pairs=overlapping_bbox_pairs,
             )
         )
     return results

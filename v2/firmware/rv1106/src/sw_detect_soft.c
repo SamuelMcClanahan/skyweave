@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "sw_ccl_measure.h"
 #include "sw_common.h"
 #include "sw_detect.h"
 
@@ -53,11 +54,31 @@ typedef struct {
     uint64_t components_over_list_bound;
     uint64_t frames_over_list_bound;
 
+    uint64_t overlapping_bbox_pairs;
+    uint64_t frames_with_overlapping_bboxes;
+
     /* What soft_alloc actually asked for, summed from the same expressions
      * the callocs use. The RAM-budget check reads this rather than
      * re-deriving 46 B/px somewhere else, because two copies of one formula
      * means one of them is not the one that runs. */
     size_t footprint_bytes;
+
+    /* Intra-frame timing, accumulated on EVERY frame whether or not
+     * --profile-stats will emit it: the whole cost is 10 clock_gettime calls
+     * per post-warm ~69 ms frame — each of the five stages pays an explicit
+     * start read plus the read inside sw_profile_record, and on the node's
+     * vDSO-less uClibc each is a real syscall (~1-5 us on the 1 GHz A7), so
+     * ~10-50 us, still under 0.1% of the frame — and a profiler that only
+     * runs when watched measures a different detector than the one that runs
+     * unwatched. The stage indices come from sw_profile_stage at open() and
+     * are stored rather than assumed, so registration order and emission
+     * order cannot drift apart. */
+    sw_profile_t profile;
+    int stage_gmm2;
+    int stage_morph;
+    int stage_occupancy_scan;
+    int stage_ccl_label;
+    int stage_frame_total;
 } soft_state_t;
 
 static void soft_free(soft_state_t *state)
@@ -436,8 +457,6 @@ static int soft_label(soft_state_t *state, sw_component_t *out, int out_capacity
         for (x = 0; x < w; ++x) {
             size_t seed = (size_t)y * w + x;
             int32_t top = 0;
-            double sum_u = 0.0;
-            double sum_v = 0.0;
             uint32_t area = 0;
             int32_t min_x = x, max_x = x, min_y = y, max_y = y;
             sw_component_t candidate;
@@ -457,8 +476,6 @@ static int soft_label(soft_state_t *state, sw_component_t *out, int out_capacity
                 int px = index % w;
                 int py = index / w;
                 int n;
-                sum_u += (double)px;
-                sum_v += (double)py;
                 area++;
                 if (px < min_x) min_x = px;
                 if (px > max_x) max_x = px;
@@ -482,13 +499,30 @@ static int soft_label(soft_state_t *state, sw_component_t *out, int out_capacity
                 (int)area > state->config.max_area_px) {
                 continue; /* area-gated, exactly as the host does */
             }
-            candidate.centroid_u = sum_u / (double)area;
-            candidate.centroid_v = sum_v / (double)area;
             candidate.area_px = area;
             candidate.bbox_x = min_x;
             candidate.bbox_y = min_y;
             candidate.bbox_w = (uint32_t)(max_x - min_x + 1);
             candidate.bbox_h = (uint32_t)(max_y - min_y + 1);
+            {
+                const sw_bbox_t bbox = {candidate.bbox_x, candidate.bbox_y,
+                                        candidate.bbox_w, candidate.bbox_h};
+                sw_mask_moment_t moment;
+                int measured = sw_mask_moment_nonzero(
+                    mask, w, h, (size_t)w, &bbox, &moment);
+                if (measured != 1) {
+                    SW_LOG_ERR("portable CCL produced an invalid or empty bbox "
+                               "(%d,%d %ux%u)",
+                               candidate.bbox_x, candidate.bbox_y,
+                               candidate.bbox_w, candidate.bbox_h);
+                    continue;
+                }
+                /* Deliberately NOT area/pixel_count. area_px is the CCL
+                 * flood-fill area; the centroid is the first moment of every
+                 * nonzero final-mask pixel in this accepted bbox. */
+                candidate.centroid_u = moment.centroid_u;
+                candidate.centroid_v = moment.centroid_v;
+            }
 
             if (count < capacity) {
                 out[count++] = candidate;
@@ -533,16 +567,36 @@ static int soft_label(soft_state_t *state, sw_component_t *out, int out_capacity
                     count, overflow);
     }
     qsort(out, (size_t)count, sizeof(sw_component_t), compare_components);
+    {
+        sw_bbox_t boxes[SW_MAX_COMPONENTS];
+        uint64_t pairs;
+        int i;
+        for (i = 0; i < count; ++i) {
+            boxes[i].x = out[i].bbox_x;
+            boxes[i].y = out[i].bbox_y;
+            boxes[i].w = out[i].bbox_w;
+            boxes[i].h = out[i].bbox_h;
+        }
+        pairs = sw_count_overlapping_bbox_pairs(boxes, (size_t)count);
+        state->overlapping_bbox_pairs += pairs;
+        if (pairs > 0) {
+            state->frames_with_overlapping_bboxes++;
+        }
+    }
     return count;
 }
 
-static int soft_apply(sw_detector_t *self, const uint8_t *luma, int width, int height,
-                      bool warming_up, sw_component_t *out, int out_capacity,
-                      double *occupancy)
+static int soft_apply_frame(sw_detector_t *self, const uint8_t *luma, int width,
+                            int height, bool warming_up, uint64_t frame_seq,
+                            sw_component_t *out, int out_capacity,
+                            double *occupancy)
 {
     soft_state_t *state = (soft_state_t *)self->state;
+    uint64_t stage_start_ns;
     size_t i;
     uint32_t foreground = 0;
+
+    SW_UNUSED(frame_seq);
 
     if (state->width != width || state->height != height) {
         if (state->width != 0) {
@@ -562,23 +616,54 @@ static int soft_apply(sw_detector_t *self, const uint8_t *luma, int width, int h
         }
         return 0; /* the host emits nothing on the model-init frame either */
     }
+    /* Each stage below records only when its work COMPLETED; a stage that
+     * refused partway is absent from the profile while frame_total (in the
+     * soft_apply wrapper) still carries the frame. The instrumentation adds
+     * no branch and changes no control flow, error path or counter. */
+    stage_start_ns = sw_profile_now_ns();
     soft_gmm2(state, luma);
+    sw_profile_record(&state->profile, state->stage_gmm2, stage_start_ns);
     if (warming_up) {
         if (occupancy != NULL) {
             *occupancy = 0.0;
         }
         return 0;
     }
+    stage_start_ns = sw_profile_now_ns();
     if (soft_open(state) != 0) {
         return -1;
     }
+    sw_profile_record(&state->profile, state->stage_morph, stage_start_ns);
+    stage_start_ns = sw_profile_now_ns();
     for (i = 0; i < state->pixels; ++i) {
         foreground += state->opened[i] ? 1u : 0u;
     }
+    sw_profile_record(&state->profile, state->stage_occupancy_scan, stage_start_ns);
     if (occupancy != NULL) {
         *occupancy = (double)foreground / (double)state->pixels;
     }
-    return soft_label(state, out, out_capacity);
+    {
+        int count;
+        stage_start_ns = sw_profile_now_ns();
+        count = soft_label(state, out, out_capacity);
+        sw_profile_record(&state->profile, state->stage_ccl_label, stage_start_ns);
+        return count;
+    }
+}
+
+static int soft_apply(sw_detector_t *self, const uint8_t *luma, int width, int height,
+                      bool warming_up, uint64_t frame_seq, sw_component_t *out,
+                      int out_capacity, double *occupancy)
+{
+    /* Thin timing shell so frame_total covers EVERY exit of the real body —
+     * failures included — without a record call before each return. The
+     * inner function is the detector; this is a stopwatch around it. */
+    soft_state_t *state = (soft_state_t *)self->state;
+    const uint64_t frame_start_ns = sw_profile_now_ns();
+    const int result = soft_apply_frame(self, luma, width, height, warming_up,
+                                        frame_seq, out, out_capacity, occupancy);
+    sw_profile_record(&state->profile, state->stage_frame_total, frame_start_ns);
+    return result;
 }
 
 static void soft_losses(const sw_detector_t *self, sw_detector_losses_t *out)
@@ -586,6 +671,24 @@ static void soft_losses(const sw_detector_t *self, sw_detector_losses_t *out)
     const soft_state_t *state = (const soft_state_t *)self->state;
     out->components_shed = state != NULL ? state->components_over_list_bound : 0;
     out->frames_shed = state != NULL ? state->frames_over_list_bound : 0;
+}
+
+static void soft_diagnostics(const sw_detector_t *self,
+                             sw_detector_diagnostics_t *out)
+{
+    const soft_state_t *state = (const soft_state_t *)self->state;
+    memset(out, 0, sizeof(*out));
+    if (state != NULL) {
+        out->overlapping_bbox_pairs = state->overlapping_bbox_pairs;
+        out->frames_with_overlapping_bboxes =
+            state->frames_with_overlapping_bboxes;
+    }
+}
+
+static const sw_profile_t *soft_profile(const sw_detector_t *self)
+{
+    const soft_state_t *state = (const soft_state_t *)self->state;
+    return state != NULL ? &state->profile : NULL;
 }
 
 static size_t soft_footprint_bytes(const sw_detector_t *self)
@@ -635,19 +738,34 @@ sw_detector_t *sw_detect_open_soft(const sw_detector_config_t *config)
         return NULL;
     }
     state->config = *config;
+    /* Stage registration order is emission order in --stats. Capacity is 12
+     * and this registers 5, so none of these can return -1; the indices are
+     * stored anyway because sw_profile_record tolerates -1 and an assumed
+     * index is exactly the kind of drift the accumulator exists to rule out. */
+    sw_profile_init(&state->profile);
+    state->stage_gmm2 = sw_profile_stage(&state->profile, "gmm2");
+    state->stage_morph = sw_profile_stage(&state->profile, "morph");
+    state->stage_occupancy_scan =
+        sw_profile_stage(&state->profile, "occupancy_scan");
+    state->stage_ccl_label = sw_profile_stage(&state->profile, "ccl_label");
+    state->stage_frame_total = sw_profile_stage(&state->profile, "frame_total");
     detector->apply = soft_apply;
     detector->close = soft_close;
     detector->losses = soft_losses;
+    detector->diagnostics = soft_diagnostics;
     detector->footprint_bytes = soft_footprint_bytes;
     detector->name = "soft-gmm2";
     detector->state = state;
+    detector->profile = soft_profile;
     return detector;
 }
 
 sw_detector_t *sw_detect_open(const sw_config_t *config)
 {
     if (config->detector_kind == SW_DETECTOR_IVE) {
-        return sw_detect_open_ive(&config->detector);
+        return sw_detect_open_ive(&config->detector, config->ccl_log_path,
+                                  config->fg_mask_log_path,
+                                  config->fg_mask_limit);
     }
     return sw_detect_open_soft(&config->detector);
 }

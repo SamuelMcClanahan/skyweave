@@ -4,6 +4,7 @@ overconfidence detection, and determinism under fault replay."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -342,8 +343,13 @@ def test_n7_injector_seeding_is_stable_across_processes(cameras):
         "('false','split','merge','jitter','loss','burst','dup','late','calib','reorder')]))"
     )
     outputs = []
+    staged_source = str(Path(__file__).resolve().parents[2] / "src")
     for salt in ("0", "12345"):
-        env = {"PYTHONHASHSEED": salt, "PATH": "/usr/bin:/bin"}
+        env = {
+            "PYTHONHASHSEED": salt,
+            "PATH": "/usr/bin:/bin",
+            "PYTHONPATH": staged_source,
+        }
         result = subprocess.run([sys.executable, "-c", script], capture_output=True,
                                 text=True, env=env, check=True)
         outputs.append(result.stdout.strip())

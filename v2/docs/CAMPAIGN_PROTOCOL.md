@@ -88,6 +88,27 @@ continuing. A board that fails identity after recovery is excluded from
 the shift and reported, never silently substituted. Hands stay needed
 only for: cards, cables, supplier issues, and anything with money.
 
+## Amendments (2026-08-23, from the C-001 alignment audit)
+
+1. **Memory durability without public exposure.** Campaign memory
+   (ledger, SHIFT.md, findings, progress logs) stays OUT of the public
+   repo by design: it carries rig topology, addresses, and session
+   detail. But it must not live as a single untracked copy on one
+   machine — that is how the D0 C3-opening entry was nearly lost. Rule:
+   campaign memory lives in a separate PRIVATE versioned store (a
+   private repo, or a local repo synced off-device). A shift may not
+   end without committing its ledger and SHIFT there. The planning
+   session reads that store at campaign boundaries.
+2. **History rewrites.** No public-repo history rewrite without a
+   planning-session check of the decisions log immediately after, and
+   a copy of `DETECTION_CONTRACTS_D0.md` in the private store first.
+3. **Attestation proportionality.** Full identity/attestation binding
+   applies to SCORE-BEARING evidence (anything a ledger verdict or a
+   ratification will rest on). Diagnostic channels get lightweight
+   treatment: recorded, hashed once, not fortress-staged. A shift that
+   spends more effort on evidence machinery than on experiments should
+   say so in SHIFT.md and the boundary review decides whether to trim.
+
 ## Human checkpoints
 
 Campaign start: Samuel + planning session write the objective,
@@ -97,12 +118,41 @@ ratifies or rejects. Mid-campaign the agent is autonomous inside the
 file. Contract changes, gate scenes, procurement, and physical work
 never happen inside a campaign.
 
-## Campaign map (the realigned road, 2026-08-20)
+## What makes a problem climbable (the five properties)
+
+1. ONE scalar to improve.
+2. A machine scores it cheaply (minutes, not hours).
+3. Scoring is deterministic, or its noise is measured and bounded.
+4. Floors protect everything that must not get worse.
+5. Probe inputs can be generated fresh, so nothing can be memorized.
+
+A problem missing one property is not unclimbable — the missing
+property is the first work item (Phase 0 of C-004 is the worked
+example: determinism was missing, so determinism was built first).
+
+## Hill registry (candidate future campaigns, 2026-08-26)
+
+| Hill | Scalar | Floors | Judge | Ready when |
+| --- | --- | --- | --- | --- |
+| Node fps (C-004) | sustained fps | recall/false/centroid vs truth | board + host | RUNNING |
+| Detection quality on real sky | false alarms/hour at fixed recall | recall, centroid error | scored real footage | bench-session sky data exists (needs labeling strategy) |
+| Fusion tracking accuracy | range/cross-range p95 vs truth on probe scenes | coverage honesty (covariance calibration), no gate scenes | synthetic scenes + scorer (exists) | now — probe scene generator distinct from gate scenes |
+| Jetson many-camera throughput | cameras sustained at 30 Hz fusion | decision-stream byte-parity vs reference | replay + wall clock | now — the THROUGHPUT doc's three bottlenecks are the seed ideas |
+| End-to-end latency | frame-capture to track-update p95 | no accuracy floor broken | wired rig timestamps | after D9 (needs the real wire) |
+| Suite speed (meta-hill) | fast-tier wall time | zero tests weakened or deleted | CI timer | now |
+| Soak reliability | hours between faults | honest fault reporting (no suppression) | long-run harness | slow hill; after C-002 soak pair |
+| Drone intercept (future repo) | p95 miss distance in SITL | safety envelope, causality, link-fault tolerance | SITL + seeded scenarios | after drone contracts + SITL harness — the BEST hill in the program: fast, deterministic, truth-rich |
+
+NEVER hills: D9 acceptance (one-shot gate, by design), contract
+decisions, label promotions, gate scenes, procurement. A hill whose
+judge would need a human in the loop per-iteration is not a hill yet;
+build the judge first.
 
 | Id | Objective (scalar) | Gate it unblocks | Status |
 | --- | --- | --- | --- |
 | C-001 | Minimize CCL detector-fail rate at 1152x648 on probe clips | Clean C3 sweep | Ready to start |
 | C-002 | Measure sustained fps + soak stability at 1152x648 (measurement campaign: the "climb" is fixing whatever breaks the soak, objective = soak passes with E8 bounds) | C4 fps number; C5-C8 close D8.1 | Blocked on C-001 |
 | C-003 | Board-vs-host scorecard divergence within declared tolerance (D8.2 fixture replay; knobs are BUG-class fixes only, never quality tuning) | D8.2, closes D8 | Blocked on C-002 |
+| C-004 | Maximize sustained fps at 1152x648 (implementation levers only, detection semantics frozen, quality-parity guarded). Phase 0: the sanctioned determinism fix + re-baseline | The D8.1 fps number and the deployment cadence | Open 2026-08-24 |
 | (not a campaign) | Bench session: conversion-gain PTC, CFA check, sky footage | Measured promotions, tripwire re-check | HANDS, parallel |
 | (not a campaign) | D9 wired synthetic acceptance | The finish line | One-shot gate. Never iterated |

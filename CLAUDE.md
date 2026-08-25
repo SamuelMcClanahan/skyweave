@@ -19,8 +19,21 @@ an EKF track. This repo holds v1 (the reference MVP) and v2 (the rewrite).
    inside a campaign file under `v2/docs/campaigns/`. No campaign file,
    no climbing. The ledger and SHIFT.md are the memory between agents;
    read those, not predecessor transcripts.
+6. `v2/docs/TESTING_DOCTRINE.md` — how tests are written here: mapped
+   to contract lines, fixtures over mocks, asserted against the
+   system's own outputs, speed-budgeted. New tests follow it.
 
 ## Standing rules
+
+- **Log edge cases; do not build around them.** In MVP phases,
+  iteration speed is the priority. When you meet an edge case that is
+  not on the critical path, record it as a finding with enough detail
+  to act on later, and keep moving. Do not grow machinery, abstractions,
+  or defenses around a case that has not yet cost us anything. Findings
+  are cheap; premature fortification is not. Boundary reviews decide
+  which logged cases get built for. (This does not loosen the fences:
+  contracts, goldens, gate scenes, and label discipline stay as they
+  are.)
 
 - **v1 is read-only.** It is the reference implementation and golden
   generator. Never edit, reformat, or "fix" anything under `v1/`.

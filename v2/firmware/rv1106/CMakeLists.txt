@@ -54,6 +54,8 @@ target_include_directories(skyweave_wire PUBLIC
 
 set(DAEMON_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/sw_ccl_measure.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/sw_profile.c
   ${CMAKE_CURRENT_SOURCE_DIR}/src/sw_config.c
   ${CMAKE_CURRENT_SOURCE_DIR}/src/sw_detect_soft.c
   ${CMAKE_CURRENT_SOURCE_DIR}/src/sw_detect_ive.c
@@ -68,6 +70,37 @@ target_link_libraries(skyweave-edge PRIVATE skyweave_wire m)
 
 add_executable(sw-fixture-tool ${CMAKE_CURRENT_SOURCE_DIR}/tools/sw_fixture_tool.c)
 target_link_libraries(sw-fixture-tool PRIVATE skyweave_wire)
+
+enable_testing()
+add_executable(sw-ccl-measure-test
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/sw_ccl_measure_test.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/sw_ccl_measure.c
+)
+target_include_directories(sw-ccl-measure-test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(sw-ccl-measure-test PRIVATE m)
+add_test(NAME sw-ccl-measure-test COMMAND sw-ccl-measure-test)
+
+add_executable(sw-profile-test
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/sw_profile_test.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/sw_profile.c
+)
+target_include_directories(sw-profile-test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(sw-profile-test PRIVATE m)
+add_test(NAME sw-profile-test COMMAND sw-profile-test)
+
+add_executable(sw-pipeline-reset-test
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/sw_pipeline_reset_test.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/sw_pipeline.c
+)
+target_include_directories(sw-pipeline-reset-test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(sw-pipeline-reset-test PRIVATE skyweave_wire m)
+add_test(NAME sw-pipeline-reset-test COMMAND sw-pipeline-reset-test)
 
 # ---------------------------------------------------------------------------
 # The board build. SKYWEAVE_SDK points at a Luckfox SDK checkout; without it

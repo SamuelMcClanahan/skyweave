@@ -83,6 +83,12 @@ typedef struct {
  * governs is an open question and a daemon that hid it would settle it. */
 #define SW_RAM_BUDGET_DEFAULT_MB 160
 
+/* A failed-mask artifact is intentionally bounded twice: by an explicit
+ * per-run limit and by this startup-validated ceiling. At the default proc
+ * grid one raw mask is about 1.3 MB, so an unchecked typo here can fill the
+ * board before the run that was meant to diagnose it has finished. */
+#define SW_FG_MASK_LOG_MAX_RECORDS 16u
+
 typedef struct {
     sw_source_kind_t source;
     sw_detector_kind_t detector_kind;
@@ -125,6 +131,23 @@ typedef struct {
      * measurement path's critical section on a deployed node. */
     char packet_log_path[512];
     char stats_path[512];
+
+    /* Emit the detector's per-stage intra-frame timing accumulators into the
+     * --stats JSON. TOP LEVEL on purpose, NOT in the detector block below:
+     * that block mirrors `skyweave2/detector/config.py` field for field, and
+     * this is an emission knob of THIS daemon's stats artifact, not a
+     * detector parameter the host oracle has. The accumulators themselves
+     * run unconditionally (sw_profile.h says why that is cheap enough); this
+     * flag gates only whether write_stats prints them. Default false, so the
+     * stats file stays byte-identical for existing consumers. */
+    bool profile_stats;
+
+    /* Board CCL diagnostics. Empty paths disable them. ccl_log is JSONL,
+     * one row per post-warm IVE CCL attempt. fg_mask_log is the bounded
+     * binary failed-mask stream described by sw_detect_ive.c. */
+    char ccl_log_path[512];
+    char fg_mask_log_path[512];
+    uint32_t fg_mask_limit;
 
     sw_detector_config_t detector;
 } sw_config_t;

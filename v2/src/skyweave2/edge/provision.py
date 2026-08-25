@@ -114,7 +114,9 @@ class NodeTransport(Protocol):
 
     def run(self, command: str, timeout_s: float = 60.0) -> CommandResult: ...
 
-    def spawn(self, command: str, log_remote: str) -> int: ...
+    def spawn(
+        self, command: str, log_remote: str, exit_status_remote: str | None = None
+    ) -> int: ...
 
     def terminate(self, pid: int) -> None: ...
 
@@ -197,10 +199,20 @@ class LocalTransport:
         return CommandResult(["sh", "-c", translated], completed.returncode,
                              completed.stdout, completed.stderr)
 
-    def spawn(self, command: str, log_remote: str) -> int:
+    def spawn(
+        self, command: str, log_remote: str, exit_status_remote: str | None = None
+    ) -> int:
         command = self._translate(command)
         log_path = self._resolve(log_remote)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        if exit_status_remote is not None:
+            status_path = self._resolve(exit_status_remote)
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            command = (
+                f"{command}; sw_status=$?; "
+                f"printf '%s\\n' \"$sw_status\" > {shlex.quote(str(status_path))}; "
+                'exit "$sw_status"'
+            )
         handle = log_path.open("wb")
         process = subprocess.Popen(
             ["sh", "-c", command], cwd=str(self.root), stdout=handle,
@@ -237,12 +249,14 @@ class LocalTransport:
         it, so "it did not stop" means it did not stop.
         """
         process = self._processes.get(pid)
-        if process is not None:
-            return process.poll() is None
+        if process is not None and process.poll() is None:
+            return True
         try:
-            os.kill(pid, 0)
+            os.killpg(pid, 0)
         except ProcessLookupError:
             return False
+        except PermissionError:
+            return True
         return True
 
 
@@ -261,6 +275,7 @@ class SshTransport:
     name: str = "ssh"
     strict_host_key_checking: str = "yes"
     identity: str | None = None
+    jump_host: str | None = None
 
     def _ssh_argv(self) -> list[str]:
         argv = ["ssh", "-o", "BatchMode=yes",
@@ -268,6 +283,8 @@ class SshTransport:
                 "-p", str(self.spec.ssh_port)]
         if self.identity:
             argv += ["-i", self.identity]
+        if self.jump_host:
+            argv += ["-J", self.jump_host]
         return argv + [f"{self.spec.ssh_user}@{self.spec.ssh_host}"]
 
     def _scp_argv(self) -> list[str]:
@@ -276,6 +293,8 @@ class SshTransport:
                 "-P", str(self.spec.ssh_port)]
         if self.identity:
             argv += ["-i", self.identity]
+        if self.jump_host:
+            argv += ["-J", self.jump_host]
         return argv
 
     def push(self, local: Path, remote: str) -> None:
@@ -302,9 +321,18 @@ class SshTransport:
         return CommandResult(argv, completed.returncode, completed.stdout,
                              completed.stderr)
 
-    def spawn(self, command: str, log_remote: str) -> int:
+    def spawn(
+        self, command: str, log_remote: str, exit_status_remote: str | None = None
+    ) -> int:
         # setsid + nohup so the daemon survives the ssh session closing, and
         # the pid comes back on stdout because that is what stops it later.
+        if exit_status_remote is not None:
+            status_body = (
+                f"{command}; sw_status=$?; "
+                f"printf '%s\\n' \"$sw_status\" > {shlex.quote(exit_status_remote)}; "
+                'exit "$sw_status"'
+            )
+            command = f"sh -c {shlex.quote(status_body)}"
         wrapped = (
             f"mkdir -p {shlex.quote(str(Path(log_remote).parent))}; "
             f"setsid nohup {command} > {shlex.quote(log_remote)} 2>&1 & echo $!"
@@ -316,10 +344,14 @@ class SshTransport:
         return int(text[-1].strip())
 
     def terminate(self, pid: int) -> None:
-        self.run(f"kill -TERM {pid}")
+        # spawn() starts a new session.  The exit-status wrapper is its group
+        # leader, so terminating only that pid could orphan the daemon child.
+        # BusyBox kill accepts the negative process-group operand, but rejects
+        # the GNU end-of-options marker as an invalid number.
+        self.run(f"kill -TERM -{pid}")
 
     def alive(self, pid: int) -> bool:
-        probe = self.run(f"kill -0 {pid} 2>/dev/null && echo alive || echo gone")
+        probe = self.run(f"kill -0 -{pid} 2>/dev/null && echo alive || echo gone")
         return "gone" not in probe.stdout
 
 
@@ -338,6 +370,14 @@ class ProvisionResult:
     remote_binary: str
     local_sha256: str
     remote_sha256: str
+    source_remote_path: str = ""
+    source_local_sha256: str = ""
+    source_remote_sha256: str = ""
+    wall_s: float = 0.0
+    completed_before_deadline: bool = False
+    stop_succeeded: bool | None = None
+    exit_status: int | None = None
+    daemon_stopped: bool = False
     pid: int | None = None
     argv: str = ""
     stats: dict = field(default_factory=dict)
@@ -348,6 +388,13 @@ class ProvisionResult:
     def binary_verified(self) -> bool:
         return bool(self.local_sha256) and self.local_sha256 == self.remote_sha256
 
+    @property
+    def source_verified(self) -> bool:
+        return not self.source_remote_path or (
+            bool(self.source_local_sha256)
+            and self.source_local_sha256 == self.source_remote_sha256
+        )
+
     def as_dict(self) -> dict:
         return {
             "schema": "d8-provision/1",
@@ -357,6 +404,16 @@ class ProvisionResult:
             "local_sha256": self.local_sha256,
             "remote_sha256": self.remote_sha256,
             "binary_verified": self.binary_verified,
+            "source_remote_path": self.source_remote_path,
+            "source_local_sha256": self.source_local_sha256,
+            "source_remote_sha256": self.source_remote_sha256,
+            "source_verified": self.source_verified,
+            "wall_s": self.wall_s,
+            "completed_before_deadline": self.completed_before_deadline,
+            "stop_succeeded": self.stop_succeeded,
+            "exit_status": self.exit_status,
+            "daemon_exit_code": self.exit_status,
+            "daemon_stopped": self.daemon_stopped,
             "pid": self.pid,
             "argv": self.argv,
             "stats": self.stats,
@@ -383,6 +440,26 @@ def push_daemon(
     return remote, local_hash, remote_hash
 
 
+def push_verified_source(
+    transport: NodeTransport, local: str | Path, remote: str, *, label: str
+) -> tuple[str, str]:
+    """Push a replay source and prove the node received the exact bytes."""
+    local = Path(local)
+    transport.push(local, remote)
+    local_hash = sha256_of(local)
+    probe = transport.run(f"sha256sum {shlex.quote(remote)}")
+    remote_hash = ""
+    if probe.returncode == 0 and probe.stdout.strip():
+        remote_hash = probe.stdout.split()[0].strip()
+    if not remote_hash or remote_hash != local_hash:
+        raise ProvisionError(
+            f"the {label} on the node does not hash to what was sent: "
+            f"local {local_hash} vs node {remote_hash or '(no sha256sum output)'}. "
+            "Refusing to run against an unbound input artifact."
+        )
+    return local_hash, remote_hash
+
+
 def daemon_command(
     remote_binary: str,
     config: DetectorConfig,
@@ -394,6 +471,9 @@ def daemon_command(
     detector: str = "ive",
     ram_clip_remote: str | None = None,
     ram_loop: daemon.RamLoopDeclaration | None = None,
+    ccl_log_remote: str | None = None,
+    fg_mask_log_remote: str | None = None,
+    fg_mask_limit: int = 0,
 ) -> str:
     """The exact command line the node will run.
 
@@ -445,6 +525,27 @@ def daemon_command(
     ]
     if packet_log_remote:
         argv += ["--packet-log", packet_log_remote]
+    if ccl_log_remote:
+        argv += ["--ccl-log", ccl_log_remote]
+    if fg_mask_log_remote:
+        if fg_mask_limit < 1:
+            raise ProvisionError(
+                "a foreground-mask log needs a positive capture limit; an "
+                "unbounded full-resolution diagnostic can fill a node card"
+            )
+        if fg_mask_limit > 16:
+            raise ProvisionError(
+                "a foreground-mask log is hard-bounded to 16 records by the "
+                "daemon; refusing a run the node would reject after provisioning"
+            )
+        argv += [
+            "--fg-mask-log",
+            fg_mask_log_remote,
+            "--fg-mask-limit",
+            str(fg_mask_limit),
+        ]
+    elif fg_mask_limit:
+        raise ProvisionError("--fg-mask-limit has no foreground-mask log destination")
     argv += daemon.daemon_args(config, detector=detector)
     return " ".join(shlex.quote(part) for part in argv)
 
@@ -499,6 +600,8 @@ def provision_node(
     run_seconds: float | None = None,
     wait_s: float = 120.0,
     packet_log: bool = False,
+    ccl_log: bool = False,
+    fg_mask_limit: int = 0,
 ) -> ProvisionResult:
     """Push, start, wait or stop, collect. The whole bench-session sequence.
 
@@ -506,6 +609,7 @@ def provision_node(
     daemon is expected to end on its own — which it does when an injection
     stream reaches its trailer — and this waits up to ``wait_s`` for that.
     """
+    started_at = time.monotonic()
     out_dir = Path(out_dir)
     remote_binary, local_hash, remote_hash = push_daemon(transport, binary, spec)
     result = ProvisionResult(
@@ -523,7 +627,10 @@ def provision_node(
     stream_remote = None
     if stream_local is not None:
         stream_remote = f"{spec.remote_dir.rstrip('/')}/inject.swij"
-        transport.push(Path(stream_local), stream_remote)
+        result.source_remote_path = stream_remote
+        result.source_local_sha256, result.source_remote_sha256 = push_verified_source(
+            transport, stream_local, stream_remote, label="injection stream"
+        )
 
     ram_clip_remote = None
     if ram_clip_local is not None:
@@ -531,7 +638,10 @@ def provision_node(
         # different sources, and one name would make a collected node
         # directory ambiguous about which run produced it.
         ram_clip_remote = f"{spec.remote_dir.rstrip('/')}/ram.swij"
-        transport.push(Path(ram_clip_local), ram_clip_remote)
+        result.source_remote_path = ram_clip_remote
+        result.source_local_sha256, result.source_remote_sha256 = push_verified_source(
+            transport, ram_clip_local, ram_clip_remote, label="RAM-loop clip"
+        )
 
     command = daemon_command(
         remote_binary, config, spec,
@@ -541,26 +651,44 @@ def provision_node(
         packet_log_remote=(
             f"{spec.remote_dir.rstrip('/')}/packets.hex" if packet_log else None
         ),
+        ccl_log_remote=(
+            f"{spec.remote_dir.rstrip('/')}/ccl.jsonl" if ccl_log else None
+        ),
+        fg_mask_log_remote=(
+            f"{spec.remote_dir.rstrip('/')}/fg-masks.swfm"
+            if fg_mask_limit > 0
+            else None
+        ),
+        fg_mask_limit=fg_mask_limit,
         detector=detector,
     )
     result.argv = command
     log_remote = f"{spec.remote_dir.rstrip('/')}/run.log"
-    result.pid = transport.spawn(command, log_remote)
+    exit_status_remote = f"{spec.remote_dir.rstrip('/')}/exit.status"
+    result.pid = transport.spawn(command, log_remote, exit_status_remote)
 
     if run_seconds is not None:
         time.sleep(run_seconds)
-        stop_daemon(transport, result.pid)
+        result.stop_succeeded = stop_daemon(transport, result.pid)
     else:
         deadline = time.monotonic() + wait_s
         while time.monotonic() < deadline:
             if not transport.alive(result.pid):
+                result.completed_before_deadline = True
                 break
             time.sleep(0.2)
         else:
             # It outlived the wait. Stop it the way that keeps the counters.
-            stop_daemon(transport, result.pid)
+            result.stop_succeeded = stop_daemon(transport, result.pid)
+    result.daemon_stopped = not transport.alive(result.pid)
 
-    wanted = ["stats.json", "run.log"] + (["packets.hex"] if packet_log else [])
+    wanted = ["stats.json", "run.log", "exit.status"]
+    if packet_log:
+        wanted.append("packets.hex")
+    if ccl_log:
+        wanted.append("ccl.jsonl")
+    if fg_mask_limit > 0:
+        wanted.append("fg-masks.swfm")
     result.collected = collect(transport, spec, wanted, out_dir)
     stats_path = out_dir / "stats.json"
     if stats_path.exists():
@@ -570,6 +698,12 @@ def provision_node(
         result.log_tail = "\n".join(
             log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-15:]
         )
+    exit_status_path = out_dir / "exit.status"
+    if exit_status_path.exists():
+        text = exit_status_path.read_text(encoding="ascii", errors="strict").strip()
+        if text.lstrip("-").isdigit():
+            result.exit_status = int(text)
+    result.wall_s = time.monotonic() - started_at
     return result
 
 
@@ -588,6 +722,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--user", default="root")
     parser.add_argument("--ssh-port", type=int, default=22)
     parser.add_argument("--identity", default=None)
+    parser.add_argument("--jump-host", default=None, help="SSH ProxyJump host or config alias")
     parser.add_argument("--accept-new-host-key", action="store_true",
                         help="first contact with a freshly flashed node")
     parser.add_argument("--binary", default=None, help="defaults to the board build")
@@ -602,6 +737,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--proc", default=None, help="WxH; defaults to the config's")
     parser.add_argument("--run-seconds", type=float, default=None)
     parser.add_argument("--packet-log", action="store_true")
+    parser.add_argument("--ccl-log", action="store_true")
+    parser.add_argument("--fg-mask-limit", type=int, default=0)
     parser.add_argument("--out", required=True, help="where collected artifacts land")
     args = parser.parse_args(argv)
 
@@ -619,6 +756,7 @@ def main(argv: list[str] | None = None) -> None:
             spec=spec,
             strict_host_key_checking="accept-new" if args.accept_new_host_key else "yes",
             identity=args.identity,
+            jump_host=args.jump_host,
         )
     config = DetectorConfig(backend="ive_approx")
     if args.proc:
@@ -635,6 +773,8 @@ def main(argv: list[str] | None = None) -> None:
         stream_local=args.stream, inject_port=args.inject_port,
         detector=args.detector, run_seconds=args.run_seconds,
         packet_log=args.packet_log,
+        ccl_log=args.ccl_log,
+        fg_mask_limit=args.fg_mask_limit,
     )
     Path(args.out, "provision.json").write_text(
         json.dumps(result.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -658,6 +798,7 @@ __all__ = [
     "daemon_command",
     "provision_node",
     "push_daemon",
+    "push_verified_source",
     "sha256_of",
     "stop_daemon",
 ]

@@ -1,4 +1,31 @@
 {
+  "board_benchmark": {
+    "board": "board-104",
+    "campaign": "C-002",
+    "narrative": [
+      "The sweep pair's E8 verdict is **fail** and the soak pair's is **fail** (soak objective soak_e8_pass = 0). The three bounded axes agreed across every compared pair (largest relative difference 0.03734 against bounds of 0.05-0.25); the exact detector counters did not. That divergence is finding F-C2-1 in the C-002 campaign findings: the board IVE detector is not run-to-run deterministic on identical input, so the 8.1 exact-counter rule cannot be met by any correct pair on this hardware. Whether that rule is amended is a planning-session decision; this report publishes the measured facts under the declared terms."
+    ],
+    "soak": {
+      "drops": "19 / 0",
+      "duration": "1 h declared at 30 fps; measured 113.0 / 124.9 min (duty cycle is ceiling-bound, F-C2-2)",
+      "frames": "108000 of 108000 (both runs)",
+      "resolution": "1152x648",
+      "source_mode": "inject-ram",
+      "thermal_drift": "0.0 C / 5.3 C"
+    },
+    "sweep_rows": {
+      "1152x648": {
+        "cpu": "0.106 / 0.106 core",
+        "ddr": "NOT-MEASURED",
+        "fps": "14.48 / 14.47 (unpaced ceiling)",
+        "peak_rss": "29.9 / 30.0 MB",
+        "source_byte_rate": "10.7 / 10.6 MB/s (DDR-resident)",
+        "source_mode": "inject-ram",
+        "thermals": "54.1 / 52.3 C",
+        "verdict": "E8 fail: bounded axes agree, exact counters diverge (F-C2-1)"
+      }
+    }
+  },
   "container": {
     "base": "debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241",
     "cmake": "cmake version 3.25.1",
