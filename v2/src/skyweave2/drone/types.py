@@ -49,7 +49,7 @@ class VehicleSnapshot:
     t_ms: int
     fc_link_up: bool
     mode: str | None  # ArduCopter mode name ("GUIDED", "RTL", ...); None = never seen
-    armed: bool
+    armed: bool | None  # None = no HEARTBEAT seen yet ([M2a])
     landed_state: LandedState
     rel_alt_m: float | None  # above home
     home_dist_m: float | None  # horizontal distance from home
@@ -60,23 +60,34 @@ class VehicleSnapshot:
 
     @property
     def airborne(self) -> bool:
+        """[M2a]: TAKEOFF, IN_AIR or LANDING. UNDEFINED is unknown: neither this
+        nor :attr:`on_ground`."""
         return self.landed_state in (LandedState.IN_AIR, LandedState.TAKEOFF, LandedState.LANDING)
+
+    @property
+    def on_ground(self) -> bool:
+        """[M2a]: landed_state ON_GROUND."""
+        return self.landed_state is LandedState.ON_GROUND
 
 
 @dataclass(frozen=True, kw_only=True)
 class VelocityCommand:
-    """Velocity setpoint in NED, m/s; yaw rate rad/s (None = not commanded)."""
+    """Velocity setpoint in NED, m/s, and yaw rate in rad/s (+ = nose right).
+
+    The yaw rate is always explicit ([F6], [G10]): a setpoint that left yaw
+    uncommanded would hand the heading to ArduCopter's auto-yaw.
+    """
 
     vn: float
     ve: float
     vd: float
-    yaw_rate: float | None = None
+    yaw_rate: float
 
 
 class FcRequestKind(str, Enum):
     """The only FC requests the mission makes ([M12])."""
 
-    ARM_AND_TAKEOFF = "arm_and_takeoff"  # value: takeoff altitude, m
+    ARM_AND_TAKEOFF = "arm_and_takeoff"  # value: takeoff altitude, m (gated, [F5])
     MODE_RTL = "mode_rtl"
     MODE_LAND = "mode_land"
     TONE = "tone"  # value: tone name (contract §9 tone table)
@@ -96,5 +107,17 @@ class GuidanceEventKind(str, Enum):
 
 @dataclass(frozen=True, kw_only=True)
 class GuidanceEvent:
+    """A guidance event, processed by the mission as its own input ([M2]).
+
+    ``t_ms`` is the stamp of the input that made guidance emit it. A commit
+    carries the committing packet's id and ``t_cap`` and the [G6] miss vector
+    (camera right, down, metres) and range ``z_m``, for the ``commit:`` and
+    ``miss:`` events (contract §4.6).
+    """
+
     kind: GuidanceEventKind
     t_ms: int
+    track_id: int | None = None
+    t_cap: int | None = None
+    miss_m: tuple[float, float] | None = None
+    z_m: float | None = None

@@ -12,7 +12,6 @@ never sees, the secret.
 from __future__ import annotations
 
 import base64
-import json
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -27,6 +26,7 @@ from skyweave2.drone.packets import (
     canonical_json,
     from_obj,
     kind_of,
+    strict_json_loads,
     to_obj,
 )
 
@@ -126,9 +126,9 @@ class Recorder:
 
 def parse_record(line: str) -> Record:
     try:
-        obj = json.loads(line)
-    except json.JSONDecodeError as exc:
-        raise RecordingError(f"not JSON: {exc}") from exc
+        obj = strict_json_loads(line)
+    except PacketError as exc:
+        raise RecordingError(f"not JSON: {exc}") from None
     if not isinstance(obj, dict):
         raise RecordingError("record must be a JSON object")
     t_rx = obj.get("t_rx")
@@ -147,8 +147,12 @@ def parse_record(line: str) -> Record:
                 raise RecordingError("meta config must be an object")
             return Record(t_rx=t_rx, stream=stream, config=config)
         if stream is Stream.COMMAND:
-            pkt = dict(obj["pkt"])
-            pkt["token"] = REDACTED_TOKEN
+            raw_pkt = obj["pkt"]
+            if not isinstance(raw_pkt, dict):
+                raise RecordingError("command pkt must be an object")
+            if "token" in raw_pkt:
+                raise RecordingError("a command record must not carry a token ([R2], [P5c])")
+            pkt = {**raw_pkt, "token": REDACTED_TOKEN}
             auth_ok = obj["auth_ok"]
             if not isinstance(auth_ok, bool):
                 raise RecordingError("command auth_ok must be a bool")

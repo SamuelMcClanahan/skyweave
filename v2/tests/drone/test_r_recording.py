@@ -149,6 +149,14 @@ def test_r_no_frame_record_type_exists() -> None:
         '{"t_rx":1,"stream":"mavlink","dir":"rx","raw":"***"}',
         '{"t_rx":1,"stream":"command","pkt":{"v":1,"cmd_id":"a","command":"abort"}}',
         '{"t_rx":1,"stream":"ack","pkt":{"v":2,"cmd_id":"a","result":"accepted"}}',
+        # [R2], [P5c]: a command record that carries a token is malformed
+        '{"t_rx":1,"stream":"command","pkt":{"v":1,"cmd_id":"a","command":"abort",'
+        '"token":"x"},"auth_ok":true}',
+        '{"t_rx":1,"stream":"command","pkt":[["v",1],["cmd_id","a"]],"auth_ok":true}',
+        # [C5]: non-finite numbers are refused on read as on the wire
+        '{"t_rx":1,"stream":"meta","format":"skyweave-drone-rec","format_v":1,'
+        '"config":{"x":1e999}}',
+        "[" * 50_000,
     ],
 )
 def test_r_malformed_records_are_rejected(line: str) -> None:

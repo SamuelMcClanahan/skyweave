@@ -108,7 +108,18 @@ FIXTURES: dict[str, tuple[P.PacketKind, P.Packet]] = {
             cmd_id="ui-0001",
             token="fixture-token-not-a-secret",
             command=P.CommandName.PRIME,
-            params=P.PrimeParams().to_obj(),
+            params=P.PrimeParams(trial_type=P.TrialType.TOUCH).to_obj(),
+        ),
+    ),
+    # [C5]: non-ASCII and a quote on the path that really carries foreign
+    # text (an unknown params key), so the ASCII-escape rule is exercised.
+    "command_prime_foreign": (
+        P.PacketKind.COMMAND,
+        P.CommandPacket(
+            cmd_id="ui-0003",
+            token="fixture-token-not-a-secret",
+            command=P.CommandName.PRIME,
+            params={**P.PrimeParams().to_obj(), "note": 'caf\u00e9 "x"'},
         ),
     ),
     "command_abort": (
@@ -157,13 +168,41 @@ def test_p_golden_set_is_complete() -> None:
 
 
 def test_p_canonical_form_is_ascii_sorted_compact() -> None:
-    """[C5]: ASCII, sorted keys, no whitespace (checked on the golden bytes)."""
+    """[C5]: ASCII, sorted keys at every level, no whitespace outside strings
+    (checked on the golden bytes); non-ASCII is escaped, not written raw."""
+
+    def keys_sorted(node: object) -> bool:
+        if isinstance(node, dict):
+            return list(node) == sorted(node) and all(keys_sorted(v) for v in node.values())
+        if isinstance(node, list):
+            return all(keys_sorted(v) for v in node)
+        return True
+
     for name in FIXTURES:
         raw = (GOLDEN / f"{name}.json").read_bytes()
         raw.decode("ascii")
-        assert b" " not in raw and b"\n" not in raw
-        obj = json.loads(raw)
-        assert list(obj) == sorted(obj)
+        assert b"\n" not in raw and b", " not in raw and b": " not in raw
+        assert keys_sorted(json.loads(raw))
+    foreign = (GOLDEN / "command_prime_foreign.json").read_bytes()
+    assert b"\\u00e9" in foreign and b'\\"x\\"' in foreign
+
+
+def test_p_enum_values_are_contract_tables() -> None:
+    """[C6], §2: every enum spelling, pinned against the contract tables."""
+    assert {m.value for m in P.TrackState} == {"tentative", "confirmed", "coasting"}
+    assert [m.value for m in P.MissionState] == [
+        "PRIMED", "LAUNCH", "SEARCH", "ACQUIRING", "ENGAGED", "COASTING", "TOUCH",
+        "COMPLETE", "MISS", "LOST", "RETURN", "LAND", "ABORT",
+    ]  # fmt: skip
+    assert {m.value for m in P.TrialType} == {"standoff", "touch"}
+    assert {m.value for m in P.GateState} == {"locked", "enabled"}
+    assert {m.value for m in P.CommandName} == {
+        "prime", "approve_engage", "mark_complete", "abort",
+    }  # fmt: skip
+    assert {m.value for m in P.AckResult} == {
+        "accepted", "rejected_state", "rejected_auth", "rejected_params",
+        "rejected_malformed", "rejected_duplicate_id",
+    }  # fmt: skip
 
 
 def _obj(name: str) -> dict:
@@ -243,6 +282,16 @@ def test_p_missing_v_is_rejected() -> None:
         ("command_abort", P.PacketKind.COMMAND, ("cmd_id",), "has space"),
         ("command_abort", P.PacketKind.COMMAND, ("cmd_id",), "x" * 65),
         ("command_abort", P.PacketKind.COMMAND, ("token",), ""),
+        # regex anchoring: a trailing newline is outside the charset
+        ("command_abort", P.PacketKind.COMMAND, ("cmd_id",), "ui-0001\n"),
+        ("command_abort", P.PacketKind.COMMAND, ("cmd_id",), "x" * 64 + "\n"),
+        ("ack", P.PacketKind.ACK, ("cmd_id",), "a\n"),
+        # [P5] token: printable ASCII only, 1-256 chars
+        ("command_abort", P.PacketKind.COMMAND, ("token",), "caf\u00e9"),
+        ("command_abort", P.PacketKind.COMMAND, ("token",), "a b"),
+        ("command_abort", P.PacketKind.COMMAND, ("token",), "a\n"),
+        ("command_abort", P.PacketKind.COMMAND, ("token",), "\ud800"),
+        ("command_abort", P.PacketKind.COMMAND, ("token",), "x" * 257),
     ],
 )
 def test_p_type_and_range_violations_are_rejected(
@@ -276,6 +325,52 @@ def test_p_missing_required_field_is_rejected(name: str, kind: P.PacketKind, fie
     del obj[field]
     with pytest.raises(P.PacketError):
         _decode_obj(kind, obj)
+
+
+def test_p_token_charset_boundary() -> None:
+    """[P5]: the longest all-printable token decodes."""
+    obj = _obj("command_abort")
+    obj["token"] = "!" * 128 + "~" * 128
+    assert _decode_obj(P.PacketKind.COMMAND, obj).token == obj["token"]
+
+
+@pytest.mark.parametrize(
+    ("label", "raw"),
+    [
+        ("deep_nesting", b"[" * 100_000 + b"]" * 100_000),
+        (
+            "int_past_digit_limit",
+            b'{"v":1,"cmd_id":"a","result":"accepted","x":' + b"9" * 5000 + b"}",
+        ),
+        ("float_field_overflow", b'{"v":1,"cmd_id":"a","result":"accepted"}'),
+        ("real_overflows_to_inf", b'{"v":1,"cmd_id":"a","result":"accepted","x":1e400}'),
+    ],
+)
+def test_p_decode_leaks_non_packeterror(label: str, raw: bytes) -> None:
+    """Finding decode-leaks-non-packeterror, [C7], [P5b]: every undecodable
+    datagram leaves decode as PacketError, never RecursionError/ValueError/
+    OverflowError, so a receive loop catching PacketError survives it."""
+    if label == "float_field_overflow":
+        raw = (GOLDEN / "track.json").read_bytes().replace(b'"du":-12.5', b'"du":' + b"9" * 400)
+        kind = P.PacketKind.TRACK
+    else:
+        kind = P.PacketKind.ACK
+    with pytest.raises(P.PacketError):
+        P.decode(kind, raw)
+
+
+def test_p_nonfinite_in_params_rejected() -> None:
+    """Finding nonfinite-in-params-crashes-recorder, [C5]: a real that
+    overflows to infinity anywhere (even an unknown params key) is rejected,
+    so nothing undecodable can reach the recorder."""
+    raw = (
+        (GOLDEN / "command_prime.json")
+        .read_bytes()
+        .replace(b'"alpha":0.4', b'"alpha":0.4,"zz":1e999')
+    )
+    with pytest.raises(P.PacketError):
+        P.decode(P.PacketKind.COMMAND, raw)
+    assert P.salvage_cmd_id(raw) == "ui-0001"
 
 
 def test_p_float_fields_accept_json_integers() -> None:
@@ -334,13 +429,15 @@ def test_p_salvage_cmd_id_from_malformed_command() -> None:
     assert P.salvage_cmd_id(raw) == "ui-0002"
     assert P.salvage_cmd_id(b"not json") is None
     assert P.salvage_cmd_id(b'{"cmd_id": "bad id"}') is None
+    assert P.salvage_cmd_id(b'{"cmd_id": "ui-0002\\n"}') is None
+    assert P.salvage_cmd_id(b"[" * 100_000) is None
 
 
 def test_p_prime_params_defaults_are_contract_section_9() -> None:
     """[P5] with contract §9: the form defaults are the Provisional table."""
     p = P.PrimeParams()
     assert p.to_obj() == {
-        "trial_type": "touch",
+        "trial_type": "standoff",
         "v_max": 2.5,
         "alpha": 0.4,
         "beta": 0.1,

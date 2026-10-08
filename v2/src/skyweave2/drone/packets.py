@@ -11,7 +11,13 @@ in a live process is the UDP port the datagram arrived on and in a recording
 is the record's ``stream``.
 
 The canonical encoder ([C5]) is what golden fixtures pin byte for byte:
-ASCII, sorted keys, compact separators, finite numbers only.
+ASCII, sorted keys, compact separators, finite numbers only. Enum spellings
+are pinned separately against the contract tables (P series).
+
+Every rejection leaves ``decode`` as :class:`PacketError`, including input
+that is not decodable JSON at all (bad UTF-8, deep nesting, an integer
+literal past CPython's digit limit, a real that overflows to infinity), so a
+receive loop that catches ``PacketError`` survives any datagram ([C7]).
 """
 
 from __future__ import annotations
@@ -31,7 +37,8 @@ MAX_DATAGRAM_BYTES = 65507
 MAX_EVENT_NAME_LEN = 128
 V_MAX_HARD_MPS = 5.0
 
-_CMD_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+_CMD_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
+_TOKEN_RE = re.compile(r"[!-~]{1,256}")
 
 
 class PacketError(ValueError):
@@ -100,6 +107,7 @@ class AckResult(str, Enum):
     REJECTED_AUTH = "rejected_auth"
     REJECTED_PARAMS = "rejected_params"
     REJECTED_MALFORMED = "rejected_malformed"
+    REJECTED_DUPLICATE_ID = "rejected_duplicate_id"
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +246,7 @@ class PrimeParams:
     plus the E1-added budgets); the UI form starts from them.
     """
 
-    trial_type: TrialType = TrialType.TOUCH
+    trial_type: TrialType = TrialType.STANDOFF
     v_max: float = 2.5
     alpha: float = 0.4
     beta: float = 0.1
@@ -363,7 +371,10 @@ def _float(obj: Mapping[str, Any], key: str) -> float:
     val = _get(obj, key)
     if isinstance(val, bool) or not isinstance(val, (int, float)):
         raise PacketError(f"field {key!r} must be a JSON number, got {val!r}")
-    out = float(val)
+    try:
+        out = float(val)
+    except OverflowError:
+        raise PacketError(f"field {key!r} is outside the float range") from None
     if not math.isfinite(out):
         raise PacketError(f"field {key!r} must be finite, got {val!r}")
     return out
@@ -414,8 +425,15 @@ def _version(obj: Mapping[str, Any]) -> int:
 
 def _cmd_id(obj: Mapping[str, Any]) -> str:
     val = _get(obj, "cmd_id")
-    if not isinstance(val, str) or not _CMD_ID_RE.match(val):
+    if not isinstance(val, str) or not _CMD_ID_RE.fullmatch(val):
         raise PacketError("field 'cmd_id' must be 1-64 chars of [A-Za-z0-9._:-]")
+    return val
+
+
+def _token(obj: Mapping[str, Any]) -> str:
+    val = _get(obj, "token")
+    if not isinstance(val, str) or not _TOKEN_RE.fullmatch(val):
+        raise PacketError("field 'token' must be 1-256 chars of printable ASCII")
     return val
 
 
@@ -516,7 +534,7 @@ def from_obj(kind: PacketKind, obj: Any) -> Packet:
             params = dict(_obj(_get(o, "params"), "prime params"))
         return CommandPacket(
             cmd_id=_cmd_id(o),
-            token=_str(o, "token", 256),
+            token=_token(o),
             command=command,
             params=params,
         )
@@ -642,27 +660,52 @@ def encode(packet: Packet) -> bytes:
     return data
 
 
+def strict_json_loads(text: str) -> Any:
+    """[C5], [C7] JSON text -> object, refusing non-finite numbers.
+
+    Raises :class:`PacketError` for anything that is not decodable, finite
+    JSON, never another exception type.
+    """
+    try:
+        return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
+    except PacketError:
+        raise
+    except (ValueError, RecursionError) as exc:  # JSONDecodeError, int digit limit
+        raise PacketError(f"not decodable JSON: {exc}") from None
+
+
 def decode(kind: PacketKind, data: bytes) -> Packet:
     """One datagram -> packet, or :class:`PacketError` ([C5], [C7])."""
     if len(data) > MAX_DATAGRAM_BYTES:
         raise PacketError(f"datagram {len(data)} B > {MAX_DATAGRAM_BYTES} B")
     try:
-        obj = json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PacketError(f"not UTF-8 JSON: {exc}") from exc
-    return from_obj(kind, obj)
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PacketError(f"not UTF-8: {exc}") from None
+    return from_obj(kind, strict_json_loads(text))
 
 
 def _reject_constant(name: str) -> Any:
     raise PacketError(f"non-finite JSON constant {name} is not allowed")
 
 
+def _finite_float(text: str) -> float:
+    out = float(text)
+    if not math.isfinite(out):
+        raise PacketError(f"non-finite JSON number {text} is not allowed")
+    return out
+
+
 def salvage_cmd_id(data: bytes) -> str | None:
-    """[P5b] the ``cmd_id`` of an undecodable command datagram, if readable."""
+    """[P5b] the ``cmd_id`` of an undecodable command datagram, if readable.
+
+    Parses leniently (a non-finite number elsewhere in the datagram does not
+    hide its ``cmd_id``) and never raises.
+    """
     try:
-        obj = json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
+        obj = json.loads(data.decode("utf-8"))
         if isinstance(obj, Mapping):
             return _cmd_id(obj)
-    except (UnicodeDecodeError, json.JSONDecodeError, PacketError):
+    except (ValueError, RecursionError):  # UnicodeDecodeError, JSON errors, PacketError
         return None
     return None
