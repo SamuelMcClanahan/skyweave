@@ -246,7 +246,7 @@ class CommitRecord:
 def derotate(track: TrackPacket, cam: CameraModel, att: Attitude) -> np.ndarray:
     """[G1] unit line of sight in NED: ``R_ned_body(att) R_body_cam normalize(ray)``.
 
-    ``att`` is the [G1] sample for ``track.t_cap`` (see ``AttitudeHistory``).
+    ``att`` is the [G1] sample for ``track.t_cap`` (see ``VehicleState.attitude_at``).
     """
     ray = cam.ray(track.u, track.v_px)
     return r_ned_body(att) @ cam.rotation() @ (ray / np.linalg.norm(ray))

@@ -101,7 +101,8 @@ class _Fc:
         self._t = t_ms
         while self._next < len(self._samples) and self._samples[self._next].t_ms <= t_ms:
             s = self._samples[self._next]
-            _ingest(self.vs, s.t_ms, FC.attitude_encode(s.time_boot_ms, s.roll, s.pitch, s.yaw, 0, 0, 0))
+            msg = FC.attitude_encode(s.time_boot_ms, s.roll, s.pitch, s.yaw, 0.0, 0.0, 0.0)
+            _ingest(self.vs, s.t_ms, msg)
             self._next += 1
         return self.vs
 
@@ -408,20 +409,20 @@ def test_g3_limiter_dt_from_step_stamps_and_resets_on_t07_t09_and_clear() -> Non
     - degraded step at 1700: zero; clear step at 1800 (dt 0.1): 0.2 (not 0.4).
     """
     g = _guidance()
-    hist = _steady(0, 3000)
+    fc = _steady(0, 3000)
     acq = _view(S.ACQUIRING, candidate=ID)
     eng = _view(S.ENGAGED, engaged=ID)
-    g.on_track(_pkt(t_cap=1000), 1010, acq, hist)
-    _approx(_cmd(g.step(1100, acq, hist, _snap(1100, rel_alt=12.0))[0]), (0.0, 0.0, 1.0, 0.0))
-    got = [_cmd(g.step(t, eng, hist, _snap(t))[0]) for t in (1200, 1300, 1500)]
+    g.on_track(_pkt(t_cap=1000), 1010, acq, fc(1010))
+    _approx(_cmd(g.step(1100, acq, fc(1100), _snap(1100, rel_alt=12.0))[0]), (0.0, 0.0, 1.0, 0.0))
+    got = [_cmd(g.step(t, eng, fc(t), _snap(t))[0]) for t in (1200, 1300, 1500)]
     _approx([c[0] for c in got], (0.2, 0.4, 0.8))
     _approx([c[2] for c in got], (0.0, 0.0, 0.0))
     coast = _pkt(t_cap=1520, state=TrackState.COASTING, hits=0, misses=1)
-    g.on_track(coast, 1530, _view(S.COASTING, engaged=ID), hist)
-    g.on_track(_pkt(t_cap=1560, hits=1), 1570, eng, hist)
-    _approx(_cmd(g.step(1600, eng, hist, _snap(1600))[0]), (0.2, 0.0, 0.0, 0.0))
-    _approx(_cmd(g.step(1700, eng, hist, _snap(1700, degraded=True))[0]), ZERO)
-    _approx(_cmd(g.step(1800, eng, hist, _snap(1800))[0]), (0.2, 0.0, 0.0, 0.0))
+    g.on_track(coast, 1530, _view(S.COASTING, engaged=ID), fc(1530))
+    g.on_track(_pkt(t_cap=1560, hits=1), 1570, eng, fc(1570))
+    _approx(_cmd(g.step(1600, eng, fc(1600), _snap(1600))[0]), (0.2, 0.0, 0.0, 0.0))
+    _approx(_cmd(g.step(1700, eng, fc(1700), _snap(1700, degraded=True))[0]), ZERO)
+    _approx(_cmd(g.step(1800, eng, fc(1800), _snap(1800))[0]), (0.2, 0.0, 0.0, 0.0))
 
 
 def test_g3_yaw_law_sign_clamp_and_azimuth_against_yaw_now() -> None:
@@ -448,9 +449,9 @@ def test_g3_yaw_law_sign_clamp_and_azimuth_against_yaw_now() -> None:
     acq = _view(S.ACQUIRING, candidate=ID)
     for u, yaw_cap, yaw_now, want in cases:
         g = _guidance()
-        hist = _hist(_att(1000, yaw=yaw_cap * DEG), _att(1100, yaw=yaw_now * DEG))
-        g.on_track(_pkt(t_cap=1000, u=u), 1010, acq, hist)
-        _approx(_cmd(g.step(1100, acq, hist, _snap(1100))[0]), (0.0, 0.0, 0.0, want))
+        fc = _Fc(_att(1000, yaw=yaw_cap * DEG), _att(1100, yaw=yaw_now * DEG))
+        g.on_track(_pkt(t_cap=1000, u=u), 1010, acq, fc(1010))
+        _approx(_cmd(g.step(1100, acq, fc(1100), _snap(1100))[0]), (0.0, 0.0, 0.0, want))
 
 
 # ---------------------------------------------------------------------------
@@ -462,13 +463,13 @@ def _gate(
     pkt: TrackPacket,
     *,
     trial: PrimeParams = TOUCH,
-    hist: AttitudeHistory | None = None,
+    fc: _Fc | None = None,
     t_ms: int = 1010,
     state: MissionState = S.ENGAGED,
 ) -> list:
     g = _guidance()
     view = _view(state, trial, engaged=ID, candidate=ID)
-    return g.on_track(pkt, t_ms, view, hist if hist is not None else _steady(0, 3000))
+    return g.on_track(pkt, t_ms, view, (fc if fc is not None else _steady(0, 3000))(t_ms))
 
 
 def test_g4_commit_gate_truth_table() -> None:
@@ -490,8 +491,8 @@ def test_g4_commit_gate_truth_table() -> None:
     assert _gate(_pkt(state=TrackState.TENTATIVE, **base)) == []
     assert _gate(_pkt(state=TrackState.COASTING, **base)) == []
     assert _gate(_pkt(w=800.0, hits=4)) == []
-    assert _gate(_pkt(**base), hist=_steady(2000, 3000), t_ms=2010) == []
-    assert _gate(_pkt(**base), hist=_steady(0, 1000), t_ms=1200) == []
+    assert _gate(_pkt(**base), fc=_steady(2000, 3000), t_ms=2010) == []
+    assert _gate(_pkt(**base), fc=_steady(0, 1000), t_ms=1200) == []
     assert _gate(_pkt(**base), state=S.ACQUIRING) == []
 
 
@@ -514,17 +515,18 @@ def test_g4_commits_exactly_once_and_never_in_standoff() -> None:
     times: one commit event, at the first packet's input stamp 1010.
     """
     view = _view(S.ENGAGED, TOUCH, engaged=ID)
-    g, hist = _guidance(), _steady(0, 3000)
+    g, fc = _guidance(), _steady(0, 3000)
     events = []
     for i in range(5):
-        events += g.on_track(
-            _pkt(t_cap=1000 + 20 * i, w=800.0, hits=5 + i), 1010 + 20 * i, view, hist
-        )
+        t = 1010 + 20 * i
+        events += g.on_track(_pkt(t_cap=1000 + 20 * i, w=800.0, hits=5 + i), t, view, fc(t))
     assert [(e.kind, e.t_ms) for e in events] == [(GuidanceEventKind.COMMIT, 1010)]
-    g = _guidance()
+    g, fc = _guidance(), _steady(0, 3000)
     sview = _view(S.ENGAGED, STANDOFF, engaged=ID)
     for i in range(5):
-        assert g.on_track(_pkt(t_cap=1000 + 20 * i, w=800.0, hits=5 + i), 1010, sview, hist) == []
+        t = 1010 + 20 * i
+        pkt = _pkt(t_cap=1000 + 20 * i, w=800.0, hits=5 + i)
+        assert g.on_track(pkt, t, sview, fc(t)) == []
 
 
 def test_g6_commit_event_carries_the_miss_vector() -> None:
@@ -561,9 +563,9 @@ def test_g5_terminal_timing_from_commit_stamp() -> None:
     """
     trial = PrimeParams(trial_type=TrialType.TOUCH, alpha=0.2)
     g = _guidance()
-    hist = _steady(9000, 10_100, yaw=90 * DEG)
+    fc = _steady(9000, 10_100, yaw=90 * DEG)
     (ev,) = g.on_track(
-        _pkt(t_cap=9950, w=400.0, hits=5), 10_000, _view(S.ENGAGED, trial, engaged=ID), hist
+        _pkt(t_cap=9950, w=400.0, hits=5), 10_000, _view(S.ENGAGED, trial, engaged=ID), fc(10_000)
     )
     assert ev.kind is GuidanceEventKind.COMMIT
     rec = g.last_commit
@@ -571,9 +573,9 @@ def test_g5_terminal_timing_from_commit_stamp() -> None:
     _approx(rec.contact_ned, (0.0, 2.5, 0.0))
 
     touch = _view(S.TOUCH, trial, engaged=ID)
-    blind = AttitudeHistory()  # no samples: degraded everywhere, ignored in TOUCH
+    blind = VehicleState(LINK)  # no ATTITUDE frames: degraded everywhere, ignored in TOUCH
     other = _pkt(t_cap=10_150, u=CX + F, w=900.0, hits=9)
-    assert g.on_track(other, 10_160, touch, hist) == []
+    assert g.on_track(other, 10_160, touch, fc(10_160)) == []
     fly, brake, climb = (0.0, 2.5, 0.0, 0.0), ZERO, (0.0, 0.0, -1.5, 0.0)
     plan = [
         (10_100, fly),
@@ -603,12 +605,13 @@ def test_g5_terminal_resets_outside_touch() -> None:
     """
     trial = PrimeParams(trial_type=TrialType.TOUCH, alpha=0.2)
     g = _guidance()
-    hist = _steady(9000, 10_100)
-    g.on_track(_pkt(t_cap=9950, w=400.0, hits=5), 10_000, _view(S.ENGAGED, trial, engaged=ID), hist)
-    g.step(10_100, _view(S.TOUCH, trial, engaged=ID), hist, _snap(10_100))
+    fc = _steady(9000, 10_100)
+    eng = _view(S.ENGAGED, trial, engaged=ID)
+    g.on_track(_pkt(t_cap=9950, w=400.0, hits=5), 10_000, eng, fc(10_000))
+    g.step(10_100, _view(S.TOUCH, trial, engaged=ID), fc(10_100), _snap(10_100))
     abort = _view(S.ABORT, trial, engaged=ID)
     for t in range(10_500, 16_001, 500):
-        cmd, events = g.step(t, abort, hist, _snap(t))
+        cmd, events = g.step(t, abort, fc(t), _snap(t))
         _approx(_cmd(cmd), ZERO)
         assert events == []
 
@@ -629,15 +632,16 @@ def _hold_events(
     5 m north (principal point, w = 200, W = 1); one coasting packet at
     ``coast_at``, seen with the mission in ``coast_state``."""
     trial = PrimeParams(trial_type=TrialType.STANDOFF, d_s=d_s)
-    g, hist = _guidance(), _steady(-100, until)
+    g, fc = _guidance(), _steady(-100, until)
     eng, coasting = _view(S.ENGAGED, trial, engaged=ID), _view(coast_state, trial, engaged=ID)
     out = []
     for t in range(0, until + 1, 100):
         if t == coast_at:
             pkt = _pkt(t_cap=t - 20, w=200.0, state=TrackState.COASTING, hits=0, misses=1)
-            out += [(e.kind, e.t_ms) for e in g.on_track(pkt, t, coasting, hist)]
+            out += [(e.kind, e.t_ms) for e in g.on_track(pkt, t, coasting, fc(t))]
         else:
-            out += [(e.kind, e.t_ms) for e in g.on_track(_pkt(t_cap=t - 20, w=200.0), t, eng, hist)]
+            pkt = _pkt(t_cap=t - 20, w=200.0)
+            out += [(e.kind, e.t_ms) for e in g.on_track(pkt, t, eng, fc(t))]
     return out
 
 
@@ -680,20 +684,21 @@ def test_g8_degraded_attitude_commands_zero() -> None:
         S.ENGAGED: _view(S.ENGAGED, engaged=ID),
         S.COASTING: _view(S.COASTING, engaged=ID),
     }
-    fresh = _steady(0, 2000)
-    stale_now = _steady(0, 1000)  # step at 1500: newest sample 500 ms old
+    # frames over [0, 2000] with the snapshot flag set, or frames over [0, 1000]
+    # (step at 1500: the newest sample is 500 ms old)
     for state, view in states.items():
-        for hist, degraded in ((fresh, True), (stale_now, False)):
-            g = _guidance()
+        for last_frame, degraded in ((2000, True), (1000, False)):
+            g, fc = _guidance(), _steady(0, last_frame)
             pkt_state = TrackState.COASTING if state is S.COASTING else TrackState.CONFIRMED
-            g.on_track(_pkt(t_cap=1000, u=CX + F, state=pkt_state), 1010, view, hist)
-            cmd, _ = g.step(1500, view, hist, _snap(1500, rel_alt=14.0, degraded=degraded))
+            g.on_track(_pkt(t_cap=1000, u=CX + F, state=pkt_state), 1010, view, fc(1010))
+            cmd, _ = g.step(1500, view, fc(1500), _snap(1500, rel_alt=14.0, degraded=degraded))
             _approx(_cmd(cmd), ZERO)
-    late = _steady(2000, 3000)  # packet t_cap 1000: 1000 ms before the first sample
     for state in (S.ACQUIRING, S.ENGAGED, S.COASTING):
         g, view = _guidance(), states[state]
-        g.on_track(_pkt(t_cap=1000, u=CX + F), 2010, view, late)
-        _approx(_cmd(g.step(2100, view, late, _snap(2100, rel_alt=14.0))[0]), ZERO)
+        late = _steady(2000, 3000)  # packet t_cap 1000: 1000 ms before the first sample
+        g.on_track(_pkt(t_cap=1000, u=CX + F), 2010, view, late(2010))
+        _approx(_cmd(g.step(2100, view, late(2100), _snap(2100, rel_alt=14.0))[0]), ZERO)
+    fresh = _steady(0, 2000)(1500)
     cmd, _ = _guidance().step(1500, states[S.SEARCH], fresh, _snap(1500, rel_alt=14.0))
     _approx(_cmd(cmd), (0.0, 0.0, 1.0, math.pi / 4))
 
@@ -709,18 +714,17 @@ def test_g9_other_track_ids_are_ignored() -> None:
     unchanged. In ACQUIRING with candidate 7 centered, track 8 at 45 deg right
     leaves the yaw rate at 0.
     """
-    hist = _steady(0, 2000)
     eng = _view(S.ENGAGED, TOUCH, engaged=ID)
-    g = _guidance()
-    g.step(1000, _view(S.ACQUIRING, TOUCH, candidate=ID), hist, _snap(1000))
-    assert g.on_track(_pkt(t_cap=1000), 1010, eng, hist) == []
-    assert g.on_track(_pkt(tid=8, t_cap=1000, w=900.0, hits=50), 1010, eng, hist) == []
-    _approx(_cmd(g.step(1100, eng, hist, _snap(1100))[0]), (0.2, 0.0, 0.0, 0.0))
+    g, fc = _guidance(), _steady(0, 2000)
+    g.step(1000, _view(S.ACQUIRING, TOUCH, candidate=ID), fc(1000), _snap(1000))
+    assert g.on_track(_pkt(t_cap=1000), 1010, eng, fc(1010)) == []
+    assert g.on_track(_pkt(tid=8, t_cap=1000, w=900.0, hits=50), 1010, eng, fc(1010)) == []
+    _approx(_cmd(g.step(1100, eng, fc(1100), _snap(1100))[0]), (0.2, 0.0, 0.0, 0.0))
     acq = _view(S.ACQUIRING, candidate=ID)
-    g = _guidance()
-    g.on_track(_pkt(t_cap=1000), 1010, acq, hist)
-    g.on_track(_pkt(tid=8, t_cap=1000, u=CX + F), 1010, acq, hist)
-    _approx(_cmd(g.step(1100, acq, hist, _snap(1100))[0]), ZERO)
+    g, fc = _guidance(), _steady(0, 2000)
+    g.on_track(_pkt(t_cap=1000), 1010, acq, fc(1010))
+    g.on_track(_pkt(tid=8, t_cap=1000, u=CX + F), 1010, acq, fc(1010))
+    _approx(_cmd(g.step(1100, acq, fc(1100), _snap(1100))[0]), ZERO)
 
 
 def test_g10_per_state_outputs() -> None:
@@ -738,41 +742,43 @@ def test_g10_per_state_outputs() -> None:
       setpoint in RTL or with the link down.
     - unprimed, PRIMED, LAUNCH: no setpoint.
     """
-    hist = _steady(0, 2000)
+    at_1100 = _steady(0, 2000)(1100)  # the FC stream as of a step at 1100
     search = _view(S.SEARCH)
     for rel_alt, vd in ((11.0, 0.5), (14.0, 1.0), (7.0, -1.0), (None, 0.0)):
-        cmd, _ = _guidance().step(1100, search, hist, _snap(1100, rel_alt=rel_alt))
+        cmd, _ = _guidance().step(1100, search, at_1100, _snap(1100, rel_alt=rel_alt))
         _approx(_cmd(cmd), (0.0, 0.0, vd, math.pi / 4))
 
     yaw45 = 1.5 * 45 * DEG
     acq = _view(S.ACQUIRING, candidate=ID)
-    g = _guidance()
-    g.on_track(_pkt(t_cap=1000, u=CX + F), 1010, acq, hist)
-    _approx(_cmd(g.step(1100, acq, hist, _snap(1100, rel_alt=11.0))[0]), (0.0, 0.0, 0.5, yaw45))
+    g, fc = _guidance(), _steady(0, 2000)
+    g.on_track(_pkt(t_cap=1000, u=CX + F), 1010, acq, fc(1010))
+    cmd, _ = g.step(1100, acq, fc(1100), _snap(1100, rel_alt=11.0))
+    _approx(_cmd(cmd), (0.0, 0.0, 0.5, yaw45))
     coast = _view(S.COASTING, engaged=ID)
-    g = _guidance()
+    g, fc = _guidance(), _steady(0, 2000)
     pkt = _pkt(t_cap=1000, u=CX + F, state=TrackState.COASTING, hits=0, misses=2)
-    g.on_track(pkt, 1010, coast, hist)
-    _approx(_cmd(g.step(1100, coast, hist, _snap(1100, rel_alt=11.0))[0]), (0.0, 0.0, 0.0, yaw45))
+    g.on_track(pkt, 1010, coast, fc(1010))
+    cmd, _ = g.step(1100, coast, fc(1100), _snap(1100, rel_alt=11.0))
+    _approx(_cmd(cmd), (0.0, 0.0, 0.0, yaw45))
 
-    _approx(_cmd(_guidance().step(1100, _view(S.LOST), hist, _snap(1100))[0]), ZERO)
+    _approx(_cmd(_guidance().step(1100, _view(S.LOST), at_1100, _snap(1100))[0]), ZERO)
     for state in (S.ABORT, S.COMPLETE, S.MISS, S.RETURN, S.LAND):
         view = _view(state)
-        _approx(_cmd(_guidance().step(1100, view, hist, _snap(1100))[0]), ZERO)
-        assert _guidance().step(1100, view, hist, _snap(1100, mode="RTL")) == (None, [])
-        assert _guidance().step(1100, view, hist, _snap(1100, link=False)) == (None, [])
-    assert _guidance().step(1100, _view(None, None), hist, _snap(1100)) == (None, [])
+        _approx(_cmd(_guidance().step(1100, view, at_1100, _snap(1100))[0]), ZERO)
+        assert _guidance().step(1100, view, at_1100, _snap(1100, mode="RTL")) == (None, [])
+        assert _guidance().step(1100, view, at_1100, _snap(1100, link=False)) == (None, [])
+    assert _guidance().step(1100, _view(None, None), at_1100, _snap(1100)) == (None, [])
     for state in (S.PRIMED, S.LAUNCH):
-        assert _guidance().step(1100, _view(state), hist, _snap(1100)) == (None, [])
+        assert _guidance().step(1100, _view(state), at_1100, _snap(1100)) == (None, [])
 
 
 def test_g11_setpoint_cadence() -> None:
     """[G11]: a setpoint step is a tick at least 1000 / setpoint_hz ms after the
     previous step. Hand: 10 Hz -> 100 ms: after a step at 1000, ticks at 1050
     and 1099 are not steps; 1100 is."""
-    g, hist = _guidance(), _steady(0, 2000)
+    g, fc = _guidance(), _steady(0, 2000)
     assert g.step_due(1000)
-    g.step(1000, _view(S.LOST), hist, _snap(1000))
+    g.step(1000, _view(S.LOST), fc(1000), _snap(1000))
     assert not g.step_due(1050) and not g.step_due(1099)
     assert g.step_due(1100)
 
