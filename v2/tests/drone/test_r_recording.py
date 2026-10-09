@@ -8,6 +8,7 @@ pins the format itself.
 from __future__ import annotations
 
 import io
+import json
 
 import pytest
 
@@ -166,11 +167,19 @@ def test_r_malformed_records_are_rejected(line: str) -> None:
 
 
 def test_r_read_records_reports_line_number(tmp_path) -> None:
+    """[R2]: a line outside the format stops the read and names its line."""
+    sample = _sample_recording()
+    bad_line = len(sample.splitlines()) + 1
     path = tmp_path / "rec.jsonl"
-    path.write_text(_sample_recording() + "garbage\n", encoding="ascii")
-    with pytest.raises(RecordingError, match="line 11"):
+    path.write_text(sample + "garbage\n", encoding="ascii")
+    with pytest.raises(RecordingError, match=f"line {bad_line}"):
         list(read_records(path))
 
 
-def test_r_meta_format_constant() -> None:
-    assert FORMAT == "skyweave-drone-rec"
+def test_r_meta_line_carries_format_and_version() -> None:
+    """[R2]: the first line is the meta record, with format
+    skyweave-drone-rec and format_v 1, as the contract table states."""
+    first = json.loads(_sample_recording().splitlines()[0])
+    assert first["stream"] == "meta"
+    assert first["format"] == FORMAT == "skyweave-drone-rec"
+    assert first["format_v"] == 1

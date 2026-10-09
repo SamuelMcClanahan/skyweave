@@ -159,8 +159,8 @@ def test_p_golden_bytes_and_round_trip(name: str) -> None:
 
 
 def test_p_golden_set_is_complete() -> None:
-    """Every packet kind of contract §2 has at least one golden fixture, and
-    no stale golden file lingers without a fixture."""
+    """[P1]-[P5], [C5]: every packet kind of contract §2 has at least one
+    golden fixture, and no stale golden file lingers without a fixture."""
     kinds = {kind for kind, _ in FIXTURES.values()}
     assert kinds == set(P.PacketKind)
     on_disk = {p.stem for p in GOLDEN.glob("*.json")}
@@ -243,6 +243,7 @@ def test_p_version_2_raises_unsupported_version() -> None:
 
 
 def test_p_missing_v_is_rejected() -> None:
+    """[C7]: a packet without its version field is rejected."""
     obj = _obj("ack")
     del obj["v"]
     with pytest.raises(P.PacketError):
@@ -402,6 +403,8 @@ def test_p_datagram_size_ceiling() -> None:
 
 
 def test_p_not_json_is_rejected() -> None:
+    """[C5], [C7]: bad UTF-8, broken JSON, and a non-object top level are
+    rejected as PacketError."""
     for raw in (b"\xff\xfe", b"{", b"[]", b"null"):
         with pytest.raises(P.PacketError):
             P.decode(P.PacketKind.ACK, raw)
@@ -483,6 +486,7 @@ def test_p_prime_params_out_of_range_rejected(field: str, bad: object) -> None:
 
 
 def test_p_prime_params_missing_field_rejected() -> None:
+    """[P5]: a prime missing any param is rejected_params, never defaulted."""
     obj = P.PrimeParams().to_obj()
     del obj["geofence_radius_m"]
     with pytest.raises(P.InvalidParams):
