@@ -3,7 +3,9 @@
 Contract §8: each scenario is green under its gate seeds ([S7]); S2 adds the
 p95 commit-plane miss over the S2 gate seeds; the gate is run
 ``gate_repeats`` times and must be green every time ([S0]); the harness
-ranks candidate guidance laws by scorecard ([G3], brief 3.6).
+ranks candidate guidance laws by scorecard ([G3], brief 3.6). A gate-set
+aggregate passes only when it is the whole gate: every scenario, at least
+``gate_repeats`` repeats (``gate_complete``, DT-4).
 
 Pure: it reads scorecard objects (``scorecard.score_run`` output) and returns
 JSON-ready objects. No clock, no I/O; the aggregate carries no wall-clock
@@ -24,10 +26,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from skyweave2.drone.harness.scorecard import Thresholds, miss_p95
-from skyweave2.drone.harness.seeds import SCENARIOS, SeedSet, gate_seeds
+from skyweave2.drone.harness.seeds import GATE_REPEATS, SCENARIOS, SeedSet, gate_seeds
 
 FORMAT = "skyweave-drone-gate"
-FORMAT_V = 1
+FORMAT_V = 2
+"""v2: ``backend`` is an object (name, ``speedup``, ``jobs``; DT-3), the
+``gate_complete`` field (DT-4), and ``attempts`` per run (DT-10)."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -41,6 +45,7 @@ class RunEntry:
     card: Mapping[str, Any]
     end_reason: str
     path: str  # the run directory, relative to the output root
+    attempts: int = 1  # SITL starts the run took (a failed start is retried once; DT-10)
 
 
 def _failed_checks(card: Mapping[str, Any]) -> list[str]:
@@ -81,6 +86,7 @@ def scenario_verdict(
                 "failed_checks": _failed_checks(e.card),
                 "final_state": e.card["final_state"],
                 "end_reason": e.end_reason,
+                "attempts": e.attempts,
                 "path": e.path,
             }
             for e in runs
@@ -161,13 +167,19 @@ def aggregate(
     scenarios: Sequence[str],
     laws: Sequence[str],
     repeats: int,
-    backend: str,
+    backend: Mapping[str, Any],
     versions: Mapping[str, str],
     thresholds: Thresholds | None = None,
 ) -> dict[str, Any]:
     """The aggregate scorecard: verdict per (law, repeat, scenario), the
     per-repeat gate verdict, the law ranking, and the overall verdict (every
-    law green in every repeat)."""
+    law green in every repeat).
+
+    For the gate set, ``gate_complete`` is true only when the aggregate covers
+    every scenario at least ``gate_repeats`` times ([S0], [S7]), and the
+    overall verdict needs it: a one-repeat or one-scenario "gate" is not the
+    gate (DT-4). For the probe set ``gate_complete`` is ``null``.
+    """
     for s in scenarios:
         if s not in SCENARIOS:
             raise ValueError(f"unknown scenario {s!r}")
@@ -196,6 +208,11 @@ def aggregate(
             )
         results.extend(law_repeats)
         summaries.append(law_summary(law, law_repeats, [e for e in entries if e.law == law]))
+    gate_complete = (
+        None
+        if seed_set is not SeedSet.GATE
+        else repeats >= GATE_REPEATS and set(scenarios) == set(SCENARIOS)
+    )
     return {
         "format": FORMAT,
         "format_v": FORMAT_V,
@@ -203,10 +220,13 @@ def aggregate(
         "scenarios": list(scenarios),
         "laws": list(laws),
         "repeats": repeats,
-        "backend": backend,
+        "gate_complete": gate_complete,
+        "backend": dict(backend),
         "versions": dict(versions),
         "thresholds": th.to_obj(),
         "results": results,
         "law_ranking": rank_laws(summaries),
-        "passed": bool(results) and all(r["passed"] for r in results),
+        "passed": gate_complete is not False
+        and bool(results)
+        and all(r["passed"] for r in results),
     }

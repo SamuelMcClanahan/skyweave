@@ -6,8 +6,9 @@ the run's seed):
 - A :class:`World`: the trial's prime parameters, the synthetic camera's
   error model, and the truth objects, drawn from the seed ([S7]).
 - A :class:`Script`: the scripted human at the ground UI (prime, approve,
-  mark complete, abort, sent as command packets through the core's command
-  path) and the scripted pilot at the radio (the 3-position mode switch,
+  mark complete, abort, sent as encoded command packets through the ground
+  UI's command receiver, the [P5b]/[P5c] wire path; CC-5) and the scripted
+  pilot at the radio (the 3-position mode switch,
   brief 3.11), plus the scenario's fault injections (detection dropout, FC
   link blackout). It reacts only to what a human could see: the mission
   state packets and acks the companion publishes ([P3], [P5]) and the GCS
@@ -52,6 +53,7 @@ from skyweave2.drone.harness.scorecard import (
     Check,
     RunTrace,
     check_lock_retained,
+    check_lock_window_covers,
     check_reacquired,
 )
 from skyweave2.drone.harness.seeds import SCENARIOS
@@ -399,6 +401,7 @@ class Script:
         self._t07: list[int] = []
         self._commit_t: int | None = None
         self._launch_t: int | None = None
+        self.s6_maneuver_ms: tuple[int, int] | None = None  # (from, to) on t_cap, S6 only
 
     # -- queue ----------------------------------------------------------------
 
@@ -528,12 +531,13 @@ class Script:
         lateral = np.array([-u[1], u[0], 0.0])  # 90 deg right of the approach direction
         v_kite = geo["kite_speed_mps"] * geo["kite_side"] * lateral
         t_move = t7 + S6_KITE_START_MS
+        t_reverse = t_move + S6_KITE_OUT_MS
         kite.start(
             SlowKite(
                 start_ned=tuple(float(x) for x in anchor),
                 velocity_ned=tuple(float(x) for x in v_kite),
                 t0_ms=t_move,
-                t_reverse_ms=t_move + S6_KITE_OUT_MS,
+                t_reverse_ms=t_reverse,
                 turn_s=S6_KITE_TURN_S,
                 name=TARGET_NAME,
                 width_m=kite.width_m,
@@ -557,16 +561,34 @@ class Script:
             t_cross - S6_BIRD_HALF_WINDOW_MS,
             t_cross + S6_BIRD_HALF_WINDOW_MS,
         )
+        # CC-3: the span the S6 lock window must cover, from the reversal (and its
+        # turn) through the distractor's whole time in the world.
+        self.s6_maneuver_ms = (
+            min(t_reverse, bird.t_from),
+            max(t_reverse + round(S6_KITE_TURN_S * 1000.0), bird.t_to),
+        )
         self.log.notes.append((t7, f"s6 kite moves at {t_move}, bird crosses at {t_cross}"))
 
     # -- scenario checks the scorecard cannot build by itself -----------------
 
     def extra_checks(self, trace: RunTrace) -> list[Check]:
-        """S3's two dropout checks ([S8] table), on delivery-time (``t_rx``) windows."""
+        """The checks that need the script's own times, on delivery-time (``t_rx``)
+        windows: S3's two dropout checks ([S8] table), and S6's check that the lock
+        window covers the scripted reversal and crossing (CC-3)."""
+        lat = self.latency_ms
+        if self.world.scenario == "S6":
+            name = "lock_window_covers_maneuver"
+            if self.s6_maneuver_ms is None:
+                return [Check(name=name, passed=False)]  # no T07: the maneuver never ran
+            t_from, t_to = self.s6_maneuver_ms
+            return [
+                check_lock_window_covers(
+                    trace, t_from_ms=t_from + lat, t_to_ms=t_to + lat, name=name
+                )
+            ]
         if self.world.scenario != "S3":
             return []
         windows = {w.kind: w for w in self.dropouts}
-        lat = self.latency_ms
         checks: list[Check] = []
         short = windows.get("short")
         if short is None:

@@ -214,7 +214,9 @@ class _Timeline:
         return None if i < 0 else self.pub_engaged[i]
 
     def prime_at(self, t: int) -> PrimeParams | None:
-        """The trial in force at ``t``: the newest accepted prime at or before it."""
+        """The trial in force at ``t``: the newest accepted prime at or before it
+        that executed (a [P5a] retry is acked ``accepted`` again but executes
+        nothing, so it never counts; CC-2)."""
         times = [p[1] for p in self.primes]
         i = bisect.bisect_right(times, t) - 1
         return None if i < 0 else self.primes[i][2]
@@ -827,6 +829,28 @@ def check_reacquired(
     return Check(name=name, passed=ok, value=tl.events[i_t07][0])
 
 
+def check_lock_window_covers(
+    trace: RunTrace, *, t_from_ms: int, t_to_ms: int, name: str = "lock_window_covers_maneuver"
+) -> Check:
+    """S6 (CC-3): the [S8] lock window spans the scripted maneuver ``[t_from, t_to]``
+    (``t_rx``), so lock retention and the retarget count were measured over the
+    kite's reversal and the distractor's crossing, not only before them.
+
+    The window is ``[first T07, first of commit / COMPLETE / RETURN / ABORT /
+    LAND)``. A window with no end event runs to the newest detection frame in
+    the recording. Passes when the window starts at or before ``t_from`` and
+    ends after ``t_to``; ``value`` is the window's end.
+    """
+    tl = _parse(trace)
+    window = _lock_window(tl)
+    if window is None:
+        return Check(name=name, passed=False, value=None, limit=t_to_ms)
+    t0, t1 = window
+    if t1 is None:
+        t1 = max((t for t, _ in tl.detections if t >= t0), default=t0)
+    return Check(name=name, passed=t0 <= t_from_ms and t1 > t_to_ms, value=t1, limit=t_to_ms)
+
+
 def _scenario_checks(
     scenario: str,
     tl: _Timeline,
@@ -931,10 +955,11 @@ def score_run(
     scenario: str,
     seed: int,
     seed_set: SeedSet | str,
-    backend: str,
+    backend: Mapping[str, Any],
     versions: Mapping[str, str],
     law: str,
     replay_ok: bool,
+    end_reason: str,
     thresholds: Thresholds | None = None,
     extra_checks: Sequence[Check] = (),
     fc_ids: tuple[int, int] = (1, 1),
@@ -945,11 +970,25 @@ def score_run(
     [S8] metrics (``null`` where undefined), the safety floors, the final
     state, the transition list, the [R3] replay result, and pass/fail per
     check. ``passed`` is true only when every check passed.
+
+    ``backend`` names the backend (``name``) and how it ran: a closed-loop run
+    adds the SITL ``speedup`` and the parallel ``jobs``, which shape the
+    loop's timing and so the scored metrics (DT-3). ``end_reason`` is how the
+    run ended; the ``run_completed`` check passes only for
+    :data:`END_LANDED`, so a run cut short is never green on the checks it
+    happened to reach (CC-3).
     """
     parsed_set = check_seed(seed_set, scenario, seed)
     th = thresholds or Thresholds()
-    if not isinstance(backend, str) or not backend:
-        raise ValueError("backend must be a non-empty string")
+    if (
+        not isinstance(backend, Mapping)
+        or not isinstance(backend.get("name"), str)
+        or not backend["name"]
+        or not all(isinstance(k, str) for k in backend)
+    ):
+        raise ValueError("backend must map strings, with a non-empty string 'name'")
+    if not isinstance(end_reason, str) or not end_reason:
+        raise ValueError("end_reason must be a non-empty string")
     if not isinstance(law, str) or not law:
         raise ValueError("law must be a non-empty string")
     if not all(isinstance(k, str) and isinstance(v, str) for k, v in versions.items()):
@@ -989,6 +1028,12 @@ def score_run(
             limit=0,
         ),
         Check(name="replay", passed=replay_ok),
+        Check(
+            name="run_completed",
+            passed=end_reason == END_LANDED,
+            value=end_reason,
+            limit=END_LANDED,
+        ),
     ]
     checks += list(extra_checks)
     names = [c.name for c in checks]
@@ -1001,7 +1046,7 @@ def score_run(
         "scenario": scenario,
         "seed": seed,
         "seed_set": parsed_set.value,
-        "backend": backend,
+        "backend": dict(backend),
         "versions": dict(versions),
         "law": law,
         "target": trace.target,

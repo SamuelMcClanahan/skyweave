@@ -848,6 +848,67 @@ def test_m_event_names_the_first_condition(late: bool, vehicle: dict[str, Any], 
     assert event in r.names()
 
 
+# Finding DT-1: the T17 / T18 thresholds are safety budgets; each gets a
+# just-passes / just-fails pair against the primed or configured value.
+
+
+@pytest.mark.parametrize(
+    ("field", "limit", "past", "event"),
+    [
+        ("battery_pct", "battery_floor_pct", -0.01, "budget:battery"),
+        ("home_dist_m", "geofence_radius_m", +0.01, "budget:geofence"),
+    ],
+    ids=["battery", "geofence"],
+)
+def test_m_t17_battery_and_geofence_boundaries(
+    field: str, limit: str, past: float, event: str
+) -> None:
+    """T17, [M2a], DT-1: battery < battery_floor_pct and home_dist >
+    geofence_radius_m are strict. With the primed defaults (30 %, 60 m) a tick
+    exactly at the limit stays in SEARCH with no transition; 0.01 past it
+    (29.99 %, 60.01 m) fires T17 with the named budget event."""
+    r = searching()
+    bound = getattr(r.m.trial, limit)
+    rows = len(r.log)
+    r.tick(**{field: bound})
+    assert r.state is S.SEARCH and len(r.log) == rows
+    r.tick(**{field: bound + past})
+    assert r.log[-1][:2] == (r.t, "T17") and r.state is S.RETURN
+    assert event in r.names()
+
+
+def test_m_t17_flight_time_cap_boundary() -> None:
+    """T17, DT-1: flight time since LAUNCH > flight_time_cap_s is strict.
+    Primed cap 2 s: a tick exactly 2000 ms after the T03 stamp stays in SEARCH;
+    1 ms later fires T17 budget:flight_time."""
+    r = searching(flight_time_cap_s=2.0)
+    trial = r.m.trial
+    assert trial is not None
+    cap_ms = round(trial.flight_time_cap_s * 1000.0)
+    t_launch = next(row[0] for row in r.log if row[1] == "T03")
+    rows = len(r.log)
+    r.tick(at=t_launch + cap_ms)
+    assert r.state is S.SEARCH and len(r.log) == rows
+    r.tick(at=t_launch + cap_ms + 1)
+    assert r.log[-1][:2] == (r.t, "T17") and r.state is S.RETURN
+    assert "budget:flight_time" in r.names()
+
+
+def test_m_t18_ground_link_timeout_boundary() -> None:
+    """T18, [U6], DT-1: a ground-heartbeat silence of exactly
+    ground_link_timeout_ms is not link loss; 1 ms more fires T18
+    failsafe:ground_link."""
+    r = searching()
+    r.hb()
+    t_hb, timeout = r.t, r.cfg.ground_link_timeout_ms
+    rows = len(r.log)
+    r.tick(at=t_hb + timeout)
+    assert r.state is S.SEARCH and len(r.log) == rows
+    r.tick(at=t_hb + timeout + 1)
+    assert r.log[-1][:2] == (r.t, "T18") and r.state is S.RETURN
+    assert "failsafe:ground_link" in r.names()
+
+
 def test_m_auto_row_consumes_its_input() -> None:
     """[M4a], T15, T05: the confirmed packet right after LOST fires T15 only;
     the next one fires T05."""
@@ -906,7 +967,7 @@ def test_m_one_transition_per_input() -> None:
 
 
 # ---------------------------------------------------------------------------
-# (5) T03 edge gate (E1-D4)
+# (5) T03 edge gate (E1-D4), T04 takeoff floor
 # ---------------------------------------------------------------------------
 
 
@@ -952,6 +1013,36 @@ def test_m_t03_needs_fresh_attitude_disarmed_on_ground(blocker: dict[str, Any]) 
     assert r.state is S.PRIMED
     r.tick(**{k: GROUND[k] for k in blocker})
     assert r.log[-1][1] == "T03"
+
+
+def test_m_t04_takeoff_done_boundary() -> None:
+    """T04, DT-8: airborne and rel_alt >= takeoff_done_frac x search_alt. With
+    the defaults (frac 0.9, search_alt 10) the floor is 9.0 m: rel_alt 8.99
+    stays in LAUNCH, exactly 9.0 enters SEARCH."""
+    r = launched()
+    trial = r.m.trial
+    assert trial is not None
+    floor = r.cfg.takeoff_done_frac * trial.search_alt
+    r.tick(**{**FLYING, "rel_alt_m": floor - 0.01})
+    assert r.state is S.LAUNCH and r.log[-1][1] == "T03"
+    r.tick(rel_alt_m=floor)
+    assert r.log[-1][:2] == (r.t, "T04") and r.state is S.SEARCH
+
+
+@pytest.mark.parametrize(
+    "landed", [LandedState.ON_GROUND, LandedState.UNDEFINED], ids=["on_ground", "unknown"]
+)
+def test_m_t04_needs_airborne_at_full_altitude(landed: LandedState) -> None:
+    """T04, [M2a], DT-8: rel_alt at the full search_alt is not enough without
+    airborne (on_ground, or landed_state UNDEFINED, which is unknown): LAUNCH
+    holds. The same altitude with IN_AIR enters SEARCH."""
+    r = launched()
+    trial = r.m.trial
+    assert trial is not None
+    r.tick(**{**FLYING, "landed_state": landed, "rel_alt_m": trial.search_alt})
+    assert r.state is S.LAUNCH and r.log[-1][1] == "T03"
+    r.tick(landed_state=LandedState.IN_AIR)
+    assert r.log[-1][:2] == (r.t, "T04") and r.state is S.SEARCH
 
 
 # ---------------------------------------------------------------------------

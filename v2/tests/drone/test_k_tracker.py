@@ -229,6 +229,32 @@ def test_k_exact_iou_tie_goes_to_lower_track_id(left_first: bool) -> None:
         assert 120.0 < t1.u < 140.0
 
 
+@pytest.mark.parametrize(
+    ("iou_scale", "associated"), [(1.01, True), (0.99, False)], ids=["just_above", "just_below"]
+)
+def test_k_iou_min_gates_association(iou_scale: float, associated: bool) -> None:
+    """[K2], finding DT-9: iou_min discriminates. A static target confirmed over
+    3 frames has du = dv = 0, so its predicted box is its last packet's box.
+    The next frame's one box is that box slid along u until its IoU with it is
+    1 % above iou_min (associated: one packet, same id 1, hits 4) or 1 % below
+    (no association: track 1 misses and coasts, and the box is born as a new
+    tentative id 2). Two equal w x h boxes offset by dx overlap with
+    IoU = (w - dx) / (w + dx), so dx = w (1 - IoU) / (1 + IoU)."""
+    trk = Tracker(_cfg())
+    (last,) = _script(trk, "HHH")[-1]
+    assert (last.track_id, last.state, last.du, last.dv) == (1, C, 0.0, 0.0)
+    iou = trk.config.iou_min * iou_scale
+    dx = last.w * (1.0 - iou) / (1.0 + iou)
+    slid = Box(
+        x=last.u - last.w / 2.0 + dx, y=last.v_px - last.h / 2.0, w=last.w, h=last.h, conf=0.9
+    )
+    out = [(p.track_id, p.state, p.hits, p.misses) for p in _feed(trk, _det(3, slid))]
+    if associated:
+        assert out == [(1, C, 4, 0)]
+    else:
+        assert out == [(1, CO, 0, 1), (2, T, 1, 0)]
+
+
 # ---------------------------------------------------------------------------
 # [P1] ordering, [K1] filter
 # ---------------------------------------------------------------------------

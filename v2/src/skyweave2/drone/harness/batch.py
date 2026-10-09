@@ -24,12 +24,23 @@ from typing import Any
 
 from skyweave2.drone.harness.gate import RunEntry, aggregate
 from skyweave2.drone.harness.seeds import SeedSet, check_seed, gate_seeds, probe_seeds
-from skyweave2.drone.harness.sitl_loop import BACKEND, RunSpec, run_one
+from skyweave2.drone.harness.sitl_loop import BACKEND, RunSpec, backend_obj, run_one
 from skyweave2.drone.packets import canonical_json
 from skyweave2.drone.sitl import PARM_SHA256, SITL_SHA256, SitlError, SitlPaths, free_instance
 
 DEFAULT_PROBE_COUNT = 3
 DEFAULT_INSTANCE_BASE = 20
+
+DEFAULT_SPEEDUP = 4.0
+"""SITL ``--speedup`` for the command line and the slow S tests alike (DT-3;
+Provisional, E1 harness): the speed the recorded gate ran at. It is not
+process control only: the harness's wall-clock processing time becomes sim
+time multiplied by it, so every scorecard records it under ``backend``."""
+
+DEFAULT_JOBS = 3
+"""Parallel runs (one SITL each) for the command line and the slow S tests
+(DT-3; Provisional, E1 harness). Recorded under ``backend`` like the speedup,
+since parallel runs share the CPU."""
 
 _INSTANCE: int | None = None  # this worker process's SITL instance
 _RETRYABLE = ("error: SitlError", "error: StartupError")  # before any core input exists
@@ -150,7 +161,8 @@ def _run_task(spec: RunSpec, fallback_start: int) -> dict[str, Any]:
 
 
 def _error_result(spec: RunSpec, exc: BaseException) -> dict[str, Any]:
-    """A red entry for a run whose worker raised (the traceback goes to ``error.txt``)."""
+    """A red entry for a run whose worker raised (the traceback goes to ``error.txt``).
+    ``attempts`` is 1: an attempt before the one that raised is not known here."""
     spec.out_dir.mkdir(parents=True, exist_ok=True)
     text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     (spec.out_dir / "error.txt").write_text(text)
@@ -159,6 +171,7 @@ def _error_result(spec: RunSpec, exc: BaseException) -> dict[str, Any]:
         "scenario": spec.scenario,
         "seed": spec.seed,
         "seed_set": spec.seed_set.value,
+        "backend": backend_obj(spec),
         "law": spec.law,
         "final_state": None,
         "metrics": {
@@ -186,7 +199,10 @@ def run_plan(
     instance_base: int = DEFAULT_INSTANCE_BASE,
     progress: Callable[[str], None] | None = None,
 ) -> list[RunEntry]:
-    """Run every planned run, ``jobs`` at a time, each on its own SITL instance."""
+    """Run every planned run, ``jobs`` at a time, each on its own SITL instance.
+
+    Each run's spec is stamped with ``jobs``, so its scorecard records the
+    parallelism it actually ran under (DT-3)."""
     ctx = multiprocessing.get_context("spawn")
     counter = ctx.Value("i", 0)
     fallback = instance_base + jobs + 10
@@ -198,34 +214,39 @@ def run_plan(
         initializer=_init_worker,
         initargs=(counter, instance_base),
     ) as pool:
-        futures = {pool.submit(_run_task, p.spec, fallback): p for p in plan}
+        futures = {}
+        for p in plan:
+            spec = replace(p.spec, jobs=jobs)
+            futures[pool.submit(_run_task, spec, fallback)] = (p.repeat, spec)
         for n, fut in enumerate(as_completed(futures), start=1):
-            p = futures[fut]
+            repeat, spec = futures[fut]
             try:
                 res = fut.result()
             except Exception as exc:  # noqa: BLE001 - a harness defect is a red run, not a crash
-                res = _error_result(p.spec, exc)
+                res = _error_result(spec, exc)
             card = res["card"]
             if progress is not None:
                 failed = [c["name"] for c in card["checks"] if not c["passed"]]
                 progress(
-                    f"[{n}/{len(plan)}] {p.spec.law} rep{p.repeat} {p.spec.scenario} "
-                    f"{p.spec.seed}: {'PASS' if card['passed'] else 'FAIL'} "
+                    f"[{n}/{len(plan)}] {spec.law} rep{repeat} {spec.scenario} "
+                    f"{spec.seed}: {'PASS' if card['passed'] else 'FAIL'} "
                     f"final={card['final_state']} end={res['end_reason']} "
                     f"replay={res['replay_ok']}"
+                    + (f" attempts={res['attempts']}" if res["attempts"] > 1 else "")
                     + (f" failed={failed}" if failed else "")
                     + (f" mismatch={res['replay_mismatch']}" if not res["replay_ok"] else "")
                     + f" ({time.monotonic() - t0:.0f} s wall)"
                 )
             entries.append(
                 RunEntry(
-                    law=p.spec.law,
-                    repeat=p.repeat,
-                    scenario=p.spec.scenario,
-                    seed=p.spec.seed,
+                    law=spec.law,
+                    repeat=repeat,
+                    scenario=spec.scenario,
+                    seed=spec.seed,
                     card=card,
                     end_reason=res["end_reason"],
-                    path=os.path.relpath(p.spec.out_dir, out),
+                    attempts=res["attempts"],
+                    path=os.path.relpath(spec.out_dir, out),
                 )
             )
     return entries
@@ -240,15 +261,19 @@ def write_aggregate(
     laws: Sequence[str],
     repeats: int,
     run_versions: dict[str, str],
+    speedup: float,
+    jobs: int,
 ) -> dict[str, Any]:
-    """Aggregate (``gate.aggregate``) and write ``<out>/scorecard.json``."""
+    """Aggregate (``gate.aggregate``) and write ``<out>/scorecard.json``. The
+    aggregate's ``backend`` records the SITL ``speedup`` and the ``jobs`` the
+    runs used (DT-3)."""
     agg = aggregate(
         sorted(entries, key=lambda e: (e.law, e.repeat, e.scenario, e.seed)),
         seed_set=seed_set,
         scenarios=scenarios,
         laws=laws,
         repeats=repeats,
-        backend=BACKEND,
+        backend={"name": BACKEND, "speedup": float(speedup), "jobs": int(jobs)},
         versions=run_versions,
     )
     (out / "scorecard.json").write_bytes(canonical_json(agg) + b"\n")

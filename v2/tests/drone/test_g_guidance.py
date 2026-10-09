@@ -6,18 +6,23 @@ cx = 959.5, cy = 599.5, Kp = 0.8, deadband 0.25 m, a_max = 2 m/s^2,
 K_yaw = 1.5, yaw_rate_max = 90 deg/s, K_alt = 0.5, v_alt_max = 1 m/s,
 w_min_px = 4, r_assume / r_min / r_max = 15 / 1 / 60 m, t_overrun 0.5 s,
 t_brake 1 s, v_climb 1.5 m/s, t_climb 2 s, hold 1 m for 10 s). Nothing is
-re-derived with the code under test. Real packets, a real attitude history,
-and real snapshots go through the real ``Guidance``; nothing we own is
-mocked.
+re-derived with the code under test. Real packets, real snapshots, and the
+production attitude source go through the real ``Guidance``: a
+``VehicleState`` fed pymavlink-encoded FC ``ATTITUDE`` frames through
+``ingest``, the way fc_link and replay feed it (finding DT-2). ``ATTITUDE``
+carries its angles as float32, so attitude-derived values match the hand
+numbers to 1e-6. Nothing we own is mocked.
 """
 
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import pytest
+from pymavlink.dialects.v20 import ardupilotmega as mavlink2
 
-from skyweave2.drone.camera import AttitudeHistory, CameraModel
+from skyweave2.drone.camera import CameraModel
 from skyweave2.drone.guidance import (
     LAWS,
     Guidance,
@@ -49,6 +54,7 @@ from skyweave2.drone.types import (
     VehicleSnapshot,
     VelocityCommand,
 )
+from skyweave2.drone.vehicle_state import LinkConfig, VehicleState, parse_frames
 
 S = MissionState
 DEG = math.pi / 180.0
@@ -60,22 +66,49 @@ STANDOFF = PrimeParams(trial_type=TrialType.STANDOFF)  # d_s 5, v_max 2.5, searc
 TOUCH = PrimeParams(trial_type=TrialType.TOUCH)  # alpha 0.4, beta 0.1, k 5
 ID = 7
 TOL = 1e-9
+LINK = LinkConfig()  # attitude_bound_ms 100 ([F3], §9)
+FC = mavlink2.MAVLink(None, srcSystem=LINK.fc_sysid, srcComponent=LINK.fc_compid)
+FC_BOOT_MS = 10_000  # FC time_boot_ms = board ms + this: its own clock, carried, not mapped (E1-F8)
 
 
 def _att(t: int, *, yaw: float = 0.0, pitch: float = 0.0, roll: float = 0.0) -> Attitude:
-    return Attitude(t_ms=t, time_boot_ms=t, roll=roll, pitch=pitch, yaw=yaw)
+    return Attitude(t_ms=t, time_boot_ms=t + FC_BOOT_MS, roll=roll, pitch=pitch, yaw=yaw)
 
 
-def _hist(*samples: Attitude, bound_ms: int = 100) -> AttitudeHistory:
-    hist = AttitudeHistory(bound_ms=bound_ms, keep_ms=10**9)
-    for s in samples:
-        hist.add(s)
-    return hist
+def _ingest(vs: VehicleState, t: int, msg: Any) -> None:
+    """Encode ``msg`` as the FC and feed the parsed frame to ``vs`` at board ms ``t``."""
+    for parsed in parse_frames(bytes(msg.pack(FC))):
+        vs.ingest(parsed, t)
 
 
-def _steady(t0: int, t1: int, *, yaw: float = 0.0, pitch: float = 0.0) -> AttitudeHistory:
-    """50 Hz samples of one attitude over [t0, t1]."""
-    return _hist(*(_att(t, yaw=yaw, pitch=pitch) for t in range(t0, t1 + 1, 20)))
+class _Fc:
+    """The FC's ATTITUDE stream into the production [G1] source ([F2], [F3]).
+
+    Each sample becomes a real ATTITUDE frame received at its ``t_ms``.
+    ``fc(t)`` ingests every frame received at or before ``t`` (fc_link has
+    delivered them before the core processes an input stamped ``t``) and
+    returns the one ``VehicleState`` that guidance then queries.
+    """
+
+    def __init__(self, *samples: Attitude) -> None:
+        self.vs = VehicleState(LINK)
+        self._samples = samples
+        self._next = 0
+        self._t: int | None = None
+
+    def __call__(self, t_ms: int) -> VehicleState:
+        assert self._t is None or t_ms >= self._t, "the FC stream never runs backwards"
+        self._t = t_ms
+        while self._next < len(self._samples) and self._samples[self._next].t_ms <= t_ms:
+            s = self._samples[self._next]
+            _ingest(self.vs, s.t_ms, FC.attitude_encode(s.time_boot_ms, s.roll, s.pitch, s.yaw, 0, 0, 0))
+            self._next += 1
+        return self.vs
+
+
+def _steady(t0: int, t1: int, *, yaw: float = 0.0, pitch: float = 0.0) -> _Fc:
+    """50 Hz frames of one attitude over [t0, t1]."""
+    return _Fc(*(_att(t, yaw=yaw, pitch=pitch) for t in range(t0, t1 + 1, 20)))
 
 
 def _pkt(
@@ -187,65 +220,58 @@ def test_g1_derotation_known_pixels_and_attitudes() -> None:
         _approx(list(derotate(_pkt(u=u, v=v), CAM, att)), want)
 
 
-def test_g1_interpolation_between_samples_and_yaw_wrap() -> None:
-    """[G1]: roll, pitch, and unwrapped yaw interpolate linearly between the
-    two samples bracketing t_cap.
+def test_g1_attitude_sample_interpolates_holds_and_bounds() -> None:
+    """[G1], [F2], finding DT-2: the attitude sample for t_cap, from the
+    production source (a VehicleState fed real ATTITUDE frames; float32 angles
+    on the wire, so 1e-6). One test for the three [G1] sampling facts.
 
-    Hand: samples t=1000 (pitch 0, yaw 0) and t=1020 (pitch 0.2, yaw 0.4):
-    t=1010 -> pitch 0.1, yaw 0.2; t=1005 -> pitch 0.05, yaw 0.1.
-    Wrap: t=2000 yaw +170 deg, t=2020 yaw -170 deg is a 20 deg turn through
-    180, so t=2010 -> yaw 180 deg (the principal point looks south, (-1,0,0))
-    and t=2005 -> 175 deg. A linear blend of the raw angles would give 0 deg
-    (north) at t=2010.
+    Interpolation: roll, pitch, and unwrapped yaw are linear between the two
+    samples bracketing t_cap. Samples t=1000 (pitch 0, yaw 0) and t=1020
+    (pitch 0.2, yaw 0.4): t=1010 -> pitch 0.1, yaw 0.2; t=1005 -> pitch 0.05,
+    yaw 0.1. Wrap: t=2000 yaw +170 deg, t=2020 yaw -170 deg is a 20 deg turn
+    through 180, so t=2010 -> yaw 180 deg (the principal point looks south,
+    (-1,0,0)) and t=2005 -> 175 deg. A linear blend of the raw angles would
+    give 0 deg (north) at t=2010.
+
+    Hold: outside the stored span the nearest sample is held, never
+    extrapolated. Samples t=1000 yaw 0.0 and t=1020 yaw 0.2 (10 rad/s):
+    t=950 holds the t=1000 sample, yaw 0.0 (extrapolation would give -0.5);
+    t=1070 holds the t=1020 sample, yaw 0.2 (extrapolation would give 0.7).
+
+    Bound: degraded (None) when the sample used lies more than
+    attitude_bound_ms (100) from t_cap, or no sample exists. One sample at
+    t=1000: t=1100 and t=900 are exactly 100 ms away (not "more than"): held;
+    t=1101 and t=899: degraded. Samples at 1000 and 1400: t=1200 is 200 ms from
+    the nearer one: degraded; t=1050 is 50 ms from it: interpolated (frac 0.125
+    of the 0.4 rad yaw step = 0.05 rad).
     """
-    hist = _hist(_att(1000), _att(1020, pitch=0.2, yaw=0.4))
-    mid = hist.attitude_at(1010)
-    quarter = hist.attitude_at(1005)
+    src = _Fc(_att(1000), _att(1020, pitch=0.2, yaw=0.4))(1020)
+    mid, quarter = src.attitude_at(1010), src.attitude_at(1005)
     assert mid is not None and quarter is not None
     _approx((mid.pitch, mid.yaw), (0.1, 0.2))
     _approx((quarter.pitch, quarter.yaw), (0.05, 0.1))
 
-    wrap = _hist(_att(2000, yaw=170 * DEG), _att(2020, yaw=-170 * DEG))
-    mid = wrap.attitude_at(2010)
-    quarter = wrap.attitude_at(2005)
+    wrap = _Fc(_att(2000, yaw=170 * DEG), _att(2020, yaw=-170 * DEG))(2020)
+    mid, quarter = wrap.attitude_at(2010), wrap.attitude_at(2005)
     assert mid is not None and quarter is not None
-    assert abs(mid.yaw) == pytest.approx(math.pi, abs=1e-9)
-    assert quarter.yaw == pytest.approx(175 * DEG, abs=1e-9)
+    assert abs(mid.yaw) == pytest.approx(math.pi, abs=1e-6)
+    assert quarter.yaw == pytest.approx(175 * DEG, abs=1e-6)
     _approx(list(derotate(_pkt(t_cap=2010), CAM, mid)), (-1.0, 0.0, 0.0))
 
-
-def test_g1_holds_at_span_ends_without_extrapolation() -> None:
-    """[G1]: outside the stored span the nearest sample is held; nothing is
-    extrapolated.
-
-    Hand: samples t=1000 yaw 0.0 and t=1020 yaw 0.2 (10 rad/s). t=950 holds
-    yaw 0.0 (extrapolation would give -0.5); t=1070 holds yaw 0.2
-    (extrapolation would give 0.7).
-    """
-    hist = _hist(_att(1000, yaw=0.0), _att(1020, yaw=0.2))
-    before, after = hist.attitude_at(950), hist.attitude_at(1070)
+    span = _Fc(_att(1000, yaw=0.0), _att(1020, yaw=0.2))(1020)
+    before, after = span.attitude_at(950), span.attitude_at(1070)
     assert before is not None and after is not None
-    assert before.yaw == 0.0
-    assert after.yaw == 0.2
+    assert (before.t_ms, before.yaw) == (1000, 0.0)
+    assert after.t_ms == 1020 and after.yaw == pytest.approx(0.2, abs=1e-6)
 
-
-def test_g1_sample_beyond_bound_is_degraded() -> None:
-    """[G1]: degraded (None) when the sample used lies more than
-    attitude_bound_ms (100) from t_cap, or no sample exists.
-
-    Hand: one sample at t=1000: t=1100 and t=900 are exactly 100 ms away (not
-    "more than"): held. t=1101 and t=899: degraded. Samples at 1000 and 1400:
-    t=1200 is 200 ms from the nearer one: degraded; t=1050 is 50 ms from it:
-    interpolated (frac 0.125 of the 0.4 rad yaw step = 0.05 rad).
-    """
-    one = _hist(_att(1000))
+    one = _Fc(_att(1000))(1000)
     assert one.attitude_at(1100) is not None and one.attitude_at(900) is not None
     assert one.attitude_at(1101) is None and one.attitude_at(899) is None
-    assert _hist().attitude_at(1000) is None
-    gap = _hist(_att(1000), _att(1400, yaw=0.4))
+    assert VehicleState(LINK).attitude_at(1000) is None
+    gap = _Fc(_att(1000), _att(1400, yaw=0.4))(1400)
     assert gap.attitude_at(1200) is None
     near = gap.attitude_at(1050)
-    assert near is not None and near.yaw == pytest.approx(0.05)
+    assert near is not None and near.yaw == pytest.approx(0.05, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------

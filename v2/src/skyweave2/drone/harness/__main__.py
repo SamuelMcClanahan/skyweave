@@ -10,7 +10,11 @@ An explicit seed set or explicit seeds are required ([S7]); nothing defaults
 to the gate set. ``--seed`` alone runs those seeds under the ``probe`` label
 (a gate seed is refused there; name ``--seed-set gate`` to run gate seeds).
 The gate set runs ``gate_repeats`` (2) times unless ``--repeats`` says
-otherwise; the probe set runs once.
+otherwise; the probe set runs once. A gate-set aggregate passes only when it
+covers every scenario at least ``gate_repeats`` times (``gate_complete``).
+``--speedup`` and ``--jobs`` default to ``batch.DEFAULT_SPEEDUP`` and
+``batch.DEFAULT_JOBS``, the same values the slow S tests use; both are
+recorded in every scorecard under ``backend``.
 
 Output under ``--out``: one directory per run,
 ``<law>/rep<r>/<scenario>/<seed>/`` with ``recording.jsonl`` (every packet,
@@ -35,7 +39,9 @@ from pathlib import Path
 from skyweave2.drone.guidance import LAWS
 from skyweave2.drone.harness.batch import (
     DEFAULT_INSTANCE_BASE,
+    DEFAULT_JOBS,
     DEFAULT_PROBE_COUNT,
+    DEFAULT_SPEEDUP,
     plan_runs,
     plan_seeds,
     run_plan,
@@ -59,9 +65,19 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--out", required=True, type=Path, help="output directory")
     ap.add_argument("--scenarios", nargs="+", choices=SCENARIOS, default=list(SCENARIOS))
     ap.add_argument("--law", action="append", choices=sorted(LAWS), help="guidance law(s)")
-    ap.add_argument("--speedup", type=float, default=1.0, help="SITL --speedup (default 1)")
+    ap.add_argument(
+        "--speedup",
+        type=float,
+        default=DEFAULT_SPEEDUP,
+        help=f"SITL --speedup (default {DEFAULT_SPEEDUP:g}; recorded in each scorecard)",
+    )
     ap.add_argument("--repeats", type=int, help=f"gate default {GATE_REPEATS}, probe 1")
-    ap.add_argument("--jobs", type=int, default=1, help="parallel runs (one SITL each)")
+    ap.add_argument(
+        "--jobs",
+        type=int,
+        default=DEFAULT_JOBS,
+        help=f"parallel runs, one SITL each (default {DEFAULT_JOBS}; recorded in each scorecard)",
+    )
     ap.add_argument("--probe-count", type=int, default=DEFAULT_PROBE_COUNT)
     ap.add_argument("--instance-base", type=int, default=DEFAULT_INSTANCE_BASE)
     args = ap.parse_args(argv)
@@ -121,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
         laws=laws,
         repeats=repeats,
         run_versions=vers,
+        speedup=args.speedup,
+        jobs=args.jobs,
     )
     for res in agg["results"]:
         cells = " ".join(
@@ -131,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{res['law']} rep{res['repeat']}: {cells}{extra}")
     for row in agg["law_ranking"]:
         print(f"rank {row['rank']}: {row['law']} ({row['green_cells']}/{row['cells']} green)")
+    if agg["gate_complete"] is False:
+        print(f"gate incomplete: needs every scenario and >= {GATE_REPEATS} repeats")
     print(f"aggregate {'PASS' if agg['passed'] else 'FAIL'}: {out / 'scorecard.json'}")
     _progress(f"wall time {time.monotonic() - t_wall:.1f} s")
     return 0 if agg["passed"] else 1

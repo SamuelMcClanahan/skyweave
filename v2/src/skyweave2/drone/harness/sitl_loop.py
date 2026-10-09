@@ -44,7 +44,6 @@ here are process-control timeouts only and never reach a scored output.
 from __future__ import annotations
 
 import bisect
-import hmac
 import json
 import math
 import select
@@ -60,6 +59,7 @@ from pymavlink.dialects.v20 import ardupilotmega as mavlink2
 from skyweave2.drone.camera import wrap_pi
 from skyweave2.drone.core import CompanionCore, CoreConfig, CoreOutput, replay
 from skyweave2.drone.fc_link import LOOPBACK_HOST, FcLink
+from skyweave2.drone.ground_ui import CommandReceiver
 from skyweave2.drone.harness.camera_sim import FrameTruth, Pose, SyntheticCamera
 from skyweave2.drone.harness.scenarios import (
     APPROVE_IDLE_PWM,
@@ -74,6 +74,7 @@ from skyweave2.drone.harness.scenarios import (
     build_world,
 )
 from skyweave2.drone.harness.scorecard import (
+    END_LANDED,
     RunTrace,
     Thresholds,
     TruthSample,
@@ -81,7 +82,7 @@ from skyweave2.drone.harness.scorecard import (
     scorecard_json,
 )
 from skyweave2.drone.harness.seeds import SeedSet, check_seed
-from skyweave2.drone.packets import CommandName, CommandPacket
+from skyweave2.drone.packets import CommandName, CommandPacket, encode
 from skyweave2.drone.recording import Recorder, read_records
 from skyweave2.drone.sitl import DEFAULT_HOME, SitlInstance, SitlPaths, instance_ports
 from skyweave2.drone.tracker import Tracker, TrackerConfig, id_base_from_start
@@ -107,8 +108,9 @@ LATLON_TO_M = 0.011131884502145034
 """ArduPilot ``LOCATION_SCALING_FACTOR``: metres per 1e-7 degree of latitude."""
 
 UI_TOKEN = "harness-ui-token"
-"""The shared UI token the harness's command receiver checks ([P5c]). Test
-environment only; the core records the authentication result, never this."""
+"""The shared UI token the harness's command receiver (``ground_ui.CommandReceiver``)
+checks ([P5c]). Test environment only; the core records the authentication
+result, never this."""
 
 _PREARM_BIT = mavlink2.MAV_SYS_STATUS_PREARM_CHECK
 _EKF_GPS_TEXTS = ("EKF3 IMU0 is using GPS", "EKF3 IMU1 is using GPS")
@@ -308,6 +310,7 @@ class RunSpec:
     seed_set: SeedSet
     law: str = "pure_pursuit"
     speedup: float = 1.0
+    jobs: int = 1  # runs in parallel with this one (``batch.run_plan`` stamps it; DT-3)
     instance: int = 0
     out_dir: Path
     sitl_paths: SitlPaths
@@ -331,6 +334,13 @@ def core_config(law: str) -> CoreConfig:
     """The companion configuration under test: contract §9 defaults, the law
     named on the command line, and the setpoint gate enabled (SITL only, [F5])."""
     return CoreConfig(link=LinkConfig(setpoints_enabled=True), law=law)
+
+
+def backend_obj(spec: RunSpec) -> dict[str, Any]:
+    """The scorecard's ``backend``: the SITL, and how it ran (DT-3). The speedup
+    turns the harness's wall-clock processing time into sim time, and the
+    parallel jobs share the CPU, so both shape the scored timing."""
+    return {"name": BACKEND, "speedup": float(spec.speedup), "jobs": int(spec.jobs)}
 
 
 class ClosedLoop:
@@ -373,6 +383,7 @@ class ClosedLoop:
             "truth_rerequests": 0,
         }
         self._tick_lag: list[int] = []  # sim ms between a tick's stamp and its processing
+        self._ui_out: list[CoreOutput] = []  # what the command receiver forwarded
 
     # -- clock ----------------------------------------------------------------
 
@@ -493,20 +504,37 @@ class ClosedLoop:
         for pkt in self.tracker.update(frame.packet):
             self._apply(self.core.on_track(pkt, t), t)
 
+    def _start_core(self) -> None:
+        """The companion core on fc_link's vehicle state, and the UI's command
+        receiver in front of it: the one path from a command's bytes to the core
+        ([P5b], [P5c]; contract §8 "through the command path")."""
+        self.core = CompanionCore(
+            self.config, vehicle=self.fc.state, recorder=self.recorder, t_start_ms=self.now
+        )
+        self.ui = CommandReceiver(self.core, UI_TOKEN, self._ui_out.append)
+
+    def _send_command(self, action: SendCommand, t: int) -> None:
+        """CC-5: the scripted human's command goes over the wire form, encoded and
+        then decoded, prefix-checked, and authenticated by the receiver; the UI
+        shows the receiver's ack."""
+        cmd = CommandPacket(
+            cmd_id=action.cmd_id, token=UI_TOKEN, command=action.command, params=action.params
+        )
+        ack = self.ui.receive(encode(cmd), t)
+        if ack is None:  # pragma: no cover - encode() output always carries its cmd_id
+            raise RuntimeError(f"scripted command {action.cmd_id} was not acked")
+        forwarded = list(self._ui_out)
+        self._ui_out.clear()  # in place: the receiver holds this list's append
+        # A rejected_malformed command never reaches the core, so nothing is forwarded.
+        out = forwarded[0] if forwarded else CoreOutput()
+        self.counters["commands"] += 1
+        if action.command is CommandName.PRIME and self.camera is None:
+            self._start_camera(t)  # the trial starts: percepd's output is scored from here
+        self._apply(replace(out, acks=(ack,)), t)
+
     def _do_action(self, action: Any, t: int) -> None:
         if isinstance(action, SendCommand):
-            cmd = CommandPacket(
-                cmd_id=action.cmd_id,
-                token=UI_TOKEN,
-                command=action.command,
-                params=action.params,
-            )
-            auth_ok = hmac.compare_digest(cmd.token.encode("ascii"), UI_TOKEN.encode("ascii"))
-            out = self.core.on_command(cmd, auth_ok, t)
-            self.counters["commands"] += 1
-            if action.command is CommandName.PRIME and self.camera is None:
-                self._start_camera(t)  # the trial starts: percepd's output is scored from here
-            self._apply(out, t)
+            self._send_command(action, t)
         elif isinstance(action, SetSwitch):
             self._switch = action.position
             self._send_rc()
@@ -575,9 +603,7 @@ class ClosedLoop:
             )
             self.now = self._s0_boot
             self.fc = FcLink(self.relay.endpoint, self.clock, self.config.link, self.recorder)
-            self.core = CompanionCore(
-                self.config, vehicle=self.fc.state, recorder=self.recorder, t_start_ms=self.now
-            )
+            self._start_core()
             self.fc.connect(timeout_s=10.0)
             self.relay.accept()
             self._next_tick = self._next_poll = self.now
@@ -636,7 +662,7 @@ class ClosedLoop:
             self.relay.pump()
             self._pilot_periodic(sim_now)
             if self.script.end_at is not None and self.now >= self.script.end_at:
-                self.end_reason = "landed"
+                self.end_reason = END_LANDED
                 return
             reason = self.script.stuck(self.now)
             if reason is not None:
@@ -667,15 +693,17 @@ class ClosedLoop:
             target=self.world.target,
         )
         g = self.config.guidance
+        backend = backend_obj(spec)
         card = score_run(
             trace,
             scenario=spec.scenario,
             seed=spec.seed,
             seed_set=spec.seed_set,
-            backend=BACKEND,
+            backend=backend,
             versions=dict(spec.versions),
             law=spec.law,
             replay_ok=replay_ok,
+            end_reason=self.end_reason,
             thresholds=Thresholds(hold_tol_m=g.hold_tol_m, hold_time_s=g.hold_time_s),
             extra_checks=self.script.extra_checks(trace),
             fc_ids=self.fc_ids,
@@ -687,12 +715,14 @@ class ClosedLoop:
             "seed": spec.seed,
             "seed_set": spec.seed_set.value,
             "law": spec.law,
+            "backend": backend,
             "end_reason": self.end_reason,
             "replay": {"ok": replay_ok, "mismatch": mismatch},
             "world": self.world.to_obj(),
             "dropouts": [_window_obj(w) for w in self.script.dropouts],
             "script": [[t, note] for t, note in self.script.log.notes],
             "counters": {**self.counters, **_lag_stats(self._tick_lag)},
+            "command_receiver": _receiver_counters(getattr(self, "ui", None)),
             "fc_link": _fc_counters(getattr(self, "fc", None)),
             "relay": _relay_counters(self.relay),
         }
@@ -737,6 +767,12 @@ def _fc_counters(fc: FcLink | None) -> dict[str, int]:
     }
 
 
+def _receiver_counters(ui: CommandReceiver | None) -> dict[str, int]:
+    if ui is None:
+        return {}
+    return {"received": ui.received, "malformed": ui.malformed, "auth_failed": ui.auth_failed}
+
+
 def _relay_counters(relay: LinkRelay | None) -> dict[str, int]:
     if relay is None:
         return {}
@@ -761,6 +797,7 @@ __all__ = [
     "RunResult",
     "RunSpec",
     "TruthBuffer",
+    "backend_obj",
     "core_config",
     "ned_from_global",
     "run_one",
