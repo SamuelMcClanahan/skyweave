@@ -40,7 +40,7 @@ never tuned on gate seeds):
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
@@ -396,7 +396,6 @@ class Script:
         self._ready = False
         self._prime_id: str | None = None
         self._primed = False
-        self._approve_key: str | None = None
         self._t07: list[int] = []
         self._commit_t: int | None = None
         self._launch_t: int | None = None
@@ -582,12 +581,3 @@ class Script:
         else:
             checks.append(check_reacquired(trace, after_ms=long.start_ms + lat))
         return checks
-
-
-ScriptFactory = Callable[[World], Script]
-
-
-def short_and_long_frames(fps: float) -> tuple[int, int]:
-    """Frames a scripted S3 window covers at most (short) and at least (long)."""
-    period = 1000.0 / fps
-    return math.ceil(S3_SHORT_MS / period), math.floor(S3_LONG_MS / period)

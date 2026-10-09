@@ -15,6 +15,7 @@ import multiprocessing
 import os
 import subprocess
 import time
+import traceback
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, replace
@@ -31,6 +32,7 @@ DEFAULT_PROBE_COUNT = 3
 DEFAULT_INSTANCE_BASE = 20
 
 _INSTANCE: int | None = None  # this worker process's SITL instance
+_RETRYABLE = ("error: SitlError", "error: StartupError")  # before any core input exists
 
 
 def versions() -> dict[str, str]:
@@ -136,7 +138,7 @@ def _run_task(spec: RunSpec, fallback_start: int) -> dict[str, Any]:
         if not _instance_free(instance):
             instance = free_instance(start=fallback_start, stop=fallback_start + 40)
         res = run_one(replace(spec, instance=instance))
-        if attempts < 2 and res.end_reason.startswith("error: SitlError"):
+        if attempts < 2 and res.end_reason.startswith(_RETRYABLE):
             continue
         return {
             "card": res.scorecard,
@@ -145,6 +147,35 @@ def _run_task(spec: RunSpec, fallback_start: int) -> dict[str, Any]:
             "replay_mismatch": res.replay_mismatch,
             "attempts": attempts,
         }
+
+
+def _error_result(spec: RunSpec, exc: BaseException) -> dict[str, Any]:
+    """A red entry for a run whose worker raised (the traceback goes to ``error.txt``)."""
+    spec.out_dir.mkdir(parents=True, exist_ok=True)
+    text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    (spec.out_dir / "error.txt").write_text(text)
+    reason = f"error: {type(exc).__name__}: {exc}"
+    card = {
+        "scenario": spec.scenario,
+        "seed": spec.seed,
+        "seed_set": spec.seed_set.value,
+        "law": spec.law,
+        "final_state": None,
+        "metrics": {
+            "hold_error": None,
+            "lock_retention": {"fraction": None},
+            "commit_plane_miss": None,
+        },
+        "checks": [{"name": "harness_error", "passed": False, "value": reason, "limit": None}],
+        "passed": False,
+    }
+    return {
+        "card": card,
+        "end_reason": reason,
+        "replay_ok": False,
+        "replay_mismatch": None,
+        "attempts": 1,
+    }
 
 
 def run_plan(
@@ -170,7 +201,10 @@ def run_plan(
         futures = {pool.submit(_run_task, p.spec, fallback): p for p in plan}
         for n, fut in enumerate(as_completed(futures), start=1):
             p = futures[fut]
-            res = fut.result()
+            try:
+                res = fut.result()
+            except Exception as exc:  # noqa: BLE001 - a harness defect is a red run, not a crash
+                res = _error_result(p.spec, exc)
             card = res["card"]
             if progress is not None:
                 failed = [c["name"] for c in card["checks"] if not c["passed"]]

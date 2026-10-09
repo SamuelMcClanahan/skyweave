@@ -99,6 +99,7 @@ Provisional (E1 harness), well inside ``ground_link_timeout_ms``."""
 TRUTH_HZ = 50.0
 """SERIAL0 SIM_STATE and ATTITUDE rate (truth and its stamp; Provisional, E1)."""
 
+TRUTH_STALL_MS = 1_000  # no SIM_STATE for this long: request the truth streams again
 RC_REFRESH_MS = 200  # RC overrides lapse after RC_OVERRIDE_TIME (3 s) without a refresh
 GCS_HEARTBEAT_MS = 1_000
 SIM_TIMEOUT_MS = 300_000  # sim time after the core starts; covers a 180 s flight budget
@@ -111,6 +112,10 @@ environment only; the core records the authentication result, never this."""
 
 _PREARM_BIT = mavlink2.MAV_SYS_STATUS_PREARM_CHECK
 _EKF_GPS_TEXTS = ("EKF3 IMU0 is using GPS", "EKF3 IMU1 is using GPS")
+
+
+class StartupError(RuntimeError):
+    """SITL started but never streamed truth: process control, retried once."""
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +370,7 @@ class ClosedLoop:
             "frames": 0,
             "commands": 0,
             "degraded_ticks_flying": 0,  # [F3] degraded at a tick in SEARCH..LOST
+            "truth_rerequests": 0,
         }
         self._tick_lag: list[int] = []  # sim ms between a tick's stamp and its processing
 
@@ -416,6 +422,10 @@ class ClosedLoop:
         )
 
     def _pilot_periodic(self, sim_now: int) -> None:
+        newest = self.truth.newest_t
+        if newest is not None and sim_now - newest > TRUTH_STALL_MS and sim_now >= self._next_rc:
+            self._request_truth()  # SIM_STATE stopped: frames wait on truth, so ask again
+            self.counters["truth_rerequests"] += 1
         if sim_now >= self._next_rc:
             self._send_rc()
             self._next_rc = sim_now + RC_REFRESH_MS
@@ -559,16 +569,7 @@ class ClosedLoop:
         self.recorder = Recorder(rec_path)
         try:
             self.pilot = sitl.start(timeout_s=60.0)
-            self._send_rc()
-            for msg_id in (mavlink2.MAVLINK_MSG_ID_ATTITUDE, mavlink2.MAVLINK_MSG_ID_SIM_STATE):
-                self.pilot.request_interval(msg_id, TRUTH_HZ)
-            self.pilot.request_interval(mavlink2.MAVLINK_MSG_ID_SYS_STATUS, 2.0)
-            deadline = time.monotonic() + 30.0
-            while self._s0_boot is None:  # the first SITL time, for the meta stamp
-                self._poll_pilot()
-                if time.monotonic() > deadline:
-                    raise RuntimeError("no time_boot_ms on SERIAL0")
-                time.sleep(0.002)
+            self._wait_for_truth()
             self.relay = LinkRelay(
                 instance_ports(spec.instance)[1], fc_ids=self.fc_ids, timeout_s=10.0
             )
@@ -593,6 +594,28 @@ class ClosedLoop:
                 sitl.stop()
                 self.recorder.close()
         return self._score(rec_path)
+
+    def _request_truth(self) -> None:
+        self._send_rc()
+        for msg_id in (mavlink2.MAVLINK_MSG_ID_ATTITUDE, mavlink2.MAVLINK_MSG_ID_SIM_STATE):
+            self.pilot.request_interval(msg_id, TRUTH_HZ)
+        self.pilot.request_interval(mavlink2.MAVLINK_MSG_ID_SYS_STATUS, 2.0)
+
+    def _wait_for_truth(self) -> None:
+        """Stream truth on SERIAL0 and wait for the first SITL time (the meta
+        stamp). SITL can drop commands that arrive while it is still booting,
+        so the requests repeat until SIM_STATE flows."""
+        deadline = time.monotonic() + 30.0
+        next_request = 0.0
+        while self._s0_boot is None or self.truth.newest_t is None:
+            now = time.monotonic()
+            if now >= next_request:
+                self._request_truth()
+                next_request = now + 1.0
+            if now > deadline:
+                raise StartupError("no ATTITUDE / SIM_STATE on SERIAL0 within 30 s")
+            self._poll_pilot()
+            time.sleep(0.002)
 
     def _loop(self, wall_limit_s: float) -> None:
         wall_deadline = time.monotonic() + wall_limit_s
