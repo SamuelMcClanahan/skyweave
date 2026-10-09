@@ -347,6 +347,56 @@ def test_f1b_udpin_receive_only_until_proof() -> None:
         link.close()
 
 
+def test_f1_udp_proof_not_peer_bound() -> None:
+    """[F1] (b), finding F1-UDP-PROOF-NOT-PEER-BOUND: on ``udpin`` the proof binds to the write
+    peer. Sender A (a real-FC bridge) speaks first; a SIMSTATE from sender B (a SITL on another
+    source port, same sys1/comp1) is dropped before parsing, ingesting, or recording, and is
+    counted. The link stays unproven and writes zero bytes to A and to B."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    buf = io.StringIO()
+    cfg = LinkConfig(setpoints_enabled=True)
+    link = FcLink(f"udpin:127.0.0.1:{port}", StepClock(), cfg, recorder=Recorder(buf))
+    link.connect(timeout_s=1.0)
+    a = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    b = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        a.bind(("127.0.0.1", 0))
+        b.bind(("127.0.0.1", 0))
+        fd = link.fileno()
+        assert fd is not None
+
+        def pump_until(done: Any) -> None:
+            for _ in range(100):
+                select.select([fd], [], [], 0.05)
+                link.poll()
+                if done():
+                    return
+            raise AssertionError("fc_link did not read the datagram")
+
+        hb = bytes(heartbeat(GUIDED).pack(FC))
+        a.sendto(hb, ("127.0.0.1", port))
+        pump_until(lambda: link.rx_frames >= 1)  # A is now the write peer
+        b.sendto(bytes(simstate().pack(FC)), ("127.0.0.1", port))
+        pump_until(lambda: link.rx_frames + link.foreign_datagrams >= 2)  # B read or dropped
+
+        assert not link.sitl_proven
+        assert (link.rx_frames, link.foreign_datagrams) == (1, 1)  # B's SIMSTATE never parsed
+        assert not link.send_velocity(VelocityCommand(vn=1.0, ve=0.0, vd=0.0, yaw_rate=0.0))
+        assert not link.request(FcRequest(kind=FcRequestKind.ARM_AND_TAKEOFF, value=10.0))
+        assert link.blocked_writes == 2  # setpoint, arm (takeoff never tried)
+        assert select.select([a, b], [], [], 0.05)[0] == []  # zero bytes to A and to B
+        records = read_records(buf.getvalue().splitlines())
+        mav = [(r.direction, r.raw) for r in records if r.stream is Stream.MAVLINK]
+        assert mav == [("rx", hb)]  # only A's HEARTBEAT was recorded
+    finally:
+        a.close()
+        b.close()
+        link.close()
+
+
 # ---------------------------------------------------------------------------
 # [F5]: the setpoint gate
 # ---------------------------------------------------------------------------

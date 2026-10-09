@@ -11,10 +11,14 @@ command a real flight controller ([F1], E1-D7):
   ``SIMSTATE`` (164) or ``SIM_STATE`` (108), which ArduPilot emits only in
   SITL builds. Until then every write path writes zero bytes and counts the
   attempt in :attr:`FcLink.blocked_writes`. The proof resets on every
-  (re)connect. ArduCopter 4.7.0 SITL streams on SERIAL1 receive-only when the
-  SITL defaults file sets ``MAV2_*`` rates (``sitl.py`` documents the
-  experiment), so the contract's one allowed pre-proof HEARTBEAT is never
-  needed and fc_link sends no HEARTBEAT at all.
+  (re)connect. On ``udp``/``udpin`` the link is bound to the first datagram's
+  source (the only write peer); a datagram from any other source is dropped
+  before it is parsed, ingested, or recorded, and counted in
+  :attr:`FcLink.foreign_datagrams`, so a SITL on a second source can neither
+  prove nor feed a link whose writes go to the first. ArduCopter 4.7.0 SITL
+  streams on SERIAL1 receive-only when the SITL defaults file sets ``MAV2_*``
+  rates (``sitl.py`` documents the experiment), so the contract's one allowed
+  pre-proof HEARTBEAT is never needed and fc_link sends no HEARTBEAT at all.
 
 There is no parameter-write path (no ``PARAM_SET``) and no RC override path in
 this module. The setpoint gate ([F5]) is ``locked`` unless the configuration
@@ -124,14 +128,18 @@ def clamp_velocity(cmd: VelocityCommand, cfg: LinkConfig) -> VelocityCommand:
 class MavTransport:
     """Raw byte transport to one loopback MAVLink endpoint (non-blocking reads).
 
-    ``udpin``/``udp`` binds and replies to the first peer that sends; ``udpout``
-    sends to the endpoint. Both only ever touch ``127.0.0.1``.
+    ``udpin``/``udp`` binds and replies to the first peer that sends, and from
+    then on drops (and counts in :attr:`foreign_datagrams`) every datagram from
+    any other source, so the frames and the [F1] (b) proof come only from the
+    write peer; ``udpout`` sends to the endpoint. Both only ever touch
+    ``127.0.0.1``.
     """
 
     def __init__(self, endpoint: str, timeout_s: float) -> None:
         scheme, host, port = _parse_endpoint(endpoint)
         self.scheme = scheme
         self._peer: tuple[str, int] | None = None
+        self.foreign_datagrams = 0  # udp/udpin datagrams dropped: source is not _peer
         if scheme == "tcp":
             self.sock = socket.create_connection((host, port), timeout=timeout_s)
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -156,6 +164,9 @@ class MavTransport:
                     data, addr = self.sock.recvfrom(65536)
                     if self._peer is None:
                         self._peer = addr
+                    elif addr != self._peer:  # [F1] (b): proof and frames from the peer only
+                        self.foreign_datagrams += 1
+                        continue
                 elif self.scheme == "udpout":
                     data = self.sock.recv(65536)
                 else:
@@ -230,6 +241,12 @@ class FcLink:
     @property
     def connected(self) -> bool:
         return self._transport is not None
+
+    @property
+    def foreign_datagrams(self) -> int:
+        """[F1] (b): ``udp``/``udpin`` datagrams dropped on this connection because their
+        source is not the write peer (never parsed, ingested, or recorded)."""
+        return 0 if self._transport is None else self._transport.foreign_datagrams
 
     def fileno(self) -> int | None:
         """The socket's descriptor, for a caller's ``select``; ``None`` when closed."""
