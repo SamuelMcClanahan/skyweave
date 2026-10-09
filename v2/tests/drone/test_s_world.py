@@ -16,6 +16,7 @@ import io
 import json
 import math
 import time
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -35,6 +36,7 @@ from skyweave2.drone.harness.scorecard import (
     abort_latency_ms,
     attribute,
     check_lock_retained,
+    check_lock_window_covers,
     check_reacquired,
     commit_plane_miss,
     hold_error,
@@ -47,6 +49,7 @@ from skyweave2.drone.harness.scorecard import (
     scorecard_json,
 )
 from skyweave2.drone.harness.seeds import (
+    SCENARIOS,
     SeedSet,
     check_seed,
     gate_seed_count,
@@ -350,9 +353,11 @@ class _Trace:
         cmd_id: str,
         result: AckResult = AckResult.ACCEPTED,
         params=None,
+        *,
+        auth_ok: bool = True,
     ) -> None:
         pkt = CommandPacket(cmd_id=cmd_id, token=UI_TOKEN, command=command, params=params)
-        self.rec.command(t, pkt, True)
+        self.rec.command(t, pkt, auth_ok)
         self.rec.packet(t, AckPacket(cmd_id=cmd_id, result=result))
 
     def prime(self, t: int) -> None:
@@ -751,9 +756,10 @@ def test_s8_scorecard_json_canonical_and_wall_clock_free(monkeypatch) -> None:
         scenario="S2",
         seed=249207357,
         seed_set="gate",
-        backend="hand-built-trace",
+        backend={"name": "hand-built-trace"},
         versions={"fixture": "test_s_world"},
         law="pure_pursuit",
+        end_reason="landed",
     )
     a = scorecard_json(score_run(trace, replay_ok=True, **kw))
     b = scorecard_json(score_run(trace, replay_ok=True, **kw))
@@ -799,10 +805,11 @@ def test_s8_miss_p95_over_the_s2_gate_set() -> None:
             scenario="S2",
             seed=s,
             seed_set="gate",
-            backend="hand-built",
+            backend={"name": "hand-built"},
             versions={},
             law="pure_pursuit",
             replay_ok=True,
+            end_reason="landed",
         )
         for s in gate_seeds("S2")
     ]
@@ -820,10 +827,11 @@ def _checks(trace: RunTrace, scenario: str, **thresholds) -> dict[str, dict]:
         scenario=scenario,
         seed=gate_seeds(scenario)[0],
         seed_set="gate",
-        backend="hand-built",
+        backend={"name": "hand-built"},
         versions={},
         law="pure_pursuit",
         replay_ok=True,
+        end_reason="landed",
         thresholds=Thresholds(**thresholds),
     )
     return {c["name"]: c for c in card["checks"]}
@@ -884,3 +892,74 @@ def test_s3_dropout_checks_on_hand_built_traces() -> None:
     good = check_reacquired(long_trace(False), after_ms=1500)
     assert good.passed and good.value == 3600
     assert not check_reacquired(long_trace(True), after_ms=1500).passed
+
+
+def test_s8_cc2_prime_retry_is_not_the_trial_in_force() -> None:
+    """CC-2, [P5a], [S8] safety floors: a command record executes only when it is the
+    first authenticated record of its cmd_id. Prime A (the §9 60 m geofence) is accepted
+    at 100, prime B (30 m, a T02 re-prime) at 200, and A is re-sent with the same id and
+    body at 300 (the page's retry): [P5a] acks it accepted again from its stored ack and
+    executes nothing. The trial in force stays B, so a truth sample 40 m from home at 400
+    is one geofence breach; counting the retry as A would hide it (40 <= 60).
+    Discrimination on the auth rule: an unauthenticated record is not stored, so prime C
+    (30 m) first sent with a bad token (rejected_auth) and then authenticated (accepted)
+    executes, and C is in force."""
+    a = PrimeParams()
+    b = replace(a, geofence_radius_m=30.0)
+    retry = _Trace()
+    retry.command(100, CommandName.PRIME, "prime-a", params=a.to_obj())
+    retry.command(200, CommandName.PRIME, "prime-b", params=b.to_obj())
+    retry.command(300, CommandName.PRIME, "prime-a", params=a.to_obj())
+    retry.sample(400, (40.0, 0.0, -10.0))
+    floors = safety_floors(retry.run(), alt_floor_m=2.0)
+    assert (floors.geofence_breaches, floors.max_horizontal_m) == (1, 40.0)
+
+    auth = _Trace()
+    auth.command(100, CommandName.PRIME, "prime-a", params=a.to_obj())
+    auth.command(
+        200, CommandName.PRIME, "prime-c", AckResult.REJECTED_AUTH, b.to_obj(), auth_ok=False
+    )
+    auth.command(300, CommandName.PRIME, "prime-c", params=b.to_obj())
+    auth.sample(400, (40.0, 0.0, -10.0))
+    assert safety_floors(auth.run(), alt_floor_m=2.0).geofence_breaches == 1
+
+
+def test_s8_cc3_a_run_cut_short_is_red() -> None:
+    """CC-3, [S0], [S8]: every scenario's card carries ``run_completed``, which passes
+    only for the "landed" end. The complete hand-built S2 run that is green when it
+    landed is red, with only run_completed failing, when the run ended on
+    "error: ConnectionError: relay peer closed" (SITL died). S6 row: the lock window of
+    the lock trace is [950 (T07), 1950 (RETURN)). It covers a maneuver [1000, 1900]; it
+    does not cover one that ends at 1950 (the end is exclusive) or one that starts at
+    900, before the T07. A run cut off with no end event has a window that runs to its
+    newest detection (t_rx 1128 for frames 1000 and 1100): it covers [1000, 1100] and
+    not [1000, 1128]."""
+    for scenario in SCENARIOS:
+        assert "run_completed" in _checks(_s2_trace(), scenario)
+    kw = dict(
+        scenario="S2",
+        seed=gate_seeds("S2")[0],
+        seed_set="gate",
+        backend={"name": "hand-built"},
+        versions={},
+        law="pure_pursuit",
+        replay_ok=True,
+    )
+    assert score_run(_s2_trace(), end_reason="landed", **kw)["passed"] is True
+    died = score_run(_s2_trace(), end_reason="error: ConnectionError: relay peer closed", **kw)
+    assert died["passed"] is False
+    assert [c["name"] for c in died["checks"] if not c["passed"]] == ["run_completed"]
+
+    lock = _lock_trace()
+    ok = check_lock_window_covers(lock, t_from_ms=1000, t_to_ms=1900)
+    assert (ok.name, ok.passed, ok.value) == ("lock_window_covers_maneuver", True, 1950)
+    assert not check_lock_window_covers(lock, t_from_ms=1000, t_to_ms=1950).passed
+    assert not check_lock_window_covers(lock, t_from_ms=900, t_to_ms=1900).passed
+    tr = _Trace()
+    _engaged_until_t07(tr)
+    for t_cap in (1000, 1100):
+        tr.frame(t_cap, {"balloon": BALLOON_C})
+        tr.track(t_cap, 1001, *BALLOON_C)
+    cut = tr.run()
+    assert check_lock_window_covers(cut, t_from_ms=1000, t_to_ms=1100).passed
+    assert not check_lock_window_covers(cut, t_from_ms=1000, t_to_ms=1128).passed
