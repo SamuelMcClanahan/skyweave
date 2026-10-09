@@ -13,14 +13,23 @@ nowhere else:
   ``mission.on_guidance`` as its own GDE input ([M2]).
 - CMD (a command with its authentication result): ``mission.on_command``.
 - HB (a UI poll, [U6]): ``mission.on_ground_heartbeat``.
-- TICK: the vehicle snapshot is taken (ticks only, [M2]); each radio approve
-  the vehicle state detected since the last tick becomes an in-process
-  ``approve_engage`` CMD input ([F7]); then ``mission.on_tick``; then, when a
-  setpoint step is due ([G11]), ``guidance.step`` and its events as GDE inputs.
+- TICK: the vehicle snapshot is taken (ticks only, [M2]); then
+  ``mission.on_tick``; then, when a setpoint step is due ([G11]),
+  ``guidance.step`` and its events as GDE inputs.
 
-After every input (GDE inputs included) the core asks the mission for a
-mission state packet and drains its FC requests, so a transition is published
-by the input that caused it ([P3]).
+Radio approves ([F7]): each approve the vehicle state detected is its own
+in-process ``approve_engage`` CMD input, stamped with the ``t_rx`` of its
+``RC_CHANNELS`` sample (the stamp of its ``mavlink`` rx record, [M2]), so the
+[M8] settle check and its ack and transition carry the sample's stamp. Every
+input method above (TRK, CMD, HB, TICK) first drains the approves detected
+since the previous input, in sample order, before it stamps and records its
+own input. That point is the same live (fc_link ingests the frames) and in
+replay (:meth:`CompanionCore.on_mavlink_rx` ingests them), because it depends
+only on where the rx record falls among the input records.
+
+After every input (GDE inputs and radio approves included) the core asks the
+mission for a mission state packet and drains its FC requests, so a transition
+is published by the input that caused it ([P3]).
 
 Time ([M2], [R3], E1-D8): the core never reads a clock. "Now" is the stamp of
 the input being processed, and every output record carries that stamp
@@ -195,14 +204,18 @@ class CoreConfig:
 class CoreOutput:
     """What one input produced, in production order.
 
-    The live process sends ``acks`` to the command's sender (a radio approve's
-    ack has no sender; it is only recorded), publishes ``mission_states``, and
-    writes ``requests`` and then ``setpoint`` through fc_link. ``setpoint`` is
-    ``None`` unless this input was a TICK with a setpoint step whose state
-    sends one ([G10], [G11]).
+    The live process sends ``acks`` to the command's sender: for a CMD input
+    ``acks[0]`` is its ack, and other inputs have none. ``rc_acks`` are the acks
+    of the radio approves drained before this input ([F7]), each with its stamp
+    (its sample's ``t_rx``); they have no sender and are only recorded. The
+    live process publishes ``mission_states`` (each carries its stamp in
+    ``t``; a drained approve's come first) and writes ``requests`` and then
+    ``setpoint`` through fc_link. ``setpoint`` is ``None`` unless this input
+    was a TICK with a setpoint step whose state sends one ([G10], [G11]).
     """
 
     acks: tuple[AckPacket, ...] = ()
+    rc_acks: tuple[tuple[int, AckPacket], ...] = ()
     mission_states: tuple[MissionStatePacket, ...] = ()
     requests: tuple[FcRequest, ...] = ()
     setpoint: VelocityCommand | None = None
@@ -211,6 +224,7 @@ class CoreOutput:
 @dataclass
 class _Out:
     acks: list[AckPacket] = field(default_factory=list)
+    rc_acks: list[tuple[int, AckPacket]] = field(default_factory=list)
     mission_states: list[MissionStatePacket] = field(default_factory=list)
     requests: list[FcRequest] = field(default_factory=list)
     setpoint: VelocityCommand | None = None
@@ -218,6 +232,7 @@ class _Out:
     def freeze(self) -> CoreOutput:
         return CoreOutput(
             acks=tuple(self.acks),
+            rc_acks=tuple(self.rc_acks),
             mission_states=tuple(self.mission_states),
             requests=tuple(self.requests),
             setpoint=self.setpoint,
@@ -264,11 +279,13 @@ class CompanionCore:
 
     def on_track(self, pkt: TrackPacket, t_rx: int) -> CoreOutput:
         """TRK: mission first, then guidance on the view after it, then each
-        guidance event (``commit``, ``hold_complete``) as its own GDE input."""
+        guidance event (``commit``, ``hold_complete``) as its own GDE input.
+        Pending radio approves are processed first ([F7])."""
+        out = _Out()
+        self._drain_approves(out)
         t = self._input_stamp(t_rx)
         if self._recorder is not None:
             self._recorder.packet(t, pkt)
-        out = _Out()
         self.mission.on_track(pkt, t)
         self._after_input(t, out)
         for ev in self.guidance.on_track(pkt, t, self.mission.view(), self.vehicle):
@@ -277,43 +294,39 @@ class CompanionCore:
 
     def on_command(self, cmd: CommandPacket, auth_ok: bool, t_rx: int) -> CoreOutput:
         """CMD from the ground (UI): the receiver authenticated it ([P5c]); the
-        record keeps ``auth_ok`` and never the token. ``acks[0]`` is its ack."""
+        record keeps ``auth_ok`` and never the token. ``acks[0]`` is its ack.
+        Pending radio approves are processed first ([F7])."""
         if not isinstance(auth_ok, bool):
             raise TypeError("auth_ok must be a bool")
+        out = _Out()
+        self._drain_approves(out)
         t = self._input_stamp(t_rx)
         if self._recorder is not None:
             self._recorder.command(t, cmd, auth_ok)
-        out = _Out()
-        self._command(cmd, auth_ok, t, out, from_ground=True)
+        out.acks.append(self._command(cmd, auth_ok, t, out, from_ground=True))
         return out.freeze()
 
     def on_ground_heartbeat(self, t_rx: int) -> CoreOutput:
-        """HB: one UI state poll ([U6], [R2])."""
+        """HB: one UI state poll ([U6], [R2]). Pending radio approves are
+        processed first ([F7])."""
+        out = _Out()
+        self._drain_approves(out)
         t = self._input_stamp(t_rx)
         if self._recorder is not None:
             self._recorder.ground_hb(t)
-        out = _Out()
         self.mission.on_ground_heartbeat(t)
         self._after_input(t, out)
         return out.freeze()
 
     def on_tick(self, t_rx: int) -> CoreOutput:
-        """TICK: snapshot, radio approves, mission, then a setpoint step if due."""
+        """TICK: snapshot, mission, then a setpoint step if due. Pending radio
+        approves are processed first ([F7])."""
+        out = _Out()
+        self._drain_approves(out)
         t = self._input_stamp(t_rx)
         if self._recorder is not None:
             self._recorder.tick(t)
-        out = _Out()
         snap = self.vehicle.snapshot(t)
-        for t_sample in self.vehicle.take_approvals():
-            # [F7]: an in-process approve_engage, authenticated by its source.
-            # Its ack is recorded; it is not a command record (replay re-derives
-            # it from the mavlink rx record). Its stamp is this tick's.
-            approve = CommandPacket(
-                cmd_id=rc_approve_cmd_id(t_sample),
-                token=REDACTED_TOKEN,
-                command=CommandName.APPROVE_ENGAGE,
-            )
-            self._command(approve, True, t, out, from_ground=False)
         self.mission.on_tick(snap, t)
         self._after_input(t, out)
         if self.guidance.step_due(t):
@@ -360,14 +373,30 @@ class CompanionCore:
         self._last_t = t_rx
         return t_rx
 
+    def _drain_approves(self, out: _Out) -> None:
+        """[F7]: each radio approve detected since the previous input, as its own
+        CMD input, in sample order, before the input being processed."""
+        for t_sample in self.vehicle.take_approvals():
+            # [M2]: the approve's stamp is its RC_CHANNELS rx record's t_rx.
+            t = self._input_stamp(t_sample)
+            # An in-process approve_engage, authenticated by its source. Its ack
+            # is recorded; it is not a command record (replay re-derives it from
+            # the mavlink rx record).
+            approve = CommandPacket(
+                cmd_id=rc_approve_cmd_id(t_sample),
+                token=REDACTED_TOKEN,
+                command=CommandName.APPROVE_ENGAGE,
+            )
+            out.rc_acks.append((t, self._command(approve, True, t, out, from_ground=False)))
+
     def _command(
         self, cmd: CommandPacket, auth_ok: bool, t: int, out: _Out, *, from_ground: bool
-    ) -> None:
+    ) -> AckPacket:
         ack = self.mission.on_command(cmd, auth_ok, t, from_ground=from_ground)
         if self._recorder is not None:
             self._recorder.packet(t, ack)
-        out.acks.append(ack)
         self._after_input(t, out)
+        return ack
 
     def _guidance_event(self, ev: GuidanceEvent, out: _Out) -> None:
         self.mission.on_guidance(ev)  # GDE: its own input, stamped ev.t_ms [M2]
@@ -547,7 +576,10 @@ def replay(source: str | Path | Iterable[str]) -> ReplayResult:
             raise RecordingError("a recording has exactly one meta record ([R2])")
         else:
             continue  # detection, fc_link_health: not core inputs
-        states.extend((t, pkt) for pkt in out.mission_states)
+        # Each output carries the stamp of the input that caused it ([R2]): a
+        # drained radio approve's is its sample's, not this record's.
+        states.extend((pkt.t, pkt) for pkt in out.mission_states)
+        acks.extend(out.rc_acks)
         acks.extend((t, ack) for ack in out.acks)
         if out.setpoint is not None and writes.writes():
             setpoints.append(setpoint_key(out.setpoint, config.link))
@@ -597,10 +629,17 @@ def miss_vectors_from_recording(source: str | Path | Iterable[str]) -> list[Offl
     the matching ``track`` record, ``target_width_m`` of the last accepted
     ``prime`` command record before the event, and the camera in
     ``meta.config``. The guidance config there drives the [G2] fallback.
+
+    A command record executes only if it is the first authenticated record of
+    its ``cmd_id`` ([P5a]): a later authenticated record with that id is a true
+    retry (acked with the stored ``accepted``) or a duplicate id, and executes
+    nothing, so an older prime re-sent after a re-prime never becomes the trial
+    in force. Unauthenticated records are not stored and do not count.
     """
     config, records = _open(source)
     tracks: dict[tuple[int, int], TrackPacket] = {}
-    prime: CommandPacket | None = None  # the newest prime command record
+    seen: set[str] = set()  # [P5a]: authenticated cmd_ids already received
+    prime: CommandPacket | None = None  # the newest prime command record that can execute
     width: float | None = None
     out: list[OfflineMiss] = []
     for r in records:
@@ -608,8 +647,12 @@ def miss_vectors_from_recording(source: str | Path | Iterable[str]) -> list[Offl
         if isinstance(pkt, TrackPacket):
             tracks[(pkt.track_id, pkt.t_cap)] = pkt
         elif isinstance(pkt, CommandPacket):
+            authenticated = r.auth_ok is True
+            retry = authenticated and pkt.cmd_id in seen  # executes nothing
+            if authenticated:
+                seen.add(pkt.cmd_id)
             if pkt.command is CommandName.PRIME:
-                prime = pkt
+                prime = None if retry else pkt
         elif isinstance(pkt, AckPacket):
             # The core writes a command's ack right after its command record.
             if prime is not None and pkt.cmd_id == prime.cmd_id:

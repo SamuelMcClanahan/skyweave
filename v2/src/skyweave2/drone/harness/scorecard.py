@@ -71,7 +71,15 @@ from skyweave2.drone.recording import Record, Stream
 from skyweave2.drone.vehicle_state import mode_name, parse_frames
 
 FORMAT = "skyweave-drone-scorecard"
-FORMAT_V = 1
+FORMAT_V = 2
+"""v2: ``backend`` is an object (its name plus ``speedup`` and ``jobs``, DT-3) and
+every card carries the ``run_completed`` check (CC-3)."""
+
+END_LANDED = "landed"
+"""The one end reason of a run that finished its scenario: the loop ends a run
+``END_AFTER_LAND_MS`` after the mission enters LAND (the last row any scenario
+checks). Every other end reason (an error, a timeout, a stuck launch) is a run
+that stopped part way (CC-3)."""
 
 S = MissionState
 LOCK_STATES = frozenset({S.ENGAGED, S.COASTING})
@@ -231,11 +239,20 @@ def _parse(trace: RunTrace) -> _Timeline:
             raise ValueError(f"two frame truths share t_cap={ft.t_cap}")
         tl.frames[ft.t_cap] = ft
     pending: dict[str, tuple[int, Record]] = {}
+    seen: set[str] = set()  # [P5a]: cmd_ids of authenticated command records so far
     for idx, rec in enumerate(trace.records):
         stream = rec.stream
         if stream is Stream.COMMAND:
             assert isinstance(rec.packet, CommandPacket)
-            pending[rec.packet.cmd_id] = (idx, rec)
+            cmd_id = rec.packet.cmd_id
+            if rec.auth_ok and cmd_id in seen:
+                # CC-2, [P5a]: a later authenticated record of a seen cmd_id is a true
+                # retry (its stored ack) or a duplicate id; neither executes, so it is
+                # never the trial in force or an abort. Its ack finds no pending entry.
+                continue
+            if rec.auth_ok:
+                seen.add(cmd_id)  # an unauthenticated record is not stored, so not added
+            pending[cmd_id] = (idx, rec)
         elif stream is Stream.ACK:
             assert isinstance(rec.packet, AckPacket)
             hit = pending.pop(rec.packet.cmd_id, None)
