@@ -51,12 +51,13 @@ as a finding.
 - **[C5] Encoding.** UTF-8 JSON, one packet per UDP datagram, one JSON object
   per packet. The canonical encoder writes ASCII only (non-ASCII escaped),
   sorted keys, separators `,` and `:`, no whitespace, finite numbers only (no
-  NaN, Infinity, or a literal that overflows to infinity). Receivers must not
-  depend on key order or whitespace.
+  NaN, Infinity, or a literal that overflows to infinity). A packet nests at
+  most 32 levels deep; deeper input is refused before parsing. Receivers must
+  not depend on key order or whitespace.
 - **[C6] Types.** An `int` field accepts only JSON integers (`1`, never `1.0`
-  and never `true`). A `float` field accepts JSON integers or reals, never
-  booleans. A `bool` field accepts only `true`/`false`. A `string` enum field
-  accepts only the listed values.
+  and never `true`), within the JSON-safe range +-(2^53 - 1). A `float` field
+  accepts JSON integers or reals, never booleans. A `bool` field accepts only
+  `true`/`false`. A `string` enum field accepts only the listed values.
 - **[C7] Versioning.** Every packet carries integer field `v`; v1 is `1`.
   Receivers ignore unknown fields. A packet whose `v` is not `1` is rejected
   (counted and logged), never coerced. A missing required field, a wrong type,
@@ -447,7 +448,9 @@ Every transition the code makes is a row here; any other change is a defect.
   exists.
 - **[G1a] Degraded at a step.** Attitude is degraded for a guidance step when
   [F3] holds at the step's stamp, or the packet the step uses is
-  attitude-degraded [G1]. [G4], [G7], and [G8] use only this term.
+  attitude-degraded [G1]. A packet whose ray or [G2] range is not finite and
+  positive counts as attitude-degraded too. [G4], [G7], and [G8] use only this
+  term.
 - **[G2] Size range** (brief 3.5). `Z = f * W / w` with `W` the primed
   `target_width_m`; range along the line of sight `r = Z * |ray|`. Valid when
   `w >= w_min_px`. Otherwise the assume-and-bound fallback applies:
@@ -732,6 +735,7 @@ Tracker clauses (Provisional reimplementation, brief §2 spec):
 | E1-D8 | Time model: input stamps, one transition per input, ticks as the only timed source ([M2], [M4], [R3]) | Chosen |
 | E1-D9 | Setpoint `type_mask` 1479 with an explicit yaw rate always ([F6], [G10]) | Chosen |
 | E1-D10 | SEARCH holds the primed search altitude ([G10], brief §6) | Chosen |
+| E1-D11 | Robustness from the implementation bug hunt: JSON nesting capped at 32 ([C5]) and integers at +-(2^53 - 1) ([C6]), so every accepted packet re-parses from a recording and every derived event name fits 128 chars; more than 64 pending events force a publish ([C9]); a non-finite packet geometry is a degraded packet ([G1a]); one bad input never ends the companion loop (logged and counted) | Chosen |
 | E1-F1 | Box origin (top-left vs center) and `t_cap` source of the deployed percepd v0 are unverified. Check against a v0 capture on the Cubie before percepd v1; percepd v1 converts at its encoder if needed | Finding |
 | E1-F2 | percepd v0 and tracker v0 emit no `v` field; their packets are not v1 packets. percepd v1 adds it (brief work item 7) | Finding |
 | E1-F3 | AR0234 lens intrinsics are uncalibrated; `f`, `cx`, `cy` are placeholders. Boresight calibration from logged miss vectors is an open question (working doc §15) | Finding |
@@ -756,3 +760,5 @@ Tracker clauses (Provisional reimplementation, brief §2 spec):
 | E1-F22 | `SIM_STATE` (108) has no time field; the harness stamps each sample with the `time_boot_ms` of the `ATTITUDE` sent just before it (strict alternation verified on ArduCopter 4.7.0). In 4.7.0 its float lat/lon fields carry degE7 values; only `lat_int`/`lon_int` are used | Finding |
 | E1-F23 | Brief 3.11 names the switch positions MANUAL / GUIDED / RTL; ArduCopter has no MANUAL mode. The SITL harness uses STABILIZE for that position | Finding |
 | E1-F24 | The [F7] radio approve path is covered by fast tests only; the closed-loop human approves through UI command packets (§8) | Finding |
+| E1-F25 | `POST /command` does not require a JSON content type, so a page in the operator's browser can post cross-site. The token still gates execution; unauthenticated posts are acked `rejected_auth` and logged | Finding |
+| E1-F26 | Radio approves are stamped at their RC sample, so each live driver must stamp its next core input no earlier than the frames fc_link already ingested (companiond, the UI, and the harness do) | Finding |

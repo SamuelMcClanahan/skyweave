@@ -266,6 +266,23 @@ def size_range(
     return r / ray_norm, r, RangeSource.ASSUMED
 
 
+def geometry_usable(
+    track: TrackPacket, cam: CameraModel, target_width_m: float, cfg: GuidanceConfig
+) -> bool:
+    """[G1a]: the packet's ray and [G2] range are finite and positive.
+
+    The wire bounds nothing about ``u``/``v_px`` beyond finiteness; a far
+    out-of-frame value (|u| above about 1e157) overflows ``|ray|`` and would
+    turn the line of sight and the [G3] command into NaN (bug-hunt finding 3).
+    Such a packet is treated as attitude-degraded.
+    """
+    ray_norm = float(np.linalg.norm(cam.ray(track.u, track.v_px)))
+    if not (math.isfinite(ray_norm) and ray_norm > 0.0):
+        return False
+    z, r, _ = size_range(track, cam, target_width_m, cfg)
+    return math.isfinite(z) and math.isfinite(r) and z > 0.0 and r > 0.0
+
+
 def miss_vector(
     track: TrackPacket,
     cam: CameraModel,
@@ -527,12 +544,16 @@ class Guidance:
         if role_id is None or pkt.track_id != role_id:
             return []  # [G9], [M7]
         att_cap = att.attitude_at(pkt.t_cap)
+        trial = view.trial
+        assert trial is not None  # _observe
+        if att_cap is not None and not geometry_usable(
+            pkt, self.cam, trial.target_width_m, self.config
+        ):
+            att_cap = None  # [G1a]: unusable geometry counts as a degraded packet
         self._seen[pkt.track_id] = _Seen(pkt=pkt, t_ms=t_ms, att_cap=att_cap)
         if state is not MissionState.ENGAGED:
             return []
         att_now = att.attitude_at(t_ms)
-        trial = view.trial
-        assert trial is not None  # _observe
         if att_cap is None or att_now is None:  # [G1a] at this input's stamp
             self._hold_start = None
             return []
@@ -602,7 +623,7 @@ class Guidance:
             return []
         obs = make_observation(pkt, self.cam, att_cap, yaw_now, trial.target_width_m, cfg, t_ms)
         q = standoff_offset(obs.p_ned(), trial.d_s, yaw_now)
-        if float(np.linalg.norm(q)) > cfg.hold_tol_m:
+        if not float(np.linalg.norm(q)) <= cfg.hold_tol_m:  # NaN breaks the hold too
             self._hold_start = None
             return []
         if self._hold_start is None:

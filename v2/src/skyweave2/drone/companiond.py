@@ -46,6 +46,7 @@ import select
 import signal
 import threading
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +58,7 @@ from skyweave2.drone.ground_ui import GroundUiServer, GroundUiService, RecordTap
 from skyweave2.drone.packets import PacketKind, TrackPacket
 from skyweave2.drone.recording import Recorder
 from skyweave2.drone.types import Clock
-from skyweave2.drone.udp import DEFAULT_PORTS, LOOPBACK, UdpReceiver, UdpSender
+from skyweave2.drone.udp import DEFAULT_PORTS, LOOPBACK, Datagram, UdpReceiver, UdpSender
 from skyweave2.drone.vehicle_state import LinkConfig
 
 UI_ENV_VAR = "SKYWEAVE_UI_TOKEN"
@@ -153,6 +154,7 @@ class Companion:
         self._next_tick: int | None = None
         self._next_connect: int | None = None
         self.ticks = 0
+        self.input_errors = 0  # inputs whose processing raised; logged, loop kept alive
 
     def _open(self, sock: _Sock) -> _Sock:
         self._stack.callback(sock.close)
@@ -210,14 +212,14 @@ class Companion:
         self.fc_link.poll()  # records and ingests every FC frame ([F10])
         for r in self.tracks.poll():
             assert isinstance(r.packet, TrackPacket)
-            self._forward(self.core.on_track(r.packet, self.clock()))
+            self._guarded(
+                "track", lambda p=r.packet: self._forward(self.core.on_track(p, self.clock()))
+            )
         for dg in self.commands.poll_raw():
-            ack = self.ui.receiver.receive(dg.data, self.clock())
-            if ack is not None:
-                self.commands.reply(ack, dg.addr)  # [P5]: to the command's sender
+            self._guarded("command", lambda d=dg: self._command(d))
         t = self.clock()
         if self._next_tick is None or t >= self._next_tick:
-            self._forward(self.core.on_tick(t))
+            self._guarded("tick", lambda: self._forward(self.core.on_tick(t)))
             self.ticks += 1
             period = self.config.tick_period_ms
             nxt = (t if self._next_tick is None else self._next_tick) + period
@@ -225,6 +227,23 @@ class Companion:
         pkt = self.fc_link.maybe_health()  # [F4] about 1 Hz; fc_link records it
         if pkt is not None:
             self.health.send(pkt)
+
+    def _command(self, dg: Datagram) -> None:
+        ack = self.ui.receiver.receive(dg.data, self.clock())
+        if ack is not None:
+            self.commands.reply(ack, dg.addr)  # [P5]: to the command's sender
+
+    def _guarded(self, what: str, fn: Callable[[], None]) -> None:
+        """Process one input; an exception is logged and counted, never fatal.
+
+        One bad datagram must not end the companion process in flight: that
+        would leave the mission unprimed after a restart (E1-F6).
+        """
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - the live loop outlives any one input
+            self.input_errors += 1
+            log.exception("companion %s input failed; loop continues", what)
 
     def _connect(self, now: int) -> None:
         try:

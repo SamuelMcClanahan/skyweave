@@ -35,6 +35,8 @@ FLIGHT_GRID_WIDTH = 1920
 FLIGHT_GRID_HEIGHT = 1200
 MAX_DATAGRAM_BYTES = 65507
 MAX_EVENT_NAME_LEN = 128
+MAX_JSON_DEPTH = 32  # [C5]: deeper nesting is refused before parsing
+JSON_SAFE_INT = 2**53 - 1  # [C6]: integers a JSON peer (JavaScript) holds exactly
 V_MAX_HARD_MPS = 5.0
 
 _CMD_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
@@ -356,6 +358,8 @@ def _int(obj: Mapping[str, Any], key: str, minimum: int | None = None) -> int:
     val = _get(obj, key)
     if isinstance(val, bool) or not isinstance(val, int):
         raise PacketError(f"field {key!r} must be a JSON integer, got {val!r}")
+    if not -JSON_SAFE_INT <= val <= JSON_SAFE_INT:
+        raise PacketError(f"field {key!r} is outside the JSON-safe integer range")
     if minimum is not None and val < minimum:
         raise PacketError(f"field {key!r} must be >= {minimum}, got {val}")
     return val
@@ -661,17 +665,44 @@ def encode(packet: Packet) -> bytes:
 
 
 def strict_json_loads(text: str) -> Any:
-    """[C5], [C7] JSON text -> object, refusing non-finite numbers.
+    """[C5], [C7] JSON text -> object, refusing non-finite numbers and
+    nesting deeper than :data:`MAX_JSON_DEPTH`.
 
     Raises :class:`PacketError` for anything that is not decodable, finite
-    JSON, never another exception type.
+    JSON, never another exception type. The depth cap keeps every accepted
+    packet re-parseable from a recording line at any stack depth (bug-hunt
+    finding: a 984-deep params object decoded, then crashed the recorder's
+    re-parse).
     """
+    _check_depth(text)
     try:
         return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
     except PacketError:
         raise
     except (ValueError, RecursionError) as exc:  # JSONDecodeError, int digit limit
         raise PacketError(f"not decodable JSON: {exc}") from None
+
+
+def _check_depth(text: str) -> None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise PacketError(f"JSON nested deeper than {MAX_JSON_DEPTH} levels")
+        elif ch in "]}":
+            depth -= 1
 
 
 def decode(kind: PacketKind, data: bytes) -> Packet:

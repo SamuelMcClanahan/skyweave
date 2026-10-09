@@ -93,6 +93,9 @@ TONE_STATES: tuple[MissionState, ...] = (
 )  # contract §9 tone table (E1)
 
 
+MAX_PENDING_EVENTS = 64  # E1: events held before a forced publish ([C9])
+
+
 class Source(str, Enum):
     """[M3] who may trigger a transition."""
 
@@ -605,6 +608,12 @@ class Mission:
     def _emit(self, t: int, name: str) -> None:
         # Callers keep [P3a]: nothing is emitted while unprimed except by T01.
         self._events.append(Event(t=t, name=name))
+        if len(self._events) >= MAX_PENDING_EVENTS:
+            # [C9]: a flood of (e.g. unauthenticated) commands between two
+            # periodic publishes must not grow one packet past the datagram
+            # limit; publish after this input instead ([P3] lets events span
+            # packets, each event still in exactly one).
+            self._dirty = True
 
     def _require_trial(self) -> PrimeParams:
         if self._trial is None:

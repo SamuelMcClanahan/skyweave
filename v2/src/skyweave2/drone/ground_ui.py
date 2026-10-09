@@ -328,6 +328,7 @@ class RecordTap:
         self._builder = builder
         self._down = downstream
         self._buf = ""
+        self.view_errors = 0  # lines the view could not take; the recording keeps them
 
     def write(self, text: str) -> int:
         if self._down is not None:
@@ -336,7 +337,11 @@ class RecordTap:
         while "\n" in self._buf:
             line, _, self._buf = self._buf.partition("\n")
             if line.strip():
-                self._builder.feed(parse_record(line))
+                try:
+                    self._builder.feed(parse_record(line))
+                except Exception:  # noqa: BLE001 - the view is display only, never fatal
+                    self.view_errors += 1
+                    log.exception("UI view could not take a recorded line; recording kept it")
         return len(text)
 
     def flush(self) -> None:

@@ -146,7 +146,12 @@ class UdpSender:
 
         No listener on the port is not an error: a publish is fire and forget.
         """
-        data = encode(packet)
+        try:
+            data = encode(packet)
+        except PacketError as exc:  # never fatal to the live loop
+            self.errors += 1
+            log.warning("unsendable %s packet dropped: %s", type(packet).__name__, exc)
+            return False
         try:
             self.sock.sendto(data, self.target)
         except OSError:
