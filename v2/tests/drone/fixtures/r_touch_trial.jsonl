@@ -408,11 +408,11 @@
 {"dir":"rx","raw":"/RAAAAABASAAAM4xAAAAAAAAAAAAAAAAIMHWcg==","stream":"mavlink","t_rx":5750}
 {"dir":"rx","raw":"/R8AAAABAQEAAAAAAAAAAAAAAAAAAAAA4C5kAAAAAAAAAAAAAAAAAFfQlA==","stream":"mavlink","t_rx":5750}
 {"dir":"rx","raw":"/SoAAAABAUEAAM4xAADcBdwF3AXcBdwF3AXcBdAH3AXcBdwF3AXcBdwF3AXcBdwF3AUQ/zgc","stream":"mavlink","t_rx":5750}
-{"pkt":{"age_frames":30,"du":-40.0,"dv":-50.0,"h":48.0,"hits":30,"misses":0,"state":"confirmed","t_cap":5730,"track_id":1000001,"u":1010.0,"v":1,"v_px":640.0,"w":40.0},"stream":"track","t_rx":5750}
-{"stream":"tick","t_rx":5750}
 {"pkt":{"cmd_id":"rc:approve:5750","result":"accepted","v":1},"stream":"ack","t_rx":5750}
 {"pkt":{"engaged_track_id":1000001,"events":[{"name":"cmd:approve_engage:accepted","t":5750},{"name":"engaged:1000001","t":5750},{"name":"transition:ACQUIRING->ENGAGED","t":5750},{"name":"tone:ENGAGED","t":5750}],"mission_state":"ENGAGED","t":5750,"trial":{"alpha":0.4,"beta":0.1,"d_s":5.0,"k":5,"pass_budget":1,"search_alt":10.0,"trial_type":"touch","v_max":2.5},"v":1},"stream":"mission_state","t_rx":5750}
+{"pkt":{"age_frames":30,"du":-40.0,"dv":-50.0,"h":48.0,"hits":30,"misses":0,"state":"confirmed","t_cap":5730,"track_id":1000001,"u":1010.0,"v":1,"v_px":640.0,"w":40.0},"stream":"track","t_rx":5750}
 {"dir":"tx","raw":"/Q4AAAABvwIBAAEBTUZUMjAwTDhPNGNjFuk=","stream":"mavlink","t_rx":5750}
+{"stream":"tick","t_rx":5750}
 {"dir":"rx","raw":"/RAAAAABAR4AAAAyAAAK1yM8j8L1vAR2UD9BbA==","stream":"mavlink","t_rx":5800}
 {"pkt":{"age_frames":31,"du":-40.0,"dv":-50.0,"h":120.0,"hits":31,"misses":0,"state":"confirmed","t_cap":5780,"track_id":1000001,"u":1008.0,"v":1,"v_px":637.5,"w":100.0},"stream":"track","t_rx":5800}
 {"stream":"tick","t_rx":5800}

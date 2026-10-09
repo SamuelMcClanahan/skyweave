@@ -25,6 +25,7 @@ logged ``miss:`` event); nothing here re-derives mission or guidance logic.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hmac
 import io
 import json
@@ -33,7 +34,7 @@ import os
 import select
 import shutil
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,7 @@ from skyweave2.drone.fc_link import FcLink
 from skyweave2.drone.guidance import GuidanceConfig
 from skyweave2.drone.mission import MissionConfig
 from skyweave2.drone.packets import (
+    AckPacket,
     AckResult,
     CommandName,
     CommandPacket,
@@ -65,7 +67,7 @@ from skyweave2.drone.packets import (
     canonical_json,
     strict_json_loads,
 )
-from skyweave2.drone.recording import Recorder, Stream, read_records
+from skyweave2.drone.recording import Record, Recorder, Stream, read_records
 from skyweave2.drone.types import LandedState, VelocityCommand
 from skyweave2.drone.vehicle_state import LinkConfig, parse_frames
 
@@ -413,6 +415,29 @@ def _frames(obj: dict[str, Any]) -> list[Any]:
     return parse_frames(base64.b64decode(obj["raw"]))
 
 
+def _feed(core: CompanionCore, records: Iterable[Record]) -> None:
+    """Drive ``core`` with a recording's input records in file order, the way
+    the companion received them ([R3]); output records are skipped."""
+    for r in records:
+        if r.stream is Stream.MAVLINK and r.direction == "rx":
+            assert r.raw is not None
+            core.on_mavlink_rx(r.raw, r.t_rx)
+        elif r.stream is Stream.TRACK:
+            assert isinstance(r.packet, TrackPacket)
+            core.on_track(r.packet, r.t_rx)
+        elif r.stream is Stream.COMMAND:
+            assert isinstance(r.packet, CommandPacket) and r.auth_ok is not None
+            core.on_command(r.packet, r.auth_ok, r.t_rx)
+        elif r.stream is Stream.TICK:
+            core.on_tick(r.t_rx)
+        elif r.stream is Stream.GROUND_HB:
+            core.on_ground_heartbeat(r.t_rx)
+
+
+def _recorded(buf: io.StringIO, stream: str) -> list[dict[str, Any]]:
+    return [o for o in map(json.loads, buf.getvalue().splitlines()) if o["stream"] == stream]
+
+
 # -- [R3] replay determinism ---------------------------------------------------
 
 
@@ -583,6 +608,67 @@ def test_r3_f6_replay_setpoint_key_is_what_fc_link_writes() -> None:
     assert keys[0] != setpoint_key(cmd, unlimited)
 
 
+# -- CC-1: a radio approve is a CMD input at its sample's stamp ([F7], [M8]) -----
+
+
+def _rc_channels(t: int, ch8: int) -> bytes:
+    """One real MAVLink2 RC_CHANNELS frame from the FC (system 1 / component 1)
+    with the approve channel ([F7], RC 8) at ``ch8``."""
+    mav = mavlink2.MAVLink(None, srcSystem=1, srcComponent=1)
+    chans = [1500] * 18
+    chans[7] = ch8
+    return bytes(mav.rc_channels_encode(t + FC_BOOT_OFFSET_MS, 16, *chans, 255).pack(mav))
+
+
+@pytest.mark.parametrize(
+    ("offset_ms", "result", "state"),
+    [(-5, AckResult.REJECTED_STATE, S.ACQUIRING), (0, AckResult.ACCEPTED, S.ENGAGED)],
+    ids=["settle-5ms:rejected_state", "settle:accepted"],
+)
+def test_cc1_f7_m8_radio_approve_judged_at_its_sample_stamp(
+    committed: list[str],
+    committed_replay: ReplayResult,
+    offset_ms: int,
+    result: AckResult,
+    state: MissionState,
+) -> None:
+    """CC-1, [F7], [M8], [M2], [R2], [R3]: a radio approve is its own CMD input
+    stamped with its RC_CHANNELS sample's t_rx, so [M8] settles at the sample,
+    not at the next tick. The committed flight is fed to a fresh core up to
+    ACQUIRING; a low then a high RC sample arrive, the high one at
+    ``approve_settle_ms`` + offset after T05, and the next input is a tick past
+    the settle boundary. 5 ms short of it: ``rc:approve:<t>`` is acked
+    rejected_state at the sample stamp and the state stays ACQUIRING; exactly
+    at it: accepted, with T07 at the sample stamp. Replay of what the core
+    recorded reproduces its mission states and acks (the approve drains at the
+    same input in both)."""
+    t05 = next(t for t, n in _events(committed_replay) if n == "transition:SEARCH->ACQUIRING")
+    settle = committed_replay.config.mission.approve_settle_ms
+    t_low, t_high, t_tick = t05 + settle - 20, t05 + settle + offset_ms, t05 + settle + 45
+    buf = io.StringIO()
+    core = CompanionCore(committed_replay.config, recorder=Recorder(buf), t_start_ms=T0)
+    _feed(core, (r for r in read_records(committed) if r.t_rx < t_low))
+    assert core.mission.state is S.ACQUIRING and core.mission.candidate_id == TRACK_ID
+    core.on_mavlink_rx(_rc_channels(t_low, RC_LOW), t_low)
+    core.on_mavlink_rx(_rc_channels(t_high, RC_HIGH), t_high)
+    out = core.on_tick(t_tick)
+    ack = AckPacket(cmd_id=f"rc:approve:{t_high}", result=result)
+    assert out.rc_acks == ((t_high, ack),) and out.acks == ()
+    rc_records = [o for o in _recorded(buf, "ack") if o["pkt"]["cmd_id"].startswith("rc:")]
+    assert [(o["t_rx"], o["pkt"]["result"]) for o in rc_records] == [(t_high, result.value)]
+    assert core.mission.state is state
+    t07 = [(t, src, dst) for t, tid, src, dst, _ in core.mission.transition_log if tid == "T07"]
+    if result is AckResult.ACCEPTED:
+        assert t07 == [(t_high, S.ACQUIRING, S.ENGAGED)]
+        names = [(e.t, e.name) for pkt in out.mission_states for e in pkt.events]
+        assert (t_high, "transition:ACQUIRING->ENGAGED") in names
+    else:
+        assert t07 == []
+    replayed = replay(buf.getvalue().splitlines())
+    assert replayed.acks == replayed.recorded_acks
+    assert replayed.mission_states == replayed.recorded_mission_states
+
+
 # -- [P5c] / [R2] the token -----------------------------------------------------
 
 
@@ -627,6 +713,50 @@ def test_r4_offline_miss_vector_equals_logged(
     got = (*m.vector.miss_m, m.vector.z_m)
     assert all(abs(a - b) <= 0.0005 + 1e-9 for a, b in zip(got, m.logged_m, strict=True))
     assert any(abs(v) > 0.001 for v in m.logged_m[:2])  # a real offset, not 0 == 0
+
+
+def test_cc2_r4_p5a_retry_of_an_older_prime_does_not_replace_the_trial(
+    committed: list[str], committed_replay: ReplayResult
+) -> None:
+    """CC-2, [R4], [P5a], T02: a true retry of an older prime is acked
+    ``accepted`` again but executes nothing, so it is not the trial in force.
+    The committed flight is fed to a fresh core with a recorder; right after
+    prime A it gets prime B with a different ``target_width_m`` (accepted, T02),
+    then A re-sent with the same id and body (the page's retry path); the
+    flight then runs on to its commit. The offline miss vector uses B's width
+    and equals the logged ``miss:`` event within its %.3f rounding."""
+    records = list(read_records(committed))
+    i_a = next(i for i, r in enumerate(records) if r.stream is Stream.COMMAND)
+    prime_a = records[i_a]
+    assert isinstance(prime_a.packet, CommandPacket)
+    assert prime_a.packet.command is CommandName.PRIME and prime_a.auth_ok is True
+    width_b = 2.0 * PRIME.target_width_m
+    prime_b = CommandPacket(
+        cmd_id="ui-0005-prime-b",
+        token=UI_TOKEN,
+        command=CommandName.PRIME,
+        params=dataclasses.replace(PRIME, target_width_m=width_b).to_obj(),
+    )
+    buf = io.StringIO()
+    core = CompanionCore(committed_replay.config, recorder=Recorder(buf), t_start_ms=T0)
+    _feed(core, records[: i_a + 1])
+    t = prime_a.t_rx
+    out_b = core.on_command(prime_b, True, t)
+    out_retry = core.on_command(prime_a.packet, True, t)  # same id, same body
+    _feed(core, records[i_a + 1 :])
+    assert [a.result for a in (*out_b.acks, *out_retry.acks)] == [AckResult.ACCEPTED] * 2
+    assert out_retry.acks[0].cmd_id == prime_a.packet.cmd_id
+    tids = [tid for _, tid, _, _, _ in core.mission.transition_log]
+    assert tids[:2] == ["T01", "T02"] and tids.count("T02") == 1  # the retry executed nothing
+    misses = miss_vectors_from_recording(buf.getvalue().splitlines())
+    assert len(misses) == 1
+    m = misses[0]
+    assert m.target_width_m == width_b
+    assert m.logged_m is not None
+    got = (*m.vector.miss_m, m.vector.z_m)
+    assert all(abs(a - b) <= 0.0005 + 1e-9 for a, b in zip(got, m.logged_m, strict=True))
+    (original,) = miss_vectors_from_recording(committed)  # flown on A's width
+    assert original.logged_m is not None and abs(m.logged_m[2] - original.logged_m[2]) > 0.01
 
 
 # -- [R2] meta.config -------------------------------------------------------------
