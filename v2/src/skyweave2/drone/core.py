@@ -632,7 +632,7 @@ def miss_vectors_from_recording(source: str | Path | Iterable[str]) -> list[Offl
 
     A command record executes only if it is the first authenticated record of
     its ``cmd_id`` ([P5a]): a later authenticated record with that id is a true
-    retry (acked with the stored ``accepted``) or a duplicate id, and executes
+    retry (acked with the stored ack, ``accepted`` included) or a duplicate id, and executes
     nothing, so an older prime re-sent after a re-prime never becomes the trial
     in force. Unauthenticated records are not stored and do not count.
     """
