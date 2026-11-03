@@ -53,8 +53,52 @@ def _tail(text: str, n: int = 60) -> str:
     return "\n".join(lines[-n:])
 
 
+# ManimGL (3b1b) idioms that do not exist in Manim Community, plus things that break
+# determinism. LLMs mix the two APIs; catch it before a slow render.
+_BANNED = [
+    (
+        re.compile(r"^\s*(from|import)\s+manimlib\b", re.M),
+        "uses manimlib (ManimGL); use Manim Community",
+    ),
+    (re.compile(r"\bShowCreation\b"), "ShowCreation is ManimGL; use Create"),
+    (re.compile(r"^\s*CONFIG\s*=\s*\{", re.M), "CONFIG dicts are ManimGL; use __init__ arguments"),
+    (re.compile(r"\bInteractiveScene\b"), "InteractiveScene is ManimGL"),
+    (
+        re.compile(r"\bTextMobject\b|\bTexMobject\b"),
+        "TextMobject/TexMobject are old names; use Text/Tex",
+    ),
+    (re.compile(r"\badd_sound\s*\("), "do not add sound in scenes; audio is added at assembly"),
+    (re.compile(r"\b(time\.time|datetime\.now)\s*\("), "no wall-clock values in scenes"),
+    (
+        re.compile(r"^\s*config\.(pixel_|frame_rate|frame_width|frame_height)", re.M),
+        "do not set resolution or frame rate in scenes",
+    ),
+]
+
+
+def static_check(source: str) -> list[str]:
+    """Problems found without rendering: syntax errors and banned idioms."""
+    try:
+        compile(source, "<scene>", "exec")
+    except SyntaxError as e:
+        return [f"SyntaxError line {e.lineno}: {e.msg}"]
+    found = [msg for rx, msg in _BANNED if rx.search(source)]
+    uses_random = re.search(
+        r"\b(random|np\.random)\.(random|rand|randint|uniform|choice|shuffle|normal)\s*\(", source
+    )
+    if uses_random and not re.search(
+        r"\b(random|np\.random)\.seed\s*\(|default_rng\s*\(\s*\d", source
+    ):
+        found.append("random numbers without a fixed seed; call random.seed(N) / np.random.seed(N)")
+    return found
+
+
 def render_scene(
-    project: Project, sid: str, quality: str = "draft", frames: bool = True, timeout: int = 1800
+    project: Project,
+    sid: str,
+    quality: str = "draft",
+    frames: bool = True,
+    timeout: int | None = None,
 ) -> dict:
     """Render scenes/<sid>.py (class Main). Returns a result dict and writes the report JSON."""
     if quality not in QUALITY:
@@ -62,7 +106,16 @@ def render_scene(
     src = project.scene_file(sid)
     if not src.exists():
         raise SystemExit(f"{src} does not exist")
+    banned = static_check(src.read_text())
+    if banned:
+        return {
+            "scene": sid,
+            "ok": False,
+            "error": "static check failed",
+            "log_tail": "\n".join(banned),
+        }
     q = QUALITY[quality]
+    timeout = timeout or (600 if quality == "draft" else 1800)
     out = project.render_file(sid, quality)
     report = project.report_file(sid, quality)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +199,8 @@ def extract_frames(project: Project, sid: str, quality: str = "draft") -> dict:
     fdir.mkdir(parents=True, exist_ok=True)
     shots = []
     for ln in sc["lines"]:
-        t = min(vdur - 0.25, ln["start"] + 0.7 * (ln["end"] - ln["start"]))
+        # settled state: just before the line ends (its animation should be done)
+        t = min(vdur - 0.25, max(ln["start"], ln["end"] - 0.15))
         shots.append(
             (f"line_{ln['index']:02d}", t, f"L{ln['index']} {ln['speaker']}: {ln['text']}")
         )

@@ -218,7 +218,10 @@ SyncedScene API:
   Background color is already set (BackgroundRectangle defaults to it too). Do not set config, resolution, or add_sound. Do not call self.wait() with long fixed times; use at_line/finish.
 Style helpers (use them so all scenes match): title(str) -> top-left title with underline; text(str, size=32, color=FG); label(str) (26 pt);
   colors BG FG MUTED ACCENT(blue) ACCENT_2(amber) GOOD(green) BAD(red) PURPLE; sizes TITLE_SIZE 40, BODY_SIZE 32, LABEL_SIZE 26, MIN_FONT_SIZE 20;
-  safe_box() -> (left, right, bottom, top); content_top(); fit_width(mob). FONT = "DejaVu Sans".
+  safe_box() -> (left, right, bottom, top); content_top(); content_bottom() (= SUBTITLE_BAND, y -3.0); fit_width(mob); MIN_GAP 0.3. FONT = "DejaVu Sans".
+  6x6 placement grid over the content area: cell("A1") (top-left) ... cell("F6") (bottom-right) returns a point; obj.move_to(cell("B3")). cell_size() -> (w, h).
+  self.allow_overlap(a, b, ...) marks an overlap as intended (a label inside its box) so the layout check skips it.
+  Banned (the render refuses them): ManimGL names (manimlib, ShowCreation, CONFIG dicts, InteractiveScene, TextMobject), add_sound, setting config resolution/frame rate, wall-clock calls, random numbers without a fixed seed.
 LaTeX is ${prep.latex ? 'installed: MathTex/Tex are allowed for formulas' : 'NOT installed: do not use MathTex, Tex, or anything that needs LaTeX; write formulas with Text'}.`
 
 const RULES = `Layout and teaching rules:
@@ -226,7 +229,8 @@ const RULES = `Layout and teaching rules:
 - Each line gets a visible change that matches its words (appear, move, highlight, transform). Start it at at_line(i); finish it inside the line. Objects appear when the narration names them, not later.
 - Keep at most about 6 visible elements. Fade out or move what the narration no longer talks about.
 - On-screen text: short labels (at most about 8 words), font size >= 24, never paragraphs, never the full narration.
-- Everything stays inside safe_box(). Use arrange/next_to with buff >= 0.25. Labels never sit on top of other text or lines; offset them or add_background_rectangle().
+- Everything stays inside safe_box(); key content stays above content_bottom() (subtitles cover the band below y -3.0). Place main objects with the cell("A1".."F6") grid or the shared library's positions, not ad hoc coordinates.
+- Keep at least MIN_GAP (0.3) between objects that must not touch: arrange/next_to with buff >= 0.3. Labels never sit on top of other text or lines; offset them or add_background_rectangle(). If an overlap is intended, call self.allow_overlap(a, b).
 - Use the shared library's drawing functions, positions, and concept colors for every object that also appears in other scenes. Never edit scenes/common.py (other agents use it at the same time); define anything else locally in your scene file.
 - Diagrams over decoration. Prefer simple shapes (Circle, Square, Arrow, Line, Dot, Axes, NumberLine, Rectangle, Polygon). Proportions must be right (sizes, angles, distances that the narration compares).
 - Motion is calm: run_times about 0.5-1.5 s; nothing flashes.
@@ -236,7 +240,7 @@ const LOOP = (sid, maxRenders) => `Work loop (at most ${maxRenders} renders):
 1. Run "uv run ivideo render ${P} ${sid}" (480p draft). Read the JSON.
    - ok=false: read log_tail (and the .log file if needed), fix the code, render again.
    - layout_issues / drift / duration_error not ~0: fix them (drift means animations inside a line took longer than the line).
-2. LOOK at the frames: use the Read tool on frames.contact_sheet, on each frames/*.png it lists, and on frames.start_frame. Check each line's frame against its visual and words: right content, readable, nothing overlapping, nothing cut off, not empty, clear what to look at.
+2. LOOK at the frames: use the Read tool on frames.contact_sheet, on each frames/*.png it lists (each is taken just before its line ends, when the layout should be settled), and on frames.start_frame. Check each line's frame against its visual and words: right content, readable, nothing overlapping, nothing cut off, not empty, clear what to look at.
 3. Fix and render again until the report is clean and the frames look right.`
 
 // ---------- Design ----------
@@ -301,7 +305,7 @@ ${LIB}
 
 Steps:
 1. Run "uv run ivideo frames ${P} ${s.id}" and read ${PDIR}/renders/draft/${s.id}.report.json.
-2. Use the Read tool to look at the contact sheet, at EVERY frame PNG it lists (one per line, at 70% through the line, plus the last frame), and at start_frame.
+2. Use the Read tool to look at the contact sheet, at EVERY frame PNG it lists (one per line, just before the line ends, plus the last frame), and at start_frame.
 3. For each line judge: does the screen show what the words talk about, at the time they say it (the visual field is the plan; small deviations are fine if clear)? Is all text readable (size, contrast) and spelled right? Any overlap, cut-off, clutter, or empty screen? Any on-screen claim or proportion that disagrees with the narration? Is there a visible change between consecutive lines? Does the start frame and the last frame follow the scene cut contract?
 4. Severity: blocker = broken, unreadable, wrong facts, or nothing matches the words; major = overlap, cut-off text, clutter, a line with no matching visual, timing clearly off, cut contract broken; minor = polish.
 5. Set "pass" to true only if there is no blocker and no major issue. If it passes, run "uv run ivideo mark ${P} ${s.id} approved --note 'score N'".
@@ -427,7 +431,7 @@ const asm = await agent(`${TOOL}
 Assemble the finished video for project ${P}.
 1. Run "uv run ivideo render-all ${P} --quality final" (1080p30; can take several minutes). If a scene fails at final quality but worked as draft, read its log in ${PDIR}/renders/final/, make the smallest fix in ${PDIR}/scenes/<id>.py that does not change how it looks, and render that scene again with "uv run ivideo render ${P} <id> --quality final --no-frames".
 2. Run "uv run ivideo assemble ${P}"${A.burn_subtitles ? ' --burn-subtitles' : ''}.
-3. Return the assemble JSON fields (final, subtitles, contact_sheet, duration, expected_duration, streams) and ok. List scenes that could not be rendered in failed_scenes.`, { label: 'assemble', phase: 'Assemble', schema: ASSEMBLE_SCHEMA, effort: 'low' })
+3. Return the assemble JSON fields (final, subtitles, contact_sheet, duration, expected_duration, streams) and ok. List scenes that could not be rendered in failed_scenes. Report the "qa" block of the assemble JSON in error if qa.ok is false (do not try to fix audio yourself).`, { label: 'assemble', phase: 'Assemble', schema: ASSEMBLE_SCHEMA, effort: 'low' })
 
 if (!asm || !asm.ok) {
   return { ok: false, stage: 'assemble', project_dir: PDIR, error: asm ? asm.error : 'assemble agent returned nothing', scenes: allResults }
@@ -438,8 +442,8 @@ phase('Final check')
 const fin = await agent(`${TOOL}
 
 Check the finished instructional video ${asm.final} (project ${P}). Do not edit files.
-1. Read ${PDIR}/out/assembly.json. Duration must be within 0.5 s of expected_duration; streams must include h264 video, aac audio, and mov_text subtitles (unless subtitles were burned in).
-2. Audio: run ffmpeg -i ${asm.final} -af volumedetect -vn -f null - and confirm mean_volume is not silent (above -40 dB).
+1. Read ${PDIR}/out/assembly.json. Its "qa" block holds deterministic checks (duration within 1.5 frames, h264/yuv420p/aac/mov_text streams, -16 LUFS loudness and true peak, no silence over 1.7 s, one subtitle per line). Report every failed check.
+2. Audio: confirm qa.integrated_lufs is about -16 and qa.long_silences_s is empty.
 3. Use the Read tool on ${asm.contact_sheet} and on frames you grab just before and just after each scene boundary (ffmpeg -ss <t> -i ${asm.final} -frames:v 1 <scratch>.png; offsets are in assembly.json). Check that the scenes look like one video: same background, title placement, fonts, and colors; carried-over objects do not jump; nothing broken at 1080p.
 4. Read ${PDIR}/out/final.srt briefly: line order and speaker names make sense.
 Return pass, audio_ok, duration_ok, consistency_ok, issues, and a 3-sentence summary.`, { label: 'final-check', phase: 'Final check', schema: FINAL_SCHEMA, model: ANIM_MODEL })

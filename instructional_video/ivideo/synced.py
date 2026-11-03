@@ -33,7 +33,7 @@ from manim.mobject.text.tex_mobject import SingleStringMathTex
 from manim.mobject.text.text_mobject import MarkupText, Paragraph, Text
 
 from .style import *  # noqa: F403
-from .style import BG, MIN_FONT_SIZE
+from .style import BG, MIN_FONT_SIZE, SUBTITLE_BAND
 
 # BackgroundRectangle / add_background_rectangle default to config.background_color.
 config.background_color = BG
@@ -127,8 +127,9 @@ def _collect_texts(mobs: list[Mobject]) -> list[Mobject]:
     return out
 
 
-def layout_issues(mobs: list[Mobject]) -> list[dict]:
-    """Find text that leaves the frame, text that overlaps other text, and tiny text."""
+def layout_issues(mobs: list[Mobject], allowed: list[set[int]] | None = None) -> list[dict]:
+    """Find things that leave the frame, text on top of text, tiny text, and text in
+    the subtitle band. `allowed`: groups of mobject ids that may overlap on purpose."""
     hw, hh = config.frame_width / 2, config.frame_height / 2
     issues: list[dict] = []
     for m in mobs:  # anything (not only text) leaving the frame
@@ -150,10 +151,15 @@ def layout_issues(mobs: list[Mobject]) -> list[dict]:
             fs = None
         if fs is not None and fs < MIN_FONT_SIZE * 0.98:
             issues.append({"kind": "tiny_text", "a": _name(m), "font_size": round(float(fs), 1)})
+        b = _box(m)
+        if b is not None and b[2] < SUBTITLE_BAND - 0.05:
+            issues.append({"kind": "subtitle_band", "a": _name(m), "bottom": round(b[2], 2)})
     for i in range(len(boxes)):
         (l1, r1, b1, t1), m1 = boxes[i]
         for j in range(i + 1, len(boxes)):
             (l2, r2, b2, t2), m2 = boxes[j]
+            if allowed and any(id(m1) in g and id(m2) in g for g in allowed):
+                continue
             iw = min(r1, r2) - max(l1, l2)
             ih = min(t1, t2) - max(b1, b2)
             if iw <= 0 or ih <= 0:
@@ -189,6 +195,7 @@ class SyncedScene(Scene):
         self.scene_title = self._timing["title"]
         self._drift: list[dict] = []
         self._issues: dict[tuple, dict] = {}
+        self._allowed: list[set[int]] = []
         self._finished = False
 
     # timing helpers
@@ -235,8 +242,13 @@ class SyncedScene(Scene):
         self._write_report()
 
     # layout checks
+    def allow_overlap(self, *mobs: Mobject) -> None:
+        """Mark these mobjects (and everything inside them) as allowed to overlap each
+        other on purpose, for example a label inside its box. Other overlaps still count."""
+        self._allowed.append({id(x) for m in mobs for x in m.get_family()})
+
     def _check(self, where: str) -> None:
-        for issue in layout_issues(list(self.mobjects)):
+        for issue in layout_issues(list(self.mobjects), self._allowed):
             key = (issue["kind"], issue.get("a"), issue.get("b"))
             if key not in self._issues:
                 issue["t"] = round(self.time, 2)

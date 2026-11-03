@@ -74,6 +74,15 @@ def content_top() -> float:
     return frame_h() / 2 - MARGIN - 1.0
 
 
+SUBTITLE_BAND = -3.0  # keep key content above this y: players draw subtitles below it
+MIN_GAP = 0.3  # minimum space between objects that must not touch
+
+
+def content_bottom() -> float:
+    """y of the bottom of the content area (above the subtitle band)."""
+    return SUBTITLE_BAND
+
+
 def fit_width(mob, max_width: float | None = None):
     """Shrink mob so it fits inside the safe width (never grows it)."""
     left, right, _, _ = safe_box()
@@ -81,6 +90,36 @@ def fit_width(mob, max_width: float | None = None):
     if mob.width > mw:
         mob.scale_to_fit_width(mw)
     return mob
+
+
+GRID_COLS = "ABCDEF"
+GRID_ROWS = 6
+
+
+def cell(name: str):
+    """Center of a named cell in the 6x6 content grid (Code2Video's anchor idea).
+
+    Columns A-F run left to right, rows 1-6 top to bottom. The grid covers the
+    content area: inside the safe box, below the title, above the subtitle band.
+    Example: cell("A1") is top-left, cell("F6") is bottom-right, cell("C3") is near
+    the center. Use it with move_to(): obj.move_to(cell("B4")).
+    """
+    import numpy as np
+
+    name = name.strip().upper()
+    col, row = GRID_COLS.index(name[0]), int(name[1:]) - 1
+    if not (0 <= row < GRID_ROWS):
+        raise ValueError(f"row must be 1-{GRID_ROWS}: {name}")
+    left, right, _, _ = safe_box()
+    top, bottom = content_top(), content_bottom()
+    w, h = (right - left) / len(GRID_COLS), (top - bottom) / GRID_ROWS
+    return np.array([left + (col + 0.5) * w, top - (row + 0.5) * h, 0.0])
+
+
+def cell_size() -> tuple[float, float]:
+    """(width, height) of one grid cell in scene units."""
+    left, right, _, _ = safe_box()
+    return (right - left) / len(GRID_COLS), (content_top() - content_bottom()) / GRID_ROWS
 
 
 __all__ = [
@@ -105,5 +144,10 @@ __all__ = [
     "label",
     "title",
     "content_top",
+    "content_bottom",
     "fit_width",
+    "cell",
+    "cell_size",
+    "SUBTITLE_BAND",
+    "MIN_GAP",
 ]

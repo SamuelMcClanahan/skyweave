@@ -38,7 +38,8 @@ def clean_for_speech(text: str) -> str:
 
 
 class Synth:
-    """Wraps a TTS engine. engine='kokoro' (default) or 'silence' (tests, dry runs)."""
+    """Wraps a TTS engine. engine='kokoro' (default) or 'tone' (tests and dry runs:
+    a quiet 220 Hz beep, 0.4 s per word, no model needed)."""
 
     def __init__(self, engine: str = "kokoro", speed: float = 1.0):
         self.engine = engine
@@ -54,15 +55,16 @@ class Synth:
                     f"Kokoro model files missing in {model.parent}. Run ./setup.sh first."
                 )
             self._k = Kokoro(str(model), str(voices))
-        elif engine != "silence":
+        elif engine != "tone":
             raise ValueError(f"unknown TTS engine {engine!r}")
 
     def voices(self) -> list[str]:
         return sorted(self._k.get_voices()) if self._k else []
 
     def say(self, text: str, voice: str) -> np.ndarray:
-        if self._k is None:  # silence engine: 0.4 s per word, deterministic
-            return np.zeros(int(SAMPLE_RATE * 0.4 * max(1, len(text.split()))), dtype=np.float32)
+        if self._k is None:  # tone engine: deterministic, 0.4 s per word
+            n = int(SAMPLE_RATE * 0.4 * max(1, len(text.split())))
+            return (0.1 * np.sin(2 * np.pi * 220 * np.arange(n) / SAMPLE_RATE)).astype(np.float32)
         samples, sr = self._k.create(
             clean_for_speech(text), voice=voice, speed=self.speed, lang="en-us"
         )

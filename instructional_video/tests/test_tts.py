@@ -7,7 +7,7 @@ def test_timing_math(project):
     timing = __import__("json").loads(project.timing.read_text())
     s1 = timing["scenes"][0]
     lines = s1["lines"]
-    # silence engine: 0.4 s per word; speakers alternate learner, host, learner
+    # tone engine: 0.4 s per word; speakers alternate learner, host, learner
     assert lines[0]["start"] == tts.LEAD_IN
     assert abs(lines[1]["start"] - (lines[0]["end"] + tts.GAP_SWITCH)) < 1e-3
     assert abs(s1["duration"] - (lines[-1]["end"] + tts.TAIL)) < 1e-3

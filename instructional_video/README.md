@@ -52,8 +52,8 @@ Workflow arguments (all optional except a topic for a new project):
 | `speakers` | 1 = narrator, 2 = teacher + learner dialogue | 2 |
 | `sources` | Files with facts to use (paths) | none |
 | `notes` | Extra instructions for the scriptwriter | none |
-| `model` | OpenRouter model id for the dialogue | see `ivideo/dialogue.py` |
-| `fallbacks` | More OpenRouter model ids, tried in order | see `ivideo/dialogue.py` |
+| `model` | OpenRouter model id for the dialogue | `anthropic/claude-opus-5.5` |
+| `fallbacks` | More OpenRouter model ids, tried in order | `openai/gpt-6.1-sol`, `x-ai/grok-4.7` |
 | `script_file` | Use this script JSON. Skips OpenRouter. | none |
 | `redo_dialogue` | Ask OpenRouter for a new script | false |
 | `redo_scenes` | Scene ids to animate again, for example `["s02"]` | none |
@@ -123,10 +123,22 @@ starts. `self.finish()` holds the last frame until the scene audio ends. So the
 video of each scene has the same length as its audio, and each visual change
 starts when its line starts.
 
-After every animation, `SyncedScene` checks the layout:
-text off the frame, text on top of other text, and text smaller than 20 pt.
+After every animation, `SyncedScene` checks the layout: anything off the frame,
+text on top of other text, text smaller than 20 pt, and text in the subtitle band
+(below y = -3.0). `self.allow_overlap(a, b)` marks an overlap as intended.
 It also records drift (animations that run past their line).
 `ivideo render` returns these problems as JSON, so the agent can fix them.
+Before it renders, it refuses ManimGL names (for example `ShowCreation`),
+`add_sound`, wall-clock calls, and random numbers without a fixed seed.
+
+Scenes place objects on a 6x6 grid: `cell("A1")` is top-left, `cell("F6")` is
+bottom-right (an idea from Code2Video, where a 6x6 grid gave the best layout score).
+
+Assembly encodes the audio only once. Each scene gets a length of whole frames.
+The video parts and the WAV parts are joined, then loudness is set to -16 LUFS
+in two passes, then AAC is encoded one time. This keeps the voice in sync at
+every scene cut. `out/assembly.json` has a `qa` block with automatic checks:
+length, streams, loudness, long silences, and one subtitle per line.
 
 ## 5. The script format
 
@@ -143,18 +155,29 @@ It also records drift (animations that run past their line).
 ```
 
 Rules: at most 40 words per line (the prompt asks for 30), no markup, no stage
-directions, every speaker used. The tool asks OpenRouter for strict JSON-schema
-output. If the model cannot do that, it asks for JSON in the prompt. If the JSON
-breaks a rule, it sends the problems back to the model (2 repairs at most).
+directions, every speaker used.
+
+How the OpenRouter request works (`ivideo/openrouter.py`):
+
+- The tool reads the model's `supported_parameters` from `/api/v1/models` and sends
+  only those. Claude 5.5 and GPT-6.1 Sol reject `temperature`, so it is not sent to them.
+- It asks for strict JSON-schema output when the model supports it. If not, it puts
+  the schema in the prompt.
+- If a model fails, it tries the next model with a new request body (client-side fallback).
+- If the JSON breaks a rule, it sends the problems back to the same model (2 repairs at most).
+- A cut-off answer (`finish_reason: length`) is an error. 401, 402 and 403 stop at once.
+- `openrouter_response.json` logs each call: served model, cost in USD, finish reason.
+- `ivideo doctor` shows your remaining OpenRouter credit when the key is set.
 
 ## 6. Tests
 
 ```bash
-uv run pytest        # 20 tests, about 30 s; no network and no key needed
+uv run pytest        # 27 tests, about 30 s; no network and no key needed
 uv run ruff check .
 ```
 
-The OpenRouter tests use a local fake server.
+The OpenRouter tests use a local fake server. The render tests use the `tone` voice
+engine (a quiet beep, no model needed).
 `tests/fixtures/demo_script.json` is a hand-written test script, not OpenRouter output.
 
 ## 7. Limits

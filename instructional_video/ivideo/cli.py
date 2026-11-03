@@ -3,7 +3,7 @@
 ivideo doctor
 ivideo new <project> --topic "..." [--audience ..] [--minutes 3] [--speakers 2]
 ivideo dialogue <project> [--model id] [--fallback id ...] [--source file ...]
-ivideo voice <project> [--engine kokoro|silence] [--speed 1.0] [--only s01 ...]
+ivideo voice <project> [--engine kokoro|tone] [--speed 1.0] [--only s01 ...]
 ivideo brief <project> [<scene>]          # scene data an animator needs
 ivideo render <project> <scene> [--quality draft|final] [--no-frames]
 ivideo render-all <project> [--quality final]
@@ -62,6 +62,16 @@ def cmd_doctor(_a) -> dict:
         )
     if not checks["openrouter_key"]:
         checks["notes"].append("OPENROUTER_API_KEY is not set: `ivideo dialogue` cannot run.")
+    else:
+        from . import openrouter
+
+        try:
+            k = openrouter.key_status()
+            checks["openrouter_credit"] = {
+                x: k.get(x) for x in ("limit", "limit_remaining", "usage", "is_free_tier")
+            }
+        except Exception as e:  # report, do not fail doctor
+            checks["notes"].append(f"OpenRouter key check failed: {e}")
     return checks
 
 
@@ -99,6 +109,8 @@ def cmd_dialogue(a) -> dict:
         source_paths=(a.source or brief.get("sources") or []),
         notes=a.notes or brief.get("notes", ""),
         temperature=a.temperature,
+        reasoning_effort=a.reasoning_effort or None,
+        max_tokens=a.max_tokens,
         seed=a.seed,
     )
     return {
@@ -278,13 +290,17 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--fallback", action="append")
     d.add_argument("--source", action="append")
     d.add_argument("--notes")
-    d.add_argument("--temperature", type=float, default=0.7)
+    d.add_argument("--temperature", type=float, help="sent only if the model supports it")
+    d.add_argument(
+        "--reasoning-effort", default="medium", help="low|medium|high; sent only if supported"
+    )
+    d.add_argument("--max-tokens", type=int, default=32000)
     d.add_argument("--seed", type=int)
     d.set_defaults(fn=cmd_dialogue)
 
     v = sub.add_parser("voice")
     v.add_argument("project")
-    v.add_argument("--engine", default="kokoro", choices=["kokoro", "silence"])
+    v.add_argument("--engine", default="kokoro", choices=["kokoro", "tone"])
     v.add_argument("--speed", type=float, default=1.0)
     v.add_argument("--voice", action="append", help="speaker_id=kokoro_voice, e.g. host=af_heart")
     v.add_argument("--only", action="append", help="re-synthesize only these scene ids")

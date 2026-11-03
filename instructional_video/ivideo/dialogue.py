@@ -9,9 +9,14 @@ from . import openrouter
 from .project import Project, write_json
 from .schema import SCRIPT_SCHEMA, assign_scene_ids, total_words, validate_script
 
-# Default model and fallbacks. Override with --model / --fallback or IVIDEO_DIALOGUE_MODEL.
-DEFAULT_MODEL = "anthropic/claude-sonnet-5.5"
-DEFAULT_FALLBACKS = ["openai/gpt-6.1-sol", "google/gemini-4-argon"]
+# Default model and fallbacks (research recommendation, RESEARCH.md; ids checked on
+# openrouter.ai/api/v1/models 2026-11-03). Override with --model / --fallback or
+# IVIDEO_DIALOGUE_MODEL. Prices in USD per million tokens, input / output:
+#   anthropic/claude-opus-5.5   4 / 20
+#   openai/gpt-6.1-sol          2 / 10
+#   x-ai/grok-4.7               2 / 6
+DEFAULT_MODEL = "anthropic/claude-opus-5.5"
+DEFAULT_FALLBACKS = ["openai/gpt-6.1-sol", "x-ai/grok-4.7"]
 
 WORDS_PER_MINUTE = 155  # Kokoro at speed 1.0 measures about 150-170 wpm.
 MAX_SOURCE_CHARS = 80_000
@@ -86,10 +91,6 @@ def build_messages(
     ]
 
 
-def _schema_hint() -> str:
-    return "The JSON must match this JSON Schema exactly:\n" + json.dumps(SCRIPT_SCHEMA)
-
-
 def write_dialogue(
     project: Project,
     *,
@@ -101,10 +102,16 @@ def write_dialogue(
     fallbacks: list[str] | None = None,
     source_paths: list[str] | None = None,
     notes: str = "",
-    temperature: float = 0.7,
+    temperature: float | None = None,
     seed: int | None = None,
+    reasoning_effort: str | None = "medium",
+    max_tokens: int = 32000,
     max_repairs: int = 2,
 ) -> dict:
+    """Ask OpenRouter for the script, validate it, send problems back (max_repairs times).
+
+    temperature and seed are sent only if set AND the model supports them.
+    """
     project.ensure()
     sources = [(Path(p).name, Path(p).read_text(errors="replace")) for p in (source_paths or [])]
     messages = build_messages(
@@ -116,40 +123,36 @@ def write_dialogue(
         notes=notes,
     )
     fallbacks = DEFAULT_FALLBACKS if fallbacks is None else fallbacks
+    models = [model, *[m for m in fallbacks if m != model]]
     log: list[dict] = []
-    use_schema = True
     data = None
     problems: list[str] = []
     for attempt in range(max_repairs + 1):
+        failed: list[dict] = []
         try:
             comp = openrouter.chat(
                 messages,
-                model=model,
-                fallbacks=fallbacks,
-                schema=SCRIPT_SCHEMA if use_schema else None,
+                models=models,
+                schema=SCRIPT_SCHEMA,
                 schema_name="instructional_video_script",
+                max_tokens=max_tokens,
                 temperature=temperature,
                 seed=seed,
+                reasoning_effort=reasoning_effort,
+                attempts_log=failed,
             )
-        except openrouter.OpenRouterError as e:
-            # No provider for this model supports strict structured output: ask for JSON in the prompt.
-            if use_schema and e.status in (400, 404, 422):
-                use_schema = False
-                messages = [
-                    *messages[:-1],
-                    {"role": "user", "content": messages[-1]["content"] + "\n\n" + _schema_hint()},
-                ]
-                log.append(
-                    {"attempt": attempt, "error": str(e), "action": "retry without json_schema"}
-                )
-                comp = openrouter.chat(
-                    messages, model=model, fallbacks=fallbacks, temperature=temperature, seed=seed
-                )
-            else:
-                raise
+        except openrouter.TruncatedError as e:
+            log.append({"attempt": attempt, "failed_models": failed, "error": str(e)})
+            write_json(project.openrouter_log, log)
+            raise SystemExit(str(e)) from None
+        used = comp.request.get("model", model)
         entry = {
             "attempt": attempt,
+            "failed_models": failed,
+            "requested_model": used,
             "model": comp.model,
+            "response": comp.raw,
+            "finish_reason": comp.finish_reason,
             "usage": comp.usage,
             "request": comp.request,
             "content": comp.content,
@@ -164,6 +167,8 @@ def write_dialogue(
         write_json(project.openrouter_log, log)
         if not problems:
             break
+        # Repairs go to the model that wrote the draft first.
+        models = [used, *[m for m in models if m != used]]
         messages = [
             *messages,
             {"role": "assistant", "content": comp.content},
@@ -178,12 +183,14 @@ def write_dialogue(
             "OpenRouter script is still invalid after repairs:\n- " + "\n- ".join(problems)
         )
     data = assign_scene_ids(data)
+    cost = sum(float((e.get("usage") or {}).get("cost") or 0) for e in log)
     data["meta"] = {
         "topic": topic,
         "audience": audience,
         "minutes": minutes,
         "dialogue_model": log[-1]["model"],
         "requested_model": model,
+        "openrouter_cost_usd": round(cost, 4),
         "words": total_words(data),
         "estimated_minutes": round(total_words(data) / WORDS_PER_MINUTE, 2),
     }

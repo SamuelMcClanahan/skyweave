@@ -1,4 +1,4 @@
-"""Render real Manim scenes against silence-engine timing, then assemble. About 20-40 s."""
+"""Render real Manim scenes against tone-engine timing, then assemble. About 20-40 s."""
 
 from __future__ import annotations
 
@@ -48,12 +48,19 @@ def test_assemble(project):
         assert render_scene(project, sid, "draft", frames=False)["ok"]
     out = assemble(project, quality="draft")
     timing = json.loads(project.timing.read_text())
-    assert abs(out["duration"] - timing["total_duration"]) < 0.3
+    assert abs(out["duration"] - out["expected_duration"]) <= 1.5 / 30
+    assert abs(out["expected_duration"] - timing["total_duration"]) < 0.3
     kinds = " ".join(out["streams"])
     assert "h264" in kinds and "aac" in kinds and "mov_text" in kinds
     srt = (project.out_dir / "final.srt").read_text()
     assert srt.count("-->") == 6
     assert out["offsets"]["s02"] > 0
+    qa = out["qa"]
+    assert qa["duration_ok"] and qa["streams_ok"] and qa["subtitles_ok"], qa
+    assert qa["loudness_ok"], qa  # tone voice normalized to -16 LUFS
+    assert qa["silence_ok"], qa  # planned gaps are all shorter than 1.7 s
+    # audio and video segment lengths are whole frames, so cuts cannot drift
+    assert all(abs(s["frames"] / 30 - s["segment"]) < 1e-3 for s in out["scenes"])
 
 
 def test_srt_format():

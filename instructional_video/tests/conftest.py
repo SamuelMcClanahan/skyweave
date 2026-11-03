@@ -16,7 +16,7 @@ def demo_script() -> dict:
 
 @pytest.fixture
 def project(tmp_path, demo_script):
-    """A project with script.json and silence-engine timing (no TTS model needed)."""
+    """A project with script.json and tone-engine timing (no TTS model needed)."""
     from ivideo.project import Project, write_json
     from ivideo.schema import assign_scene_ids
     from ivideo.tts import synthesize
@@ -24,7 +24,7 @@ def project(tmp_path, demo_script):
     proj = Project(tmp_path / "proj").ensure()
     script = assign_scene_ids(demo_script)
     write_json(proj.script, script)
-    synthesize(proj, script, engine="silence")
+    synthesize(proj, script, engine="tone")
     return proj
 
 
