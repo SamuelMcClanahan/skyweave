@@ -33,7 +33,10 @@ from manim.mobject.text.tex_mobject import SingleStringMathTex
 from manim.mobject.text.text_mobject import MarkupText, Paragraph, Text
 
 from .style import *  # noqa: F403
-from .style import MIN_FONT_SIZE
+from .style import BG, MIN_FONT_SIZE
+
+# BackgroundRectangle / add_background_rectangle default to config.background_color.
+config.background_color = BG
 
 TEXT_TYPES = (Text, MarkupText, Paragraph, SingleStringMathTex)
 EDGE_TOL = 0.02  # scene units allowed past the frame edge
@@ -175,7 +178,7 @@ class SyncedScene(Scene):
 
     def setup(self) -> None:
         super().setup()
-        self.camera.background_color = BG  # noqa: F405
+        self.camera.background_color = BG
         self.scene_id = os.environ.get("IVIDEO_SCENE", "")
         self._timing = _load_timing(self.scene_id)
         self.lines = [
@@ -226,7 +229,7 @@ class SyncedScene(Scene):
 
     def finish(self) -> None:
         """Hold the last frame until the scene audio ends, then write the report."""
-        self.wait_until(self.scene_duration - 1.0 / config.frame_rate, "scene end")
+        self.wait_until(self.scene_duration, "scene end")
         self._finished = True
         self._check("finish")
         self._write_report()

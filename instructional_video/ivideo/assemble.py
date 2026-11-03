@@ -174,7 +174,7 @@ def assemble(
         [p for p, _ in previews],
         [c for _, c in previews],
         project.out_dir / "contact_sheet.png",
-        cols=3,
+        cols=min(3, len(previews)),
         width=480,
     )
     result = {

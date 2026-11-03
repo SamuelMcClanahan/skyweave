@@ -64,7 +64,7 @@ def title(s: str) -> VGroup:
     t = Text(s, font=FONT, font_size=TITLE_SIZE, color=FG, weight="BOLD")
     fit_width(t)
     t.to_corner(UL, buff=MARGIN)
-    rule = Line(t.get_corner(DOWN + LEFT), t.get_corner(DOWN + LEFT) + [min(t.width, 4.0), 0, 0])
+    rule = Line(t.get_corner(DOWN + LEFT), t.get_corner(DOWN + LEFT) + [t.width, 0, 0])
     rule.set_stroke(ACCENT, width=4).shift(DOWN * 0.15)
     return VGroup(t, rule)
 

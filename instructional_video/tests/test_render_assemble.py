@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 
-from conftest import copy_scene
+from conftest import FIXTURES, copy_scene
 
 from ivideo.assemble import assemble, build_srt
-from ivideo.render import render_scene
+from ivideo.render import render_scene, render_still
 
 
 def test_layout_checker_flags_problems(project):
@@ -18,6 +19,7 @@ def test_layout_checker_flags_problems(project):
     assert {"text_overlap", "off_frame", "tiny_text"} <= kinds
     assert res["clean"] is False
     assert len(res["frames"]["frames"]) == 4  # 3 lines + last frame
+    assert res["frames"]["start_frame"].endswith("start.png")
 
 
 def test_clean_scene_hits_audio_duration(project):
@@ -62,3 +64,13 @@ def test_srt_format():
         ],
     }
     assert build_srt(timing, {"s01": 3600.0}) == "1\n01:00:00,500 --> 01:01:01,250\nhi\n"
+
+
+def test_shared_library_and_still(project):
+    shutil.copy(FIXTURES / "common.py", project.scenes_dir / "common.py")
+    still = render_still(project, "common.py", "Gallery")
+    assert still["ok"], still
+    copy_scene(project, "scene_common.py", "s01")
+    res = render_scene(project, "s01", "draft")
+    assert res["ok"], res
+    assert res["layout_issues"] == [] and res["drift"] == []

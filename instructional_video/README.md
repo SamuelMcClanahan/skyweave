@@ -61,6 +61,8 @@ Workflow arguments (all optional except a topic for a new project):
 | `speed` | Speech speed | 1.0 |
 | `max_fix_rounds` | Review-and-repair rounds per scene | 2 |
 | `max_renders` | Renders per animator agent | 6 |
+| `redo_design` | Write `scenes/common.py` again | false |
+| `animator_model` | Model alias for the Claude agents | opus |
 | `burn_subtitles` | Draw subtitles into the picture | false (soft subtitles) |
 | `latex` | Install LaTeX during setup | false |
 
@@ -68,14 +70,24 @@ What the workflow does:
 
 1. **Prepare** (1 agent): checks the setup, gets the dialogue from OpenRouter,
    speaks every line, and measures the time of each line.
-2. **Animate** (1 Claude Opus agent per scene, in parallel): writes `scenes/sNN.py`,
+2. **Design** (1 Claude Opus agent): writes `scenes/common.py`, the shared drawing
+   library for this video. It holds a drawing function for each object that more
+   than one scene uses, fixed positions, one color per concept, and a "handoff"
+   function for each scene cut where the next scene continues the same diagram.
+   It renders a gallery image of the library and checks it.
+3. **Animate** (1 Claude Opus agent per scene, in parallel): writes `scenes/sNN.py`,
    renders a 480p draft, looks at one frame per line, and fixes problems.
-3. **Review** (1 Claude Opus agent per scene, that did not write the code):
+4. **Review** (1 Claude Opus agent per scene, that did not write the code):
    looks at every frame and approves or rejects. A rejected scene goes to a
    repair agent, then to review again (at most `max_fix_rounds` times).
-4. **Assemble** (1 agent): renders all scenes at 1080p 30 fps and joins them.
-5. **Final check** (1 Claude Opus agent): checks length, audio level, streams,
+5. **Continuity** (1 Claude Opus agent): compares the last frame of each scene with
+   the first frame of the next, and the look of all scenes. It can send at most
+   3 scenes back for repair (each repair is reviewed again).
+6. **Assemble** (1 agent): renders all scenes at 1080p 30 fps and joins them.
+7. **Final check** (1 Claude Opus agent): checks length, audio level, streams,
    and that all scenes look like one video.
+
+Agent count: about 3 + 2 to 4 per scene. A 6-scene video uses about 20 to 30 agents.
 
 Output: `projects/<project>/out/final.mp4`, `final.srt`, `contact_sheet.png`.
 
@@ -90,6 +102,7 @@ uv run ivideo dialogue <project> [--model id] [--fallback id]   # calls OpenRout
 uv run ivideo voice <project> [--voice host=af_heart] [--speed 1.0]
 uv run ivideo brief <project> [sNN]           # what an animator needs
 uv run ivideo render <project> sNN            # 480p draft + layout report + frames
+uv run ivideo still <project> common.py       # last frame of a plain Scene (class Gallery)
 uv run ivideo render-all <project>            # 1080p
 uv run ivideo assemble <project> [--burn-subtitles]
 uv run ivideo status <project>
@@ -137,7 +150,7 @@ breaks a rule, it sends the problems back to the model (2 repairs at most).
 ## 6. Tests
 
 ```bash
-uv run pytest        # 19 tests, about 30 s; no network and no key needed
+uv run pytest        # 20 tests, about 30 s; no network and no key needed
 uv run ruff check .
 ```
 

@@ -75,6 +75,10 @@ def render_scene(
         IVIDEO_SCENE=sid,
         IVIDEO_REPORT=str(report),
         PYTHONWARNINGS="ignore",
+        # scenes/common.py (the per-video drawing library) is importable as `common`.
+        PYTHONPATH=os.pathsep.join(
+            x for x in (str(project.scenes_dir), os.environ.get("PYTHONPATH", "")) if x
+        ),
     )
     cmd = [
         sys.executable, "-m", "manim", "render",
@@ -156,7 +160,49 @@ def extract_frames(project: Project, sid: str, quality: str = "draft") -> dict:
     contact_sheet(
         [Path(x["path"]) for x in paths], [f"t={x['t']:.1f}s  {x['caption']}" for x in paths], sheet
     )
-    return {"dir": str(fdir), "frames": paths, "contact_sheet": str(sheet)}
+    # Frame 0, for checking the cut from the previous scene (not on the contact sheet).
+    start = grab_frame(video, 0.0, fdir / "start.png")
+    return {
+        "dir": str(fdir),
+        "frames": paths,
+        "contact_sheet": str(sheet),
+        "start_frame": str(start),
+        "end_frame": str(fdir / "end.png"),
+    }
+
+
+def render_still(project: Project, file: str, cls: str = "Gallery", timeout: int = 600) -> dict:
+    """Render the last frame of a plain Scene class (for example the drawing-library gallery)."""
+    src = Path(file)
+    if not src.is_absolute():
+        src = (project.scenes_dir / src) if (project.scenes_dir / src).exists() else src.resolve()
+    if not src.exists():
+        raise SystemExit(f"{src} does not exist")
+    media = project.root / ".media" / "still" / src.stem
+    shutil.rmtree(media, ignore_errors=True)
+    env = dict(os.environ)
+    env.update(
+        PYTHONWARNINGS="ignore",
+        PYTHONPATH=os.pathsep.join(
+            x for x in (str(project.scenes_dir), os.environ.get("PYTHONPATH", "")) if x
+        ),
+    )
+    cmd = [
+        sys.executable, "-m", "manim", "render", "-s",
+        "--resolution", "1280,720", "--media_dir", str(media),
+        "--disable_caching", "--progress_bar", "none", "-o", src.stem, str(src), cls,
+    ]  # fmt: skip
+    proc = subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=timeout, cwd=project.root
+    )
+    pngs = sorted(media.rglob("*.png"))
+    if proc.returncode != 0 or not pngs:
+        return {"ok": False, "error": "manim failed", "log_tail": _tail(proc.stderr or proc.stdout)}
+    out = project.frames_dir / "still" / f"{src.stem}.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(pngs[-1]), out)
+    shutil.rmtree(media, ignore_errors=True)
+    return {"ok": True, "image": str(out)}
 
 
 def grab_frame(video: Path, t: float, out: Path) -> Path:

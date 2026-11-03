@@ -1,11 +1,13 @@
 export const meta = {
   name: 'instructional-video',
-  description: 'Make an animated instructional video: OpenRouter writes the dialogue, Kokoro speaks it, Claude Opus agents animate each scene in Manim with a render-look-fix loop and an independent review, ffmpeg assembles',
+  description: 'Make an animated instructional video: OpenRouter writes the dialogue, Kokoro speaks it, Claude Opus agents design a shared drawing library, animate each scene in Manim with a render-look-fix loop, review independently, check scene cuts, and ffmpeg assembles',
   whenToUse: 'Run with args {topic, minutes?, audience?, speakers?, project?, sources?, model?} to produce instructional_video/projects/<project>/out/final.mp4. Re-run with the same project to resume: approved scenes are kept.',
   phases: [
     { title: 'Prepare', detail: 'setup check, OpenRouter dialogue, Kokoro voice, timing' },
+    { title: 'Design', detail: 'Claude Opus writes the shared drawing library and the scene-cut contracts', model: 'opus' },
     { title: 'Animate', detail: 'one Claude Opus animator per scene: write Manim, render, look at frames, fix', model: 'opus' },
     { title: 'Review', detail: 'independent Claude Opus reviewer per scene, repair loop', model: 'opus' },
+    { title: 'Continuity', detail: 'Claude Opus checks every scene cut and the overall look; flagged scenes are repaired', model: 'opus' },
     { title: 'Assemble', detail: '1080p renders, mux narration, subtitles, loudness' },
     { title: 'Final check', detail: 'Claude Opus checks the finished video', model: 'opus' },
   ],
@@ -40,6 +42,7 @@ const PREP_SCHEMA = {
     project_dir: { type: 'string', description: 'absolute path' },
     latex: { type: 'boolean' },
     dialogue_source: { type: 'string', description: 'openrouter:<model id> | existing script.json | script_file' },
+    new_script: { type: 'boolean', description: 'true if this run made a new script.json' },
     video_title: { type: 'string' },
     total_duration: { type: 'number' },
     speakers: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' }, role: { type: 'string' } }, required: ['id', 'name', 'role'] } },
@@ -59,6 +62,38 @@ const PREP_SCHEMA = {
   },
   required: ['ok', 'project', 'project_dir', 'latex', 'scenes'],
 }
+const DESIGN_SCHEMA = {
+  type: 'object',
+  properties: {
+    ok: { type: 'boolean' },
+    error: { type: 'string' },
+    gallery_image: { type: 'string' },
+    exports: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { name: { type: 'string' }, signature: { type: 'string' }, purpose: { type: 'string' }, used_in: { type: 'array', items: { type: 'string' } } },
+        required: ['name', 'signature', 'purpose'],
+      },
+    },
+    concept_colors: { type: 'array', items: { type: 'object', properties: { concept: { type: 'string' }, color: { type: 'string' } }, required: ['concept', 'color'] } },
+    cuts: {
+      type: 'array',
+      description: 'one entry per cut between consecutive scenes',
+      items: {
+        type: 'object',
+        properties: {
+          from_scene: { type: 'string' }, to_scene: { type: 'string' },
+          carry_over: { type: 'boolean', description: 'true if the next scene continues the same diagram' },
+          handoff: { type: 'string', description: 'name of the common.py function that builds the objects on screen at the cut (no title), or empty' },
+          description: { type: 'string' },
+        },
+        required: ['from_scene', 'to_scene', 'carry_over', 'handoff', 'description'],
+      },
+    },
+  },
+  required: ['ok', 'exports', 'cuts'],
+}
 const ANIM_SCHEMA = {
   type: 'object',
   properties: {
@@ -71,27 +106,42 @@ const ANIM_SCHEMA = {
   },
   required: ['scene', 'ok', 'renders', 'clean', 'remaining_issues'],
 }
+const ISSUE = {
+  type: 'object',
+  properties: {
+    line_index: { type: 'integer', description: '-1 for whole scene' },
+    severity: { type: 'string', enum: ['blocker', 'major', 'minor'] },
+    problem: { type: 'string' },
+    fix: { type: 'string' },
+  },
+  required: ['line_index', 'severity', 'problem', 'fix'],
+}
 const REVIEW_SCHEMA = {
   type: 'object',
   properties: {
     scene: { type: 'string' },
     pass: { type: 'boolean', description: 'true only if there is no blocker or major issue' },
     score: { type: 'integer', description: '1-10 overall quality as teaching animation' },
-    issues: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          line_index: { type: 'integer', description: '-1 for whole scene' },
-          severity: { type: 'string', enum: ['blocker', 'major', 'minor'] },
-          problem: { type: 'string' },
-          fix: { type: 'string' },
-        },
-        required: ['line_index', 'severity', 'problem', 'fix'],
-      },
-    },
+    issues: { type: 'array', items: ISSUE },
   },
   required: ['scene', 'pass', 'score', 'issues'],
+}
+const CONTINUITY_SCHEMA = {
+  type: 'object',
+  properties: {
+    pass: { type: 'boolean' },
+    fixes: {
+      type: 'array',
+      description: 'at most 3 scenes; only real problems a viewer would notice',
+      items: {
+        type: 'object',
+        properties: { scene: { type: 'string' }, issues: { type: 'array', items: ISSUE } },
+        required: ['scene', 'issues'],
+      },
+    },
+    notes: { type: 'string' },
+  },
+  required: ['pass', 'fixes'],
 }
 const ASSEMBLE_SCHEMA = {
   type: 'object',
@@ -130,10 +180,10 @@ Steps:
    - If args.script_file is set: copy that file to projects/<slug>/script.json.
    - Else if projects/<slug>/script.json exists and args.redo_dialogue is not true: keep it.
    - Else: run "uv run ivideo new <slug> --topic ..." with --audience, --minutes, --speakers, --notes and one --source per path in args.sources when given (quote arguments correctly). Then run "uv run ivideo dialogue <slug>" with --model args.model and one --fallback per args.fallbacks entry when given. If OPENROUTER_API_KEY is missing or the call fails, stop and return ok=false with the exact error.
-   - If you made a NEW script.json in a folder that had an old run, delete only these old outputs inside projects/<slug>/: status.json, timing.json, audio/, scenes/, renders/, frames/, out/.
+   - If you made a NEW script.json in a folder that had an old run, delete only these old outputs inside projects/<slug>/: status.json, timing.json, audio/, scenes/, renders/, frames/, out/. Set new_script=true.
 4. Voice: if timing.json is missing or older than script.json, run "uv run ivideo voice <slug>" (add --speed args.speed if given, and one --voice id=voice per entry of args.voices if given).
 5. Run "uv run ivideo brief <slug>" and "uv run ivideo status <slug>" and "uv run ivideo doctor".
-Return: project slug, absolute project_dir, latex (from doctor), dialogue_source, video_title, total_duration, speakers, and every scene with its id, title, learning_goal, visual_plan, duration, state (from status) and all lines with index, speaker, text, visual, start, end (copied exactly from brief).`, { label: 'prepare', phase: 'Prepare', schema: PREP_SCHEMA, effort: 'low' })
+Return: project slug, absolute project_dir, latex (from doctor), dialogue_source, new_script, video_title, total_duration, speakers, and every scene with its id, title, learning_goal, visual_plan, duration, state (from status) and all lines with index, speaker, text, visual, start, end (copied exactly from brief).`, { label: 'prepare', phase: 'Prepare', schema: PREP_SCHEMA, effort: 'low' })
 
 if (!prep || !prep.ok) {
   return { ok: false, stage: 'prepare', error: prep ? prep.error : 'prepare agent returned nothing' }
@@ -142,12 +192,9 @@ log(`${prep.video_title || prep.project}: ${prep.scenes.length} scenes, ${Math.r
 
 const P = prep.project
 const PDIR = prep.project_dir
-const outline = prep.scenes.map(s => `${s.id}: ${s.title} (goal: ${s.learning_goal})`).join('\n')
+const SCENES = prep.scenes
+const outline = SCENES.map(s => `${s.id}: ${s.title} (goal: ${s.learning_goal})`).join('\n')
 const speakers = (prep.speakers || []).map(s => `${s.id} = ${s.name}, ${s.role}`).join('; ')
-const redo = new Set(Array.isArray(A.redo_scenes) ? A.redo_scenes : [])
-const todo = prep.scenes.filter(s => s.state !== 'approved' || redo.has(s.id))
-const kept = prep.scenes.filter(s => !todo.includes(s))
-if (kept.length) log(`Keeping approved scenes: ${kept.map(s => s.id).join(', ')}`)
 
 const sceneBlock = s => `Scene ${s.id} "${s.title}". Learning goal: ${s.learning_goal}
 Overall visual plan: ${s.visual_plan}
@@ -157,6 +204,7 @@ ${s.lines.map(l => `  [${l.index}] ${l.start.toFixed(2)}-${l.end.toFixed(2)}s  $
 
 const API = `Scene file contract (Manim Community 0.22):
   from ivideo.synced import *          # gives all of manim, the style helpers, and SyncedScene
+  from common import *                 # this video's shared drawing library (scenes/common.py)
   class Main(SyncedScene):
       def construct(self):
           ...
@@ -167,19 +215,20 @@ SyncedScene API:
   self.fit(i, fraction=0.5, lo=0.3, hi=2.5)  a run_time that uses a fraction of the time left in line i.
   self.remaining(i)        seconds left in line i.   self.wait_until(t)   wait to absolute scene time t.
   self.scene_title, self.scene_duration, self.now
-  Background color is already set. Do not set config, resolution, or add_sound. Do not call self.wait() with long fixed times; use at_line/finish.
+  Background color is already set (BackgroundRectangle defaults to it too). Do not set config, resolution, or add_sound. Do not call self.wait() with long fixed times; use at_line/finish.
 Style helpers (use them so all scenes match): title(str) -> top-left title with underline; text(str, size=32, color=FG); label(str) (26 pt);
   colors BG FG MUTED ACCENT(blue) ACCENT_2(amber) GOOD(green) BAD(red) PURPLE; sizes TITLE_SIZE 40, BODY_SIZE 32, LABEL_SIZE 26, MIN_FONT_SIZE 20;
   safe_box() -> (left, right, bottom, top); content_top(); fit_width(mob). FONT = "DejaVu Sans".
 LaTeX is ${prep.latex ? 'installed: MathTex/Tex are allowed for formulas' : 'NOT installed: do not use MathTex, Tex, or anything that needs LaTeX; write formulas with Text'}.`
 
 const RULES = `Layout and teaching rules:
-- Start with title(self.scene_title) at the top-left during line 0; keep it unless the scene needs the space.
-- Each line gets a visible change that matches its words (appear, move, highlight, transform). Start it at at_line(i); finish it inside the line.
+- Lines[0] starts at about 0.6 s. Draw the title in that lead-in: before self.at_line(0), play FadeIn(title(self.scene_title)) or Write with run_time <= 0.5. The screen is never empty at the start.
+- Each line gets a visible change that matches its words (appear, move, highlight, transform). Start it at at_line(i); finish it inside the line. Objects appear when the narration names them, not later.
 - Keep at most about 6 visible elements. Fade out or move what the narration no longer talks about.
 - On-screen text: short labels (at most about 8 words), font size >= 24, never paragraphs, never the full narration.
-- Everything stays inside safe_box(). Use arrange/next_to with buff >= 0.25. Labels never sit on top of other text or lines; offset them or add a background (BackgroundRectangle / add_background_rectangle).
-- Same concept = same color in every scene. Diagrams over decoration. Prefer simple shapes (Circle, Square, Arrow, Line, Dot, Axes, NumberLine, Rectangle, Polygon).
+- Everything stays inside safe_box(). Use arrange/next_to with buff >= 0.25. Labels never sit on top of other text or lines; offset them or add_background_rectangle().
+- Use the shared library's drawing functions, positions, and concept colors for every object that also appears in other scenes. Never edit scenes/common.py (other agents use it at the same time); define anything else locally in your scene file.
+- Diagrams over decoration. Prefer simple shapes (Circle, Square, Arrow, Line, Dot, Axes, NumberLine, Rectangle, Polygon). Proportions must be right (sizes, angles, distances that the narration compares).
 - Motion is calm: run_times about 0.5-1.5 s; nothing flashes.
 - Accuracy: any number, term, or claim on screen must agree with the narration.`
 
@@ -187,10 +236,126 @@ const LOOP = (sid, maxRenders) => `Work loop (at most ${maxRenders} renders):
 1. Run "uv run ivideo render ${P} ${sid}" (480p draft). Read the JSON.
    - ok=false: read log_tail (and the .log file if needed), fix the code, render again.
    - layout_issues / drift / duration_error not ~0: fix them (drift means animations inside a line took longer than the line).
-2. LOOK at the frames: use the Read tool on frames.contact_sheet and on each frames/*.png it lists. Check each line's frame against its visual and words: right content, readable, nothing overlapping, nothing cut off, not empty, clear what to look at.
+2. LOOK at the frames: use the Read tool on frames.contact_sheet, on each frames/*.png it lists, and on frames.start_frame. Check each line's frame against its visual and words: right content, readable, nothing overlapping, nothing cut off, not empty, clear what to look at.
 3. Fix and render again until the report is clean and the frames look right.`
 
+// ---------- Design ----------
+phase('Design')
+const design = await agent(`${TOOL}
+
+You are the art director of the instructional video "${prep.video_title}" (project ${P}). Speakers: ${speakers}.
+Other agents will animate the ${SCENES.length} scenes IN PARALLEL, each seeing only its own scene. Without a shared library they draw the same thing in different ways and the scene cuts jump. Your job: write ${PDIR}/scenes/common.py so that every scene draws recurring things the same way, and so that scene cuts are seamless.
+
+All scenes:
+${SCENES.map(sceneBlock).join('\n\n')}
+
+${API}
+
+Write scenes/common.py:
+- First line: from ivideo.synced import *
+- A function for every object, icon, or diagram part that appears in more than one scene, or that is hard to draw (for example a camera icon, a drone, a sensor grid, an axis setup). Each returns a Mobject or VGroup and takes simple arguments (position, color, scale).
+- Named position constants for recurring objects, so every scene puts them in the same place inside safe_box() and below the title (content_top()).
+- A dict CONCEPT_COLORS mapping each recurring concept to one style color (ACCENT, ACCENT_2, GOOD, BAD, PURPLE, MUTED, FG).
+- For each cut between consecutive scenes, decide if the next scene continues the same diagram (carry_over). If yes, write a function handoff_<from>_<to>() that builds exactly the objects that are on screen at the cut (no title), at their positions. The outgoing scene must end showing exactly these; the incoming scene starts with self.add(*handoff_<from>_<to>()) at frame 0. If no carry-over, the outgoing scene may end with its diagram and the incoming scene starts clean with its title.
+- A class Gallery(Scene) that sets self.camera.background_color = BG and shows every drawing function once, side by side with small labels, inside the frame.
+- Do not put scene-specific animation in common.py. Keep it importable without side effects.
+${A.redo_design ? 'Replace any existing scenes/common.py.' : 'If scenes/common.py already exists, keep it unless it is broken; read it and report its exports and cuts.'}
+
+Check it: run "uv run ivideo still ${P} common.py" and use the Read tool on the image. Fix anything that is ugly, wrong in proportion, overlapping, or off frame. At most 4 stills.
+Return ok, gallery_image, exports (name, signature, purpose, used_in scene ids), concept_colors, and cuts (one per consecutive pair, with carry_over, handoff function name or empty, and a one-line description).`, { label: 'design', phase: 'Design', schema: DESIGN_SCHEMA, model: ANIM_MODEL })
+
+if (!design || !design.ok) {
+  return { ok: false, stage: 'design', project_dir: PDIR, error: design ? design.error : 'design agent returned nothing' }
+}
+const LIB = `Shared library scenes/common.py (import with "from common import *"):
+${design.exports.map(e => `  ${e.signature}  ${e.purpose}${e.used_in && e.used_in.length ? ` [used in ${e.used_in.join(', ')}]` : ''}`).join('\n')}
+${(design.concept_colors || []).length ? `Concept colors: ${design.concept_colors.map(c => `${c.concept}=${c.color}`).join(', ')}` : ''}`
+
+const cutNote = s => {
+  const into = design.cuts.find(c => c.to_scene === s.id)
+  const out = design.cuts.find(c => c.from_scene === s.id)
+  const parts = []
+  if (into && into.carry_over && into.handoff) parts.push(`START: this scene continues ${into.from_scene}'s diagram. The very first statement in construct() is self.add(*${into.handoff}()) so those objects are on screen from frame 0 with no animation. (${into.description})`)
+  else parts.push('START: this scene starts from an empty background; draw the title in the lead-in.')
+  if (out && out.carry_over && out.handoff) parts.push(`END: the next scene ${out.to_scene} continues from here. At finish(), exactly the objects of ${out.handoff}() must be on screen at the same positions and look (plus your title); nothing else. Build them with that function or Transform into it. (${out.description})`)
+  else if (out) parts.push(`END: the next scene ${out.to_scene} starts clean; end on a clear final picture.`)
+  return `Scene cut contract:\n- ${parts.join('\n- ')}`
+}
+
 // ---------- Animate + Review (pipeline per scene) ----------
+const redo = new Set(Array.isArray(A.redo_scenes) ? A.redo_scenes : [])
+const todo = SCENES.filter(s => s.state !== 'approved' || redo.has(s.id))
+const kept = SCENES.filter(s => !todo.includes(s))
+if (kept.length) log(`Keeping approved scenes: ${kept.map(s => s.id).join(', ')}`)
+
+const reviewAgent = s => agent(`${TOOL}
+
+You are an independent reviewer of one animated scene of an instructional video "${prep.video_title}". You did not make it. Do NOT edit any file except through "uv run ivideo mark".
+Be strict: a viewer must understand each line from the screen plus the voice.
+
+${sceneBlock(s)}
+
+${cutNote(s)}
+
+${LIB}
+
+Steps:
+1. Run "uv run ivideo frames ${P} ${s.id}" and read ${PDIR}/renders/draft/${s.id}.report.json.
+2. Use the Read tool to look at the contact sheet, at EVERY frame PNG it lists (one per line, at 70% through the line, plus the last frame), and at start_frame.
+3. For each line judge: does the screen show what the words talk about, at the time they say it (the visual field is the plan; small deviations are fine if clear)? Is all text readable (size, contrast) and spelled right? Any overlap, cut-off, clutter, or empty screen? Any on-screen claim or proportion that disagrees with the narration? Is there a visible change between consecutive lines? Does the start frame and the last frame follow the scene cut contract?
+4. Severity: blocker = broken, unreadable, wrong facts, or nothing matches the words; major = overlap, cut-off text, clutter, a line with no matching visual, timing clearly off, cut contract broken; minor = polish.
+5. Set "pass" to true only if there is no blocker and no major issue. If it passes, run "uv run ivideo mark ${P} ${s.id} approved --note 'score N'".
+Give each issue a concrete fix an animator can apply (what object, where, what change).`, { label: `review:${s.id}`, phase: 'Review', schema: REVIEW_SCHEMA, model: ANIM_MODEL })
+
+const repairAgent = (s, why, tag, phaseName) => agent(`${TOOL}
+
+You repair one animated scene of an instructional video "${prep.video_title}". Edit ${PDIR}/scenes/${s.id}.py only.
+
+${why}
+
+${sceneBlock(s)}
+
+${cutNote(s)}
+
+${LIB}
+
+${API}
+
+${RULES}
+
+${LOOP(s.id, Math.max(3, Math.floor(MAX_RENDERS / 2)))}
+
+When done, run "uv run ivideo mark ${P} ${s.id} written --note '${tag}'". Return the result.`, { label: `repair:${s.id}#${tag}`, phase: phaseName, schema: ANIM_SCHEMA, model: ANIM_MODEL })
+
+const issueText = issues => issues
+  .slice().sort((a, b) => (a.severity === 'minor') - (b.severity === 'minor'))
+  .map(i => `- [${i.severity}] line ${i.line_index}: ${i.problem} -> fix: ${i.fix}`).join('\n')
+
+// Review, and repair until approved or out of rounds. firstIssues: start with a repair (continuity fixes).
+const reviewLoop = async (s, anim, maxRounds, phaseName, firstIssues) => {
+  const history = []
+  let rv = null
+  let round = 0
+  if (firstIssues) {
+    round++
+    const fixed = await repairAgent(s, `A continuity reviewer, who compared all scene cuts, asked for these changes. Make them without breaking what already works:\n${issueText(firstIssues)}`, `continuity ${round}`, phaseName)
+    history.push({ round, issues: firstIssues, repair: fixed })
+    if (fixed && fixed.ok) rv = await reviewAgent(s)
+  } else if (anim && anim.ok) {
+    rv = await reviewAgent(s)
+  }
+  while (round < maxRounds && (!rv || !rv.pass)) {
+    round++
+    const why = rv
+      ? `An independent reviewer rejected the scene. Fix every blocker and major issue; fix minor ones if cheap:\n${issueText(rv.issues)}`
+      : `The previous agent did not finish with a working render${anim ? `: ${JSON.stringify(anim.remaining_issues)}` : ''}. Make the scene render and look right.`
+    const fixed = await repairAgent(s, why, `round ${round}`, phaseName)
+    history.push({ round, review: rv, repair: fixed })
+    rv = fixed && fixed.ok ? await reviewAgent(s) : rv
+  }
+  return { scene: s.id, title: s.title, animate: anim, review: rv, repair_rounds: round, approved: !!(rv && rv.pass), history }
+}
+
 const results = await pipeline(
   todo,
   s => agent(`${TOOL}
@@ -203,6 +368,10 @@ ${outline}
 
 ${sceneBlock(s)}
 
+${cutNote(s)}
+
+${LIB}
+
 ${API}
 
 ${RULES}
@@ -211,57 +380,45 @@ ${LOOP(s.id, MAX_RENDERS)}
 
 If the scene file already exists from an earlier run, start from it and improve it.
 When done, run "uv run ivideo mark ${P} ${s.id} written --note '<one line>'". Return the result.`, { label: `animate:${s.id}`, phase: 'Animate', schema: ANIM_SCHEMA, model: ANIM_MODEL }),
-
-  async (anim, s) => {
-    const rounds = []
-    const review = () => agent(`${TOOL}
-
-You are an independent reviewer of one animated scene of an instructional video "${prep.video_title}". You did not make it. Do NOT edit any file except through "uv run ivideo mark".
-Be strict: a viewer must understand each line from the screen plus the voice.
-
-${sceneBlock(s)}
-
-Steps:
-1. Run "uv run ivideo frames ${P} ${s.id}" and read ${PDIR}/renders/draft/${s.id}.report.json.
-2. Use the Read tool to look at the contact sheet and at EVERY frame PNG it lists (one per line, at 70% through the line, plus the last frame).
-3. For each line judge: does the screen show what the words talk about (the visual field is the plan; small deviations are fine if clear)? Is all text readable (size, contrast) and spelled right? Any overlap, cut-off, clutter, or empty screen? Any on-screen claim that disagrees with the narration? Is there a visible change between consecutive lines?
-4. Severity: blocker = broken, unreadable, wrong facts, or nothing matches the words; major = overlap, cut-off text, clutter, a line with no matching visual, timing clearly off; minor = polish.
-5. Set "pass" to true only if there is no blocker and no major issue. If pass, run "uv run ivideo mark ${P} ${s.id} approved --note 'score N'".
-Give each issue a concrete fix an animator can apply (what object, where, what change).`, { label: `review:${s.id}`, phase: 'Review', schema: REVIEW_SCHEMA, model: ANIM_MODEL })
-
-    let rv = anim && anim.ok ? await review() : null
-    let round = 0
-    while (round < MAX_FIX_ROUNDS && (!rv || !rv.pass)) {
-      round++
-      const issues = rv ? rv.issues.filter(i => i.severity !== 'minor').concat(rv.issues.filter(i => i.severity === 'minor')) : []
-      const fixPrompt = rv
-        ? `An independent reviewer rejected the scene. Fix every blocker and major issue; fix minor ones if cheap:\n${issues.map(i => `- [${i.severity}] line ${i.line_index}: ${i.problem} -> fix: ${i.fix}`).join('\n')}`
-        : `The previous animator did not finish with a working render${anim ? `: ${JSON.stringify(anim.remaining_issues)}` : ''}. Make the scene render and look right.`
-      const fixed = await agent(`${TOOL}
-
-You repair one animated scene of an instructional video "${prep.video_title}". Edit ${PDIR}/scenes/${s.id}.py.
-
-${fixPrompt}
-
-${sceneBlock(s)}
-
-${API}
-
-${RULES}
-
-${LOOP(s.id, Math.max(3, Math.floor(MAX_RENDERS / 2)))}
-
-When done, run "uv run ivideo mark ${P} ${s.id} written --note 'repair round ${round}'". Return the result.`, { label: `repair:${s.id}#${round}`, phase: 'Review', schema: ANIM_SCHEMA, model: ANIM_MODEL })
-      rounds.push({ round, review: rv, repair: fixed })
-      rv = fixed && fixed.ok ? await review() : rv
-    }
-    return { scene: s.id, title: s.title, animate: anim, review: rv, repair_rounds: round, approved: !!(rv && rv.pass), history: rounds }
-  },
+  (anim, s) => reviewLoop(s, anim, MAX_FIX_ROUNDS, 'Review'),
 )
 
-const sceneResults = results.map((r, i) => r || { scene: todo[i].id, approved: false, error: 'agent failed' })
-const notApproved = sceneResults.filter(r => !r.approved).map(r => r.scene)
-if (notApproved.length) log(`Not approved after ${MAX_FIX_ROUNDS} repair rounds: ${notApproved.join(', ')} (assembled anyway; see results)`)
+const sceneResults = {}
+results.forEach((r, i) => { sceneResults[todo[i].id] = r || { scene: todo[i].id, approved: false, error: 'agent failed' } })
+kept.forEach(s => { sceneResults[s.id] = { scene: s.id, approved: true, kept: true } })
+
+// ---------- Continuity (needs every scene: barrier) ----------
+phase('Continuity')
+let continuity = null
+if (SCENES.length > 1) {
+  continuity = await agent(`${TOOL}
+
+You check how the scenes of the instructional video "${prep.video_title}" (project ${P}) fit together. Do not edit files.
+Scene cut contracts from the art director:
+${design.cuts.map(c => `- ${c.from_scene} -> ${c.to_scene}: ${c.carry_over ? `carry over via ${c.handoff}()` : 'clean start'}. ${c.description}`).join('\n')}
+
+Steps:
+1. For every scene id (${SCENES.map(s => s.id).join(', ')}), run "uv run ivideo frames ${P} <id>" (this refreshes start.png, the line frames, and end.png from the latest draft render).
+2. For every cut, use the Read tool on the outgoing scene's end.png and the incoming scene's start.png (both in ${PDIR}/frames/draft/<id>/). For a carry-over cut, the shared objects must match in position, size, shape, and color, and nothing should blink or jump. For a clean cut, the new scene must not open on an empty screen for long.
+3. Read every scene's contact_sheet.png. Check the whole video looks like one piece: same title placement, fonts, sizes, colors per concept, and drawing style; no scene repeats another's content.
+4. List fixes only for problems a viewer would notice, at most 3 scenes, each with concrete issues (severity, problem, fix). Set "pass" to true if there are no fixes.`, { label: 'continuity', phase: 'Continuity', schema: CONTINUITY_SCHEMA, model: ANIM_MODEL })
+
+  const fixes = continuity && !continuity.pass ? (continuity.fixes || []).slice(0, 3) : []
+  const dropped = continuity && continuity.fixes ? continuity.fixes.length - fixes.length : 0
+  if (dropped > 0) log(`Continuity: ${dropped} extra fix request(s) dropped (cap 3)`)
+  if (fixes.length) {
+    log(`Continuity fixes: ${fixes.map(f => f.scene).join(', ')}`)
+    const fixed = await pipeline(
+      fixes.filter(f => SCENES.find(s => s.id === f.scene)),
+      f => reviewLoop(SCENES.find(s => s.id === f.scene), null, 2, 'Continuity', f.issues),
+    )
+    fixed.filter(Boolean).forEach(r => { sceneResults[r.scene] = { ...r, continuity_fix: true } })
+  }
+}
+
+const allResults = SCENES.map(s => sceneResults[s.id])
+const notApproved = allResults.filter(r => !r.approved).map(r => r.scene)
+if (notApproved.length) log(`Not approved: ${notApproved.join(', ')} (assembled anyway; see results)`)
 
 // ---------- Assemble ----------
 phase('Assemble')
@@ -273,7 +430,7 @@ Assemble the finished video for project ${P}.
 3. Return the assemble JSON fields (final, subtitles, contact_sheet, duration, expected_duration, streams) and ok. List scenes that could not be rendered in failed_scenes.`, { label: 'assemble', phase: 'Assemble', schema: ASSEMBLE_SCHEMA, effort: 'low' })
 
 if (!asm || !asm.ok) {
-  return { ok: false, stage: 'assemble', project_dir: PDIR, error: asm ? asm.error : 'assemble agent returned nothing', scenes: sceneResults }
+  return { ok: false, stage: 'assemble', project_dir: PDIR, error: asm ? asm.error : 'assemble agent returned nothing', scenes: allResults }
 }
 
 // ---------- Final check ----------
@@ -283,7 +440,7 @@ const fin = await agent(`${TOOL}
 Check the finished instructional video ${asm.final} (project ${P}). Do not edit files.
 1. Read ${PDIR}/out/assembly.json. Duration must be within 0.5 s of expected_duration; streams must include h264 video, aac audio, and mov_text subtitles (unless subtitles were burned in).
 2. Audio: run ffmpeg -i ${asm.final} -af volumedetect -vn -f null - and confirm mean_volume is not silent (above -40 dB).
-3. Use the Read tool on ${asm.contact_sheet} and on 3 more frames you grab at scene boundaries (ffmpeg -ss <t> -i ${asm.final} -frames:v 1 /tmp/x.png; offsets are in assembly.json). Check that the scenes look like one video: same background, title placement, fonts, and colors; nothing broken at 1080p.
+3. Use the Read tool on ${asm.contact_sheet} and on frames you grab just before and just after each scene boundary (ffmpeg -ss <t> -i ${asm.final} -frames:v 1 <scratch>.png; offsets are in assembly.json). Check that the scenes look like one video: same background, title placement, fonts, and colors; carried-over objects do not jump; nothing broken at 1080p.
 4. Read ${PDIR}/out/final.srt briefly: line order and speaker names make sense.
 Return pass, audio_ok, duration_ok, consistency_ok, issues, and a 3-sentence summary.`, { label: 'final-check', phase: 'Final check', schema: FINAL_SCHEMA, model: ANIM_MODEL })
 
@@ -296,7 +453,9 @@ return {
   contact_sheet: asm.contact_sheet,
   duration: asm.duration,
   dialogue_source: prep.dialogue_source,
+  design: { gallery: design.gallery_image, exports: design.exports.map(e => e.name), cuts: design.cuts },
   scenes_kept: kept.map(s => s.id),
-  scenes: sceneResults.map(r => ({ scene: r.scene, approved: r.approved, score: r.review ? r.review.score : null, repair_rounds: r.repair_rounds, open_issues: r.review ? r.review.issues : [] })),
+  continuity,
+  scenes: allResults.map(r => ({ scene: r.scene, approved: r.approved, kept: !!r.kept, continuity_fix: !!r.continuity_fix, score: r.review ? r.review.score : null, repair_rounds: r.repair_rounds || 0, open_issues: r.review ? r.review.issues : [] })),
   final_check: fin,
 }

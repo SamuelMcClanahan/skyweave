@@ -8,6 +8,7 @@ ivideo brief <project> [<scene>]          # scene data an animator needs
 ivideo render <project> <scene> [--quality draft|final] [--no-frames]
 ivideo render-all <project> [--quality final]
 ivideo frames <project> <scene> [--quality draft]
+ivideo still <project> <file.py> [--class Gallery]   # last frame of a plain Scene
 ivideo mark <project> <scene> <state> [--note ..]
 ivideo assemble <project> [--burn-subtitles]
 ivideo status <project>
@@ -208,6 +209,12 @@ def cmd_frames(a) -> dict:
     return extract_frames(Project.open(a.project), a.scene, a.quality)
 
 
+def cmd_still(a) -> dict:
+    from .render import render_still
+
+    return render_still(Project.open(a.project), a.file, a.cls)
+
+
 def cmd_mark(a) -> dict:
     proj = Project.open(a.project)
     return proj.set_scene_state(a.scene, a.state, a.note or "")
@@ -305,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("scene")
     f.add_argument("--quality", default="draft", choices=["draft", "final"])
     f.set_defaults(fn=cmd_frames)
+
+    sl = sub.add_parser("still", help="render the last frame of a plain Scene (e.g. the gallery)")
+    sl.add_argument("project")
+    sl.add_argument("file", help="path, or a file name inside the project's scenes/ folder")
+    sl.add_argument("--class", dest="cls", default="Gallery")
+    sl.set_defaults(fn=cmd_still)
 
     m = sub.add_parser("mark")
     m.add_argument("project")
