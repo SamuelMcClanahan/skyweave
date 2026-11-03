@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -219,10 +220,11 @@ def contact_sheet(
     for i, (im, cap) in enumerate(zip(ims, captions, strict=True)):
         x, y = (i % cols) * width, (i // cols) * (h + cap_h)
         sheet.paste(im.resize((width, h)), (x, y + cap_h))
-        text = cap if len(cap) <= 170 else cap[:167] + "..."
-        draw.text((x + 6, y + 4), text[:85], fill=(235, 235, 235), font=font)
-        if len(text) > 85:
-            draw.text((x + 6, y + 22), text[85:], fill=(235, 235, 235), font=font)
+        rows_txt = textwrap.wrap(
+            cap, width=max(20, int(width / 7.6)), max_lines=2, placeholder="..."
+        )
+        for k, row in enumerate(rows_txt):
+            draw.text((x + 6, y + 4 + 18 * k), row, fill=(235, 235, 235), font=font)
     out.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(out)
     return out
