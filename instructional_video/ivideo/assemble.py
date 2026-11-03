@@ -28,6 +28,7 @@ AR = 48_000
 TARGET_LUFS = -16.0
 TARGET_TP = -1.5
 MAX_SILENCE = 1.7  # longest planned gap is tail 1.0 s + next lead-in 0.6 s
+AAC_PAD = 0.05  # AAC encodes whole 1024-sample frames (21.3 ms at 48 kHz) plus priming
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -175,7 +176,8 @@ def assemble(
         cmd += ["-i", str(srt), "-map", "0:v", "-map", "1:a", "-map", "2:s", "-c:v", "copy"]
         cmd += ["-c:s", "mov_text", "-metadata:s:s:0", "language=eng"]
     cmd += ["-af", norm, "-c:a", "aac", "-b:a", "160k", "-ar", str(AR), "-ac", "2"]
-    cmd += ["-movflags", "+faststart", str(final)]
+    # Cut at the video length: AAC pads its last frame, which would make the file longer.
+    cmd += ["-t", f"{cursor:.6f}", "-movflags", "+faststart", str(final)]
     _run(cmd)
 
     # A preview sheet: one frame from the middle of every scene.
@@ -203,7 +205,14 @@ def assemble(
         "scenes": per_scene,
         "offsets": {k: round(v, 4) for k, v in offsets.items()},
         "streams": _streams(final),
-        "qa": qa(final, expected=cursor, n_lines=n_lines, srt=srt, burned=burn_subtitles),
+        "qa": qa(
+            final,
+            expected=cursor,
+            frames=sum(p["frames"] for p in per_scene),
+            n_lines=n_lines,
+            srt=srt,
+            burned=burn_subtitles,
+        ),
     }
     write_json(project.out_dir / "assembly.json", result)
     return result
@@ -218,12 +227,20 @@ def _streams(path: Path) -> list[str]:
     return [ln for ln in out.splitlines() if ln.strip()]
 
 
-def qa(final: Path, *, expected: float, n_lines: int, srt: Path, burned: bool) -> dict:
+def qa(final: Path, *, expected: float, frames: int, n_lines: int, srt: Path, burned: bool) -> dict:
     """Deterministic checks on the finished file. `ok` is true only if all pass."""
     checks: dict = {}
     dur = probe_duration(final)
+    vframes = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
+         "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(final)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()  # fmt: skip
+    checks["video_frames"] = int(vframes) if vframes.isdigit() else None
+    checks["expected_frames"] = frames
     checks["duration_error_s"] = round(dur - expected, 4)
-    checks["duration_ok"] = abs(dur - expected) <= 1.5 / FPS
+    # Video must be frame-exact. The file may run up to AAC_PAD longer (AAC frame padding).
+    checks["duration_ok"] = checks["video_frames"] == frames and -1e-3 <= dur - expected <= AAC_PAD
     streams = " ".join(_streams(final))
     checks["streams_ok"] = (
         "h264" in streams

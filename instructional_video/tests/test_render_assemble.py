@@ -48,7 +48,8 @@ def test_assemble(project):
         assert render_scene(project, sid, "draft", frames=False)["ok"]
     out = assemble(project, quality="draft")
     timing = json.loads(project.timing.read_text())
-    assert abs(out["duration"] - out["expected_duration"]) <= 1.5 / 30
+    assert 0 <= out["duration"] - out["expected_duration"] <= 0.05
+    assert out["qa"]["video_frames"] == out["qa"]["expected_frames"]
     assert abs(out["expected_duration"] - timing["total_duration"]) < 0.3
     kinds = " ".join(out["streams"])
     assert "h264" in kinds and "aac" in kinds and "mov_text" in kinds
