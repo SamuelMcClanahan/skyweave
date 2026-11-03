@@ -1,0 +1,30 @@
+{
+  "title": "How two cameras find a drone",
+  "summary": "Test fixture, hand-written (not from OpenRouter). Two scenes on triangulation, used by the test suite and the dry-run demo.",
+  "speakers": [
+    {"id": "host", "name": "Maya", "role": "teacher"},
+    {"id": "learner", "name": "Sam", "role": "learner"}
+  ],
+  "scenes": [
+    {
+      "title": "One camera is not enough",
+      "learning_goal": "A single camera gives a direction, not a distance.",
+      "visual_plan": "A camera icon on the left, a drone dot on the right, a ray from the camera through the drone that keeps going.",
+      "lines": [
+        {"speaker": "learner", "text": "If a camera sees a drone, doesn't it know where the drone is?", "visual": "A camera shape appears at left. A small drone dot appears at upper right."},
+        {"speaker": "host", "text": "It knows the direction. Every point on this ray looks the same to that camera.", "visual": "A ray draws from the camera through the drone and on to the frame edge. Two ghost drone dots appear on the ray, nearer and farther."},
+        {"speaker": "learner", "text": "So the drone could be close and small, or far away and big.", "visual": "The near ghost dot shrinks and the far ghost dot grows, then both fade out."}
+      ]
+    },
+    {
+      "title": "Two rays meet at one point",
+      "learning_goal": "Two cameras give two rays; where they cross is the drone.",
+      "visual_plan": "Add a second camera at the bottom right. Draw its ray. Highlight the crossing point and label it.",
+      "lines": [
+        {"speaker": "host", "text": "Now add a second camera somewhere else. It draws its own ray toward the drone.", "visual": "A second camera appears at lower right. A second ray draws toward the drone in amber."},
+        {"speaker": "learner", "text": "And the drone has to be where the two rays cross.", "visual": "The crossing point pulses. A green ring appears around it with the label 'drone'."},
+        {"speaker": "host", "text": "Exactly. That crossing is called triangulation.", "visual": "The word 'triangulation' appears under the diagram, and the triangle between both cameras and the drone fills lightly."}
+      ]
+    }
+  ]
+}
