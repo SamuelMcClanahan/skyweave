@@ -181,7 +181,7 @@ def _silence(seconds: float) -> np.ndarray:
 TRIM_THRESH = 10 ** (-45 / 20)
 
 
-def _trim(x: np.ndarray, thresh: float = TRIM_THRESH, pad: float = 0.05) -> np.ndarray:
+def _trim(x: np.ndarray, thresh: float = TRIM_THRESH, pad: float = 0.03) -> np.ndarray:
     """Cut leading/trailing near-silence so gaps are set by us, not by the engine."""
     idx = np.flatnonzero(np.abs(x) > thresh)
     if idx.size == 0:

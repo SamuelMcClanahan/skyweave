@@ -322,5 +322,5 @@ def test_trim_cuts_engine_noise_floor():
     t = np.arange(SAMPLE_RATE) / SAMPLE_RATE
     speech = (0.5 * np.sin(2 * np.pi * 200 * t)).astype(np.float32)
     out = _trim(np.concatenate([noise, speech, noise]))
-    # only the 0.05 s pad is left on each side of the 1.0 s of speech
-    assert abs(len(out) / SAMPLE_RATE - 1.1) < 0.01
+    # only the 0.03 s pad is left on each side of the 1.0 s of speech
+    assert abs(len(out) / SAMPLE_RATE - 1.06) < 0.01
