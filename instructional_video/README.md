@@ -91,11 +91,14 @@ Every Claude agent runs on `claude-opus-5-5` at effort `high`.
 3. **Voice** (1 agent): OpenRouter `heygen/heygen-voice-1-turbo:free` speaks each line;
    the tool measures the time of each line. A line is spoken again only if its text,
    voice, or model changed.
-4. **Design** (1 Claude Opus agent): writes `scenes/common.py`, the shared drawing
-   library for this video. It holds a drawing function for each object that more
-   than one scene uses, fixed positions, one color per concept, and a "handoff"
-   function for each scene cut where the next scene continues the same diagram.
-   It renders a gallery image of the library and checks it.
+4. **Design** (Claude Opus 5.5, in two parts):
+   - A plan agent (no renders) writes `scenes/spec.py` (positions, sizes, one color
+     per concept, TeX colors) and `scenes/common.py` (handoff functions for scene cuts),
+     and lists every shared drawing part with its signature and the scenes that use it.
+   - Part builders, one per scene that brings new parts, write `scenes/parts_sNN.py`
+     in parallel and check them with one gallery still each.
+   - Each animator starts as soon as the part files for its own scene are done.
+     If a part file fails, that animator draws those parts itself.
 5. **Animate** (1 Claude Opus agent per scene, in parallel): writes `scenes/sNN.py`,
    renders a 480p draft, looks at one frame per line, and fixes problems.
 6. **Review** (1 Claude Opus agent per scene, that did not write the code):
@@ -196,7 +199,7 @@ instead. The workflow does not use it. How that request works (`ivideo/openroute
 ## 6. Tests
 
 ```bash
-uv run pytest        # 29 tests, about 30 s; no network and no key needed
+uv run pytest        # 30 tests, about 30 s; no network and no key needed
 uv run ruff check .
 ```
 

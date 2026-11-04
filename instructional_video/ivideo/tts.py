@@ -65,7 +65,14 @@ def decode_audio(data: bytes, ctype: str = "") -> np.ndarray:
         # "audio/pcm;rate=44100;channels=1" (HeyGen). Fall back to 24 kHz mono.
         rate = re.search(r"rate=(\d+)", ctype)
         ch = re.search(r"channels=(\d+)", ctype)
-        fmt = ["-f", "s16le", "-ar", rate.group(1) if rate else "24000", "-ac", ch.group(1) if ch else "1"]
+        fmt = [
+            "-f",
+            "s16le",
+            "-ar",
+            rate.group(1) if rate else "24000",
+            "-ac",
+            ch.group(1) if ch else "1",
+        ]
     proc = subprocess.run(
         [
             "ffmpeg",

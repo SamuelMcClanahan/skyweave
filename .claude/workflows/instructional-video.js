@@ -6,7 +6,7 @@ export const meta = {
     { title: 'Prepare', detail: 'setup check, project brief' },
     { title: 'Script', detail: 'Claude Opus 5.5 writes the spoken dialogue and the visual beats', model: 'claude-opus-5-5' },
     { title: 'Voice', detail: 'OpenRouter heygen/heygen-voice-1-turbo:free speaks each line; timing' },
-    { title: 'Design', detail: 'Claude Opus writes the shared drawing library and the scene-cut contracts', model: 'claude-opus-5-5' },
+    { title: 'Design', detail: 'Claude Opus plans the shared library (no renders), then builders write one parts file per scene in parallel', model: 'claude-opus-5-5' },
     { title: 'Animate', detail: 'one Claude Opus animator per scene: write Manim, render, look at frames, fix', model: 'claude-opus-5-5' },
     { title: 'Review', detail: 'independent Claude Opus reviewer per scene, repair loop', model: 'claude-opus-5-5' },
     { title: 'Continuity', detail: 'Claude Opus checks every scene cut and the overall look; flagged scenes are repaired', model: 'claude-opus-5-5' },
@@ -74,15 +74,21 @@ const DESIGN_SCHEMA = {
   properties: {
     ok: { type: 'boolean' },
     error: { type: 'string' },
-    gallery_image: { type: 'string' },
-    exports: {
+    parts: {
       type: 'array',
+      description: 'every shared drawing function; builders implement them in parallel',
       items: {
         type: 'object',
-        properties: { name: { type: 'string' }, signature: { type: 'string' }, purpose: { type: 'string' }, used_in: { type: 'array', items: { type: 'string' } } },
-        required: ['name', 'signature', 'purpose'],
+        properties: {
+          name: { type: 'string' },
+          signature: { type: 'string', description: 'exact Python signature, e.g. camera_icon(pos=CAM1_POS, color=BLUE, scale=1.0) -> VGroup' },
+          purpose: { type: 'string', description: 'what it draws, size, colors, look' },
+          used_in: { type: 'array', items: { type: 'string' }, description: 'every scene id that uses it' },
+        },
+        required: ['name', 'signature', 'purpose', 'used_in'],
       },
     },
+    built_files: { type: 'array', items: { type: 'string' }, description: 'parts_<scene>.py files that already exist and are complete (resume)' },
     concept_colors: { type: 'array', items: { type: 'object', properties: { concept: { type: 'string' }, color: { type: 'string' } }, required: ['concept', 'color'] } },
     cuts: {
       type: 'array',
@@ -99,7 +105,12 @@ const DESIGN_SCHEMA = {
       },
     },
   },
-  required: ['ok', 'exports', 'cuts'],
+  required: ['ok', 'parts', 'cuts'],
+}
+const BUILD_SCHEMA = {
+  type: 'object',
+  properties: { ok: { type: 'boolean' }, file: { type: 'string' }, gallery_image: { type: 'string' }, error: { type: 'string' }, notes: { type: 'string' } },
+  required: ['ok'],
 }
 const ANIM_SCHEMA = {
   type: 'object',
@@ -303,12 +314,14 @@ const LOOP = (sid, maxRenders) => `Work loop (at most ${maxRenders} renders):
 2. LOOK at the frames: use the Read tool on frames.contact_sheet, on each frames/*.png it lists (each is taken just before its line ends, when the layout should be settled), and on frames.start_frame. Check each line's frame against its visual and words: right content, readable, nothing overlapping, nothing cut off, not empty, clear what to look at.
 3. Fix and render again until the report is clean and the frames look right.`
 
-// ---------- Design ----------
+// ---------- Design (plan, then parts built in parallel) ----------
 phase('Design')
+const ORDER = SCENES.map(s => s.id)
 const design = await agent(`${TOOL}
 
 You are the art director of the instructional video "${prep.video_title}" (project ${P}). Speakers: ${speakers}.
-Other agents will animate the ${SCENES.length} scenes IN PARALLEL, each seeing only its own scene. Without a shared library they draw the same thing in different ways and the scene cuts jump. Your job: write ${PDIR}/scenes/common.py so that every scene draws recurring things the same way, and so that scene cuts are seamless.
+Other agents animate the ${SCENES.length} scenes IN PARALLEL, each seeing only its own scene. Without a shared library they draw the same thing in different ways and the scene cuts jump.
+You only PLAN the library and write two small files. Other agents build the drawing functions in parallel right after you, one file per scene, so be fast: do not render anything.
 
 All scenes:
 ${SCENES.map(sceneBlock).join('\n\n')}
@@ -317,26 +330,80 @@ ${API}
 
 ${STYLE}
 
-Write scenes/common.py:
-- First line: from ivideo.synced import *
-- A function for every object, icon, or diagram part that appears in more than one scene, or that is hard to draw (for example a camera icon, a drone, a sensor grid, an axis setup). Each returns a Mobject or VGroup and takes simple arguments (position, color, scale).
-- Named position constants for recurring objects, so every scene puts them in the same place inside safe_box() and below the title (content_top()).
-- A dict CONCEPT_COLORS mapping each recurring concept, quantity, or variable to ONE color from the 3b1b palette (BLUE, YELLOW, GREEN, RED, TEAL, GOLD, PURPLE, PINK, MAROON, GREY_B). Also a dict TEX_COLORS mapping TeX substrings (for example "x", "\\theta") to the same colors, for MathTex(..., tex_to_color_map=TEX_COLORS).
-- Follow the visual style below for every drawing function.
-- For each cut between consecutive scenes, decide if the next scene continues the same diagram (carry_over). If yes, write a function handoff_<from>_<to>() that builds exactly the objects that are on screen at the cut (no title), at their positions. The outgoing scene must end showing exactly these; the incoming scene starts with self.add(*handoff_<from>_<to>()) at frame 0. If no carry-over, the outgoing scene may end with its diagram and the incoming scene starts clean with its title.
-- A class Gallery(Scene) that sets self.camera.background_color = BG and shows every drawing function once, side by side with small labels, inside the frame.
-- Do not put scene-specific animation in common.py. Keep it importable without side effects.
-${A.redo_design ? 'Replace any existing scenes/common.py.' : 'If scenes/common.py already exists, keep it unless it is broken; read it and report its exports and cuts.'}
-
-Check it: run "uv run ivideo still ${P} common.py" and use the Read tool on the image. Fix anything that is ugly, wrong in proportion, overlapping, or off frame. At most 4 stills.
-Return ok, gallery_image, exports (name, signature, purpose, used_in scene ids), concept_colors, and cuts (one per consecutive pair, with carry_over, handoff function name or empty, and a one-line description).`, { label: 'design', phase: 'Design', schema: DESIGN_SCHEMA, ...AI })
+Write these files in ${PDIR}/scenes/:
+1. spec.py: first line "from ivideo.synced import *". Only constants, no drawing functions:
+   - named positions (numpy arrays) for every recurring object, inside safe_box(), below the title (content_top()), above content_bottom(); use cell("A1".."F6") where it fits;
+   - sizes and scales that must match across scenes;
+   - CONCEPT_COLORS: each recurring concept, quantity, or variable -> ONE color from the 3b1b palette (BLUE, YELLOW, GREEN, RED, TEAL, GOLD, PURPLE, PINK, MAROON, GREY_B);
+   - TEX_COLORS: TeX substrings (for example "x", "\\theta") -> the same colors, for MathTex(..., tex_to_color_map=TEX_COLORS).
+2. common.py, exactly this shape:
+     from ivideo.synced import *
+     from spec import *
+     from ivideo.parts import load_parts
+     load_parts(globals())   # imports every scenes/parts_*.py the builders write
+     def handoff_<from>_<to>():   # one per carry-over cut
+         return VGroup(<part calls with spec positions>)
+   Handoff functions only call part functions by name (they resolve when called) and use spec constants.
+3. Plan the parts: a function for every object, icon, or diagram piece that appears in more than one scene or is hard to draw. Give each an exact signature with defaults taken from spec.py, a purpose precise enough that another agent draws it the way you intend (shape, size in scene units, colors, stroke widths), and the list of every scene id that uses it (including use through a handoff). Parts must not call each other; each depends only on spec.py and manim.
+4. For each cut between consecutive scenes, decide carry_over. If yes, the outgoing scene ends showing exactly the handoff objects and the incoming scene starts with self.add(*handoff_<from>_<to>()) at frame 0.
+${A.redo_design ? 'Replace any existing spec.py, common.py, and parts_*.py.' : 'If spec.py and common.py already exist, keep them unless broken; report their parts and cuts, and list in built_files every parts_<scene>.py that already exists and is complete.'}
+Return ok, parts, built_files, concept_colors, cuts.`, { label: 'design-plan', phase: 'Design', schema: DESIGN_SCHEMA, ...AI })
 
 if (!design || !design.ok) {
   return { ok: false, stage: 'design', project_dir: PDIR, error: design ? design.error : 'design agent returned nothing' }
 }
-const LIB = `Shared library scenes/common.py (import with "from common import *"):
-${design.exports.map(e => `  ${e.signature}  ${e.purpose}${e.used_in && e.used_in.length ? ` [used in ${e.used_in.join(', ')}]` : ''}`).join('\n')}
-${(design.concept_colors || []).length ? `Concept colors: ${design.concept_colors.map(c => `${c.concept}=${c.color}`).join(', ')}` : ''}`
+
+// Each part is built in the file of the first scene (in video order) that uses it.
+const firstUse = p => ORDER.find(id => (p.used_in || []).includes(id)) || ORDER[0]
+const groups = {}
+design.parts.forEach(p => { (groups[firstUse(p)] = groups[firstUse(p)] || []).push(p) })
+const already = new Set((design.built_files || []).map(f => f.replace(/^.*\//, '')))
+const builds = {}
+for (const sid of ORDER) {
+  const parts = groups[sid]
+  if (!parts || !parts.length) continue
+  const file = `parts_${sid}.py`
+  if (already.has(file) && !A.redo_design) { builds[sid] = Promise.resolve({ ok: true, file, skipped: true }); continue }
+  builds[sid] = agent(`${TOOL}
+
+You build part of the shared drawing library of the instructional video "${prep.video_title}" (project ${P}). Other builders write other parts at the same time.
+Write ONLY ${PDIR}/scenes/${file}. Do not edit spec.py, common.py, or any other parts file.
+
+File shape:
+  from ivideo.synced import *
+  from spec import *
+  __all__ = [${parts.map(p => `"${p.name}"`).join(', ')}]
+  <one function per part below, with EXACTLY the given signature>
+  class Gallery(Scene):  # shows each part once, side by side, small labels, inside the frame
+      def construct(self):
+          self.camera.background_color = BG
+          ...
+Parts to build (each returns a Mobject or VGroup; do not call other parts; use spec.py positions, sizes, and colors):
+${parts.map(p => `- ${p.signature}\n    ${p.purpose}\n    used in: ${p.used_in.join(', ')}`).join('\n')}
+
+${STYLE}
+
+Check it: run "uv run ivideo still ${P} ${file}" and use the Read tool on the image. Fix anything wrong in shape, proportion, color, or style. At most 2 stills.
+Return ok, file, gallery_image.`, { label: `parts:${sid}`, phase: 'Design', schema: BUILD_SCHEMA, ...AI })
+}
+log(`Design plan: ${design.parts.length} parts in ${Object.keys(builds).length} part files; each animator waits only for the files with its parts`)
+
+// The part files a scene needs: the file of every part it uses.
+const needs = s => [...new Set(design.parts.filter(p => (p.used_in || []).includes(s.id)).map(firstUse))].filter(id => builds[id])
+const waitParts = async s => {
+  const rs = await Promise.all(needs(s).map(id => builds[id]))
+  const bad = needs(s).filter((id, i) => !rs[i] || !rs[i].ok)
+  if (bad.length) log(`${s.id}: part files ${bad.map(id => `parts_${id}.py`).join(', ')} failed; the animator will draw those parts itself`)
+  return bad
+}
+
+const LIB_FOR = s => {
+  const mine = design.parts.filter(p => (p.used_in || []).includes(s.id))
+  return `Shared library: "from common import *" gives spec.py constants (positions, sizes, CONCEPT_COLORS, TEX_COLORS), the handoff functions, and these parts:
+${mine.map(p => `  ${p.signature}  ${p.purpose}`).join('\n') || '  (none for this scene)'}
+${(design.concept_colors || []).length ? `Concept colors: ${design.concept_colors.map(c => `${c.concept}=${c.color}`).join(', ')}` : ''}
+Other scenes' parts may still be in progress; use only the parts listed here.`
+}
 
 const cutNote = s => {
   const into = design.cuts.find(c => c.to_scene === s.id)
@@ -364,7 +431,7 @@ ${sceneBlock(s)}
 
 ${cutNote(s)}
 
-${LIB}
+${LIB_FOR(s)}
 
 Steps:
 1. Run "uv run ivideo frames ${P} ${s.id}" and read ${PDIR}/renders/draft/${s.id}.report.json.
@@ -384,7 +451,7 @@ ${sceneBlock(s)}
 
 ${cutNote(s)}
 
-${LIB}
+${LIB_FOR(s)}
 
 ${API}
 
@@ -427,7 +494,7 @@ const reviewLoop = async (s, anim, maxRounds, phaseName, firstIssues) => {
 
 const results = await pipeline(
   todo,
-  s => agent(`${TOOL}
+  async s => { const bad = await waitParts(s); return agent(`${TOOL}
 
 You are the animator for one scene of an instructional video "${prep.video_title}". Speakers: ${speakers}.
 Write ${PDIR}/scenes/${s.id}.py. The narration audio already exists and is fixed; your animation must match it.
@@ -439,7 +506,7 @@ ${sceneBlock(s)}
 
 ${cutNote(s)}
 
-${LIB}
+${LIB_FOR(s)}
 
 ${API}
 
@@ -450,13 +517,15 @@ ${RULES}
 ${LOOP(s.id, MAX_RENDERS)}
 
 If the scene file already exists from an earlier run, start from it and improve it.
-When done, run "uv run ivideo mark ${P} ${s.id} written --note '<one line>'". Return the result.`, { label: `animate:${s.id}`, phase: 'Animate', schema: ANIM_SCHEMA, ...AI }),
+${bad.length ? `These part files failed to build: ${bad.map(id => `parts_${id}.py`).join(', ')}. Draw the parts you need from them yourself in your scene file, following their descriptions above.\n` : ''}When done, run "uv run ivideo mark ${P} ${s.id} written --note '<one line>'". Return the result.`, { label: `animate:${s.id}`, phase: 'Animate', schema: ANIM_SCHEMA, ...AI }) },
   (anim, s) => reviewLoop(s, anim, MAX_FIX_ROUNDS, 'Review'),
 )
 
 const sceneResults = {}
 results.forEach((r, i) => { sceneResults[todo[i].id] = r || { scene: todo[i].id, approved: false, error: 'agent failed' } })
 kept.forEach(s => { sceneResults[s.id] = { scene: s.id, approved: true, kept: true } })
+
+await Promise.all(Object.values(builds))  // every part file is final before the cut check
 
 // ---------- Continuity (needs every scene: barrier) ----------
 phase('Continuity')
@@ -524,7 +593,7 @@ return {
   contact_sheet: asm.contact_sheet,
   duration: asm.duration,
   dialogue_source: prep.dialogue_source,
-  design: { gallery: design.gallery_image, exports: design.exports.map(e => e.name), cuts: design.cuts },
+  design: { parts: design.parts.map(p => p.name), part_files: Object.keys(builds).map(id => `parts_${id}.py`), cuts: design.cuts },
   scenes_kept: kept.map(s => s.id),
   continuity,
   scenes: allResults.map(r => ({ scene: r.scene, approved: r.approved, kept: !!r.kept, continuity_fix: !!r.continuity_fix, score: r.review ? r.review.score : null, repair_rounds: r.repair_rounds || 0, open_issues: r.review ? r.review.issues : [] })),
