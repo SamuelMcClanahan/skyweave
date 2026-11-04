@@ -60,7 +60,12 @@ def clean_for_speech(text: str) -> str:
 
 def decode_audio(data: bytes, ctype: str = "") -> np.ndarray:
     """Any audio bytes (mp3, wav, ...) -> mono float32 at SAMPLE_RATE, via ffmpeg."""
-    fmt = ["-f", "s16le", "-ar", "24000", "-ac", "1"] if "pcm" in ctype else []
+    fmt: list[str] = []
+    if "pcm" in ctype:  # raw s16le; the rate and channels come in the content type
+        rate = re.search(r"rate=(\d+)", ctype)
+        chans = re.search(r"channels=(\d+)", ctype)
+        fmt = ["-f", "s16le", "-ar", rate.group(1) if rate else "24000"]
+        fmt += ["-ac", chans.group(1) if chans else "1"]
     proc = subprocess.run(
         [
             "ffmpeg",
@@ -126,10 +131,16 @@ class Synth:
         if self.engine == "openrouter":
             from . import openrouter
 
+            # HeyGen Voice on OpenRouter accepts only response_format "pcm"
+            # (raw 16-bit little-endian mono at 24 kHz).
             data, ctype = openrouter.speech(
-                clean_for_speech(text), model=self.model, voice=voice, speed=self.speed
+                clean_for_speech(text),
+                model=self.model,
+                voice=voice,
+                speed=self.speed,
+                response_format="pcm",
             )
-            return decode_audio(data, ctype)
+            return decode_audio(data, ctype if "pcm" in ctype else "pcm")
         if self._k is None:  # tone engine: deterministic, 0.4 s per word
             n = int(SAMPLE_RATE * 0.4 * max(1, len(text.split())))
             return (0.1 * np.sin(2 * np.pi * 220 * np.arange(n) / SAMPLE_RATE)).astype(np.float32)
