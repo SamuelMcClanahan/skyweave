@@ -1,14 +1,31 @@
 """Shared look for every scene, so scenes made by different agents match.
 
+Default theme "3b1b": a 3Blue1Brown-inspired look. Black background, white serif
+text (CMU Serif, the Computer Modern face that LaTeX uses, so text matches the
+math), and Manim's classic named colors (BLUE #58C4DD, YELLOW #F7D96F, GREEN
+#83C167, RED #FC6255, TEAL, GOLD, PURPLE, PINK, MAROON, GREY). Those names come
+with `from manim import *`. Set IVIDEO_THEME=slate for the older dark-slate look.
+
 Frame: 14.22 x 8 Manim units (16:9). The safe area keeps 0.5 units of margin.
 """
 
 from __future__ import annotations
 
+import os
+import subprocess
+
 from manim import (
+    BLUE,
     DOWN,
+    GREEN,
+    GREY_B,
     LEFT,
+    PURPLE,
+    RED,
     UL,
+    UP,
+    WHITE,
+    YELLOW,
     Line,
     ManimColor,
     Text,
@@ -16,17 +33,37 @@ from manim import (
     config,
 )
 
-BG = ManimColor("#0F1720")  # near-black blue
-FG = ManimColor("#E8EEF4")  # main text
-MUTED = ManimColor("#8A99A8")  # secondary text, axes, guides
-ACCENT = ManimColor("#4FB3FF")  # primary highlight (blue)
-ACCENT_2 = ManimColor("#FFB547")  # secondary highlight (amber)
-GOOD = ManimColor("#5BD18B")  # correct / success (green)
-BAD = ManimColor("#FF6B6B")  # wrong / warning (red)
-PURPLE = ManimColor("#B794F6")
-PALETTE = [ACCENT, ACCENT_2, GOOD, PURPLE, BAD]
+THEME = os.environ.get("IVIDEO_THEME", "3b1b").lower()
 
-FONT = "DejaVu Sans"
+
+def _has_font(name: str) -> bool:
+    try:
+        out = subprocess.run(["fc-list", ":", "family"], capture_output=True, text=True).stdout
+    except OSError:
+        return False
+    return name in out
+
+
+if THEME == "slate":
+    BG = ManimColor("#0F1720")  # near-black blue
+    FG = ManimColor("#E8EEF4")  # main text
+    MUTED = ManimColor("#8A99A8")  # secondary text, axes, guides
+    ACCENT = ManimColor("#4FB3FF")  # primary highlight (blue)
+    ACCENT_2 = ManimColor("#FFB547")  # secondary highlight (amber)
+    GOOD = ManimColor("#5BD18B")  # correct / success (green)
+    BAD = ManimColor("#FF6B6B")  # wrong / warning (red)
+    PURPLE = ManimColor("#B794F6")
+    FONT = "DejaVu Sans"
+else:  # "3b1b"
+    BG = ManimColor("#000000")
+    FG = WHITE
+    MUTED = GREY_B  # secondary text, axes, guides
+    ACCENT = BLUE  # first concept / variable
+    ACCENT_2 = YELLOW  # second concept / variable, highlights
+    GOOD = GREEN
+    BAD = RED
+    FONT = "CMU Serif" if _has_font("CMU Serif") else "DejaVu Serif"
+PALETTE = [ACCENT, ACCENT_2, GOOD, PURPLE, BAD]
 MONO = "DejaVu Sans Mono"
 
 TITLE_SIZE = 40
@@ -60,13 +97,19 @@ def label(s: str, color=FG, **kw) -> Text:
 
 
 def title(s: str) -> VGroup:
-    """Scene title pinned to the top-left of the safe area, with an underline."""
-    t = Text(s, font=FONT, font_size=TITLE_SIZE, color=FG, weight="BOLD")
+    """Scene title. 3b1b theme: centered at the top, plain serif, no box or underline.
+    Slate theme: top-left with an accent underline."""
+    if THEME == "slate":
+        t = Text(s, font=FONT, font_size=TITLE_SIZE, color=FG, weight="BOLD")
+        fit_width(t)
+        t.to_corner(UL, buff=MARGIN)
+        rule = Line(t.get_corner(DOWN + LEFT), t.get_corner(DOWN + LEFT) + [t.width, 0, 0])
+        rule.set_stroke(ACCENT, width=4).shift(DOWN * 0.15)
+        return VGroup(t, rule)
+    t = Text(s, font=FONT, font_size=TITLE_SIZE, color=FG)
     fit_width(t)
-    t.to_corner(UL, buff=MARGIN)
-    rule = Line(t.get_corner(DOWN + LEFT), t.get_corner(DOWN + LEFT) + [t.width, 0, 0])
-    rule.set_stroke(ACCENT, width=4).shift(DOWN * 0.15)
-    return VGroup(t, rule)
+    t.to_edge(UP, buff=MARGIN)
+    return VGroup(t)
 
 
 def content_top() -> float:
@@ -123,6 +166,7 @@ def cell_size() -> tuple[float, float]:
 
 
 __all__ = [
+    "THEME",
     "BG",
     "FG",
     "MUTED",

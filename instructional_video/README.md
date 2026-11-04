@@ -13,12 +13,22 @@ This tool makes a short animated teaching video from a topic.
 
 This folder is separate from SkyWeave. It does not touch `v1/` or `v2/`.
 
+## Look: 3Blue1Brown-inspired
+
+- Black background, white CMU Serif text (the LaTeX Computer Modern face).
+- The classic Manim palette: BLUE #58C4DD, YELLOW #F7D96F, GREEN #83C167,
+  RED #FC6255, TEAL, GOLD, PURPLE, PINK, MAROON, GREY.
+- One color per concept, used the same way in drawings and in LaTeX equations.
+- Equations morph with TransformMatchingTex. Faint NumberPlane grids. No slides,
+  bullet lists, mascots, or branding.
+- Centered titles with no underline. Set `IVIDEO_THEME=slate` for the older look.
+
 ## 1. Set up (one time per machine)
 
 ```bash
 cd instructional_video
-./setup.sh            # system packages, Python env, Kokoro voice model (about 350 MB; local fallback voice)
-./setup.sh --latex    # optional: adds LaTeX so scenes can show formulas with MathTex
+./setup.sh            # system packages incl. LaTeX and the CMU Serif font, Python env, Kokoro model
+./setup.sh --no-latex # skip LaTeX (scenes then cannot use MathTex)
 ```
 
 The setup script needs Ubuntu or Debian with `apt`, and `uv`.
@@ -69,7 +79,7 @@ Workflow arguments (all optional except a topic for a new project):
 | `animator_model` | Model for every Claude agent | `claude-opus-5-5` |
 | `effort` | Reasoning effort for every Claude agent | high |
 | `burn_subtitles` | Draw subtitles into the picture | false (soft subtitles) |
-| `latex` | Install LaTeX during setup | false |
+
 
 What the workflow does:
 

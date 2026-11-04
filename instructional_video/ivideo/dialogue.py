@@ -40,6 +40,12 @@ Rules for "visual" (what is on screen while the line plays):
 - Keep at most about 6 on-screen elements and 2 short text labels per beat. No paragraphs on screen.
 - Every line must have a visual change or emphasis that matches the words.
 
+Style: like a 3Blue1Brown video. Curiosity first, discovery over statement.
+- Open with a concrete puzzle or question the viewer wants answered. Let the idea feel discovered, not announced.
+- Concrete example before the general rule; picture before formula. Name what to look at ("notice how...", "watch this length").
+- Each quantity or concept keeps one name for the whole video, so the animator can give it one color.
+- Visual beats are 2D math-style animations: shapes, arrows, number lines, graphs, equations that transform. No slides, bullet lists, or characters.
+
 Structure:
 - Scene 1 hooks the viewer with a question or a surprising fact and says what they will learn.
 - Middle scenes teach one concept each, in order, with a concrete example.

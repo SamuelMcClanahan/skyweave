@@ -54,13 +54,17 @@ def cmd_doctor(_a) -> dict:
     }
     fonts = subprocess.run(["fc-list", ":", "family"], capture_output=True, text=True).stdout
     checks["font_dejavu"] = "DejaVu Sans" in fonts
+    checks["font_cmu_serif"] = "CMU Serif" in fonts  # 3b1b theme text font
+    from .style import THEME
+
+    checks["theme"] = THEME
     required = ["manim", "kokoro_onnx", "ffmpeg", "ffprobe", "kokoro_model", "font_dejavu"]
     checks["ready_for_render"] = all(checks[k] for k in required)
     checks["ready_for_voice"] = checks["openrouter_key"]  # default voice engine is OpenRouter
     checks["notes"] = []
     if not checks["latex"]:
         checks["notes"].append(
-            "No LaTeX: scenes must not use MathTex/Tex. Use Text. Run ./setup.sh --latex to enable."
+            "No LaTeX: scenes must not use MathTex/Tex. Use Text. Run ./setup.sh to install it."
         )
     if not checks["openrouter_key"]:
         checks["notes"].append(

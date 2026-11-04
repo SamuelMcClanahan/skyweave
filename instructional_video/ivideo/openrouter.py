@@ -272,7 +272,7 @@ def speech(
     *,
     model: str = DEFAULT_SPEECH_MODEL,
     voice: str | None = None,
-    response_format: str = "mp3",
+    response_format: str = "pcm",  # HeyGen accepts only pcm (live test 2026-11-04)
     speed: float | None = None,
     retries: int = 6,
     timeout: float = 120.0,

@@ -76,7 +76,7 @@ class FakeOpenRouter:
                     outer.speech_requests.append(body)
                     data = outer.audio
                     self.send_response(200)
-                    self.send_header("Content-Type", "audio/mpeg")
+                    self.send_header("Content-Type", "audio/pcm;rate=44100;channels=1")
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     self.wfile.write(data)
@@ -252,12 +252,13 @@ def test_sources_are_included(tmp_path):
     assert "Narrator mode" in msgs[1]["content"]
 
 
-def _mp3(seconds: float = 1.0) -> bytes:
+def _pcm(seconds: float = 1.0) -> bytes:
+    """Raw s16le mono 44.1 kHz, the format HeyGen returns."""
     import subprocess
 
     return subprocess.run(
         ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"sine=frequency=300:duration={seconds}",
-         "-ac", "1", "-ar", "24000", "-f", "mp3", "pipe:1"],
+         "-ac", "1", "-ar", "44100", "-f", "s16le", "pipe:1"],
         capture_output=True, check=True,
     ).stdout  # fmt: skip
 
@@ -267,7 +268,7 @@ def test_openrouter_voice_engine(fake, tmp_path, demo_script):
     from ivideo.tts import synthesize
 
     f = fake([])
-    f.audio = _mp3(1.0)
+    f.audio = _pcm(1.0)
     proj = Project(tmp_path / "p").ensure()
     script = assign_scene_ids(demo_script)
     timing = synthesize(proj, script)  # default engine: OpenRouter HeyGen
@@ -275,7 +276,7 @@ def test_openrouter_voice_engine(fake, tmp_path, demo_script):
     assert len(req) == 6
     assert {r["model"] for r in req} == {"heygen/heygen-voice-1-turbo:free"}
     assert {r["voice"] for r in req} == {"nadine", "bram"}
-    assert all(r["response_format"] == "mp3" and "speed" not in r for r in req)
+    assert all(r["response_format"] == "pcm" and "speed" not in r for r in req)
     assert timing["engine"] == "openrouter" and timing["voices"] == {
         "host": "nadine",
         "learner": "bram",

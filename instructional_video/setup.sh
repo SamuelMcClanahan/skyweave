@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Set up the instructional video pipeline on Ubuntu/Debian.
-# Usage: ./setup.sh            (system packages + Python env + Kokoro voice model)
-#        ./setup.sh --latex    (also install a LaTeX subset so Manim MathTex works)
+# Usage: ./setup.sh              (system packages incl. LaTeX + CMU Serif font, Python env, Kokoro model)
+#        ./setup.sh --no-latex   (skip LaTeX; scenes then cannot use MathTex)
 set -euo pipefail
 cd "$(dirname "$0")"
 
-WANT_LATEX=0
+WANT_LATEX=1
 for a in "$@"; do
   case "$a" in
     --latex) WANT_LATEX=1 ;;
+    --no-latex) WANT_LATEX=0 ;;
     *) echo "unknown option: $a" >&2; exit 2 ;;
   esac
 done
@@ -17,7 +18,7 @@ SUDO=""
 if [ "$(id -u)" -ne 0 ]; then SUDO="sudo"; fi
 
 # 1. System packages. Manim needs Pango/Cairo headers (manimpango has no Linux wheel) and ffmpeg.
-PKGS=(libpango1.0-dev libcairo2-dev pkg-config ffmpeg)
+PKGS=(libpango1.0-dev libcairo2-dev pkg-config ffmpeg fonts-cmu)
 if [ "$WANT_LATEX" -eq 1 ]; then
   PKGS+=(texlive-latex-base texlive-latex-extra texlive-fonts-recommended texlive-science dvisvgm cm-super)
 fi

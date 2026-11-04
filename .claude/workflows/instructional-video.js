@@ -190,7 +190,7 @@ const setup = await agent(`${TOOL}
 You set up an instructional video project. Inputs (JSON): ${JSON.stringify(A)}
 
 Steps:
-1. Run "uv run ivideo doctor". If ready_for_render is false, run "./setup.sh" (add "--latex" if args.latex is true) and run doctor again. If it still fails, stop and return ok=false with the error.
+1. Run "uv run ivideo doctor". If ready_for_render is false, run "./setup.sh" and run doctor again. If it still fails, stop and return ok=false with the error.
 2. Voice engine for this run: "${VOICE_ENGINE}". If it is "openrouter" and doctor shows openrouter_key=false, stop and return ok=false with error "OPENROUTER_API_KEY is not set in this environment".
 3. Choose the project slug: args.project if given; otherwise a short lowercase-hyphen slug of args.topic (max 48 chars). The project folder is projects/<slug>/.
 4. If args.topic is given and projects/<slug>/brief.json is missing (or args.redo_script is true), run "uv run ivideo new <slug> --topic ..." with --audience, --minutes, --speakers, --notes and one --source per path in args.sources when given (quote arguments correctly).
@@ -265,23 +265,34 @@ SyncedScene API:
   self.remaining(i)        seconds left in line i.   self.wait_until(t)   wait to absolute scene time t.
   self.scene_title, self.scene_duration, self.now
   Background color is already set (BackgroundRectangle defaults to it too). Do not set config, resolution, or add_sound. Do not call self.wait() with long fixed times; use at_line/finish.
-Style helpers (use them so all scenes match): title(str) -> top-left title with underline; text(str, size=32, color=FG); label(str) (26 pt);
-  colors BG FG MUTED ACCENT(blue) ACCENT_2(amber) GOOD(green) BAD(red) PURPLE; sizes TITLE_SIZE 40, BODY_SIZE 32, LABEL_SIZE 26, MIN_FONT_SIZE 20;
-  safe_box() -> (left, right, bottom, top); content_top(); content_bottom() (= SUBTITLE_BAND, y -3.0); fit_width(mob); MIN_GAP 0.3. FONT = "DejaVu Sans".
+Style helpers (use them so all scenes match): title(str) -> centered serif title at the top (no box, no underline); text(str, size=32, color=FG); label(str) (26 pt);
+  theme colors BG (black) FG (white) MUTED (GREY_B) ACCENT (=BLUE) ACCENT_2 (=YELLOW) GOOD (=GREEN) BAD (=RED); and Manim's classic named colors, which are the 3b1b palette:
+  BLUE #58C4DD, TEAL #5CD0B3, GREEN #83C167, YELLOW #F7D96F, GOLD #F0AC5F, RED #FC6255, MAROON #C55F73, PURPLE #9A72AC, PINK #D147BD, GREY #888888, plus _A.._E shades (BLUE_E dark ... BLUE_A light);
+  sizes TITLE_SIZE 40, BODY_SIZE 32, LABEL_SIZE 26, MIN_FONT_SIZE 20;
+  safe_box() -> (left, right, bottom, top); content_top(); content_bottom() (= SUBTITLE_BAND, y -3.0); fit_width(mob); MIN_GAP 0.3. FONT = "CMU Serif" (the LaTeX Computer Modern face, so words match the math).
   6x6 placement grid over the content area: cell("A1") (top-left) ... cell("F6") (bottom-right) returns a point; obj.move_to(cell("B3")). cell_size() -> (w, h).
   self.allow_overlap(a, b, ...) marks an overlap as intended (a label inside its box) so the layout check skips it.
   Banned (the render refuses them): ManimGL names (manimlib, ShowCreation, CONFIG dicts, InteractiveScene, TextMobject), add_sound, setting config resolution/frame rate, wall-clock calls, random numbers without a fixed seed.
 LaTeX is ${prep.latex ? 'installed: MathTex/Tex are allowed for formulas' : 'NOT installed: do not use MathTex, Tex, or anything that needs LaTeX; write formulas with Text'}.`
 
+const STYLE = `Visual style: 3Blue1Brown-inspired (the look of Manim explainer videos). Follow it closely:
+- Pure black background, white serif text, and the classic palette above. Use color as meaning: give each quantity, variable, or concept ONE color and keep it for the whole video (in text labels, in equations, and in the drawing). Use the shared library's CONCEPT_COLORS.
+- Math is typeset with MathTex/Tex (Computer Modern), not plain text. Color parts of equations to match their concepts: MathTex(..., substrings_to_isolate=[...]) then set_color_by_tex, or tex_to_color_map. Morph one equation into the next with TransformMatchingTex or ReplacementTransform so the viewer sees what changed.
+- Visual first, formula second: show the picture or a concrete example, then let the symbols appear on top of it or beside it, colored to match.
+- Animate meaning, not decoration: Write for text and equations, Create for curves and shapes, GrowArrow for arrows, Transform/ReplacementTransform to show that one thing becomes another, Indicate / Circumscribe / a SurroundingRectangle in YELLOW to point at what the voice names, FadeOut what is no longer needed. Smooth default rate functions.
+- Clean geometry: thin strokes (stroke_width 2-4), NumberPlane/Axes with faint grid lines (for example NumberPlane(background_line_style={"stroke_color": BLUE_D, "stroke_opacity": 0.4})), Dots for points, dashed lines for guides.
+- No slide look: no bullet lists, no boxed cards, no logos, no clip art, no characters or mascots, no channel branding. Text is sparse labels and equations.
+- Keep one focus at a time: dim (set_opacity 0.3) or fade what the narration is not about.`
+
 const RULES = `Layout and teaching rules:
-- Lines[0] starts at about 0.6 s. Draw the title in that lead-in: before self.at_line(0), play FadeIn(title(self.scene_title)) or Write with run_time <= 0.5. The screen is never empty at the start.
+- Lines[0] starts at about 0.6 s. Draw the title in that lead-in: before self.at_line(0), play Write(title(self.scene_title)) or FadeIn with run_time <= 0.5. Fade the title out once the diagram needs the space. The screen is never empty at the start.
 - Each line gets a visible change that matches its words (appear, move, highlight, transform). Start it at at_line(i); finish it inside the line. Objects appear when the narration names them, not later.
 - Keep at most about 6 visible elements. Fade out or move what the narration no longer talks about.
 - On-screen text: short labels (at most about 8 words), font size >= 24, never paragraphs, never the full narration.
 - Everything stays inside safe_box(); key content stays above content_bottom() (subtitles cover the band below y -3.0). Place main objects with the cell("A1".."F6") grid or the shared library's positions, not ad hoc coordinates.
 - Keep at least MIN_GAP (0.3) between objects that must not touch: arrange/next_to with buff >= 0.3. Labels never sit on top of other text or lines; offset them or add_background_rectangle(). If an overlap is intended, call self.allow_overlap(a, b).
 - Use the shared library's drawing functions, positions, and concept colors for every object that also appears in other scenes. Never edit scenes/common.py (other agents use it at the same time); define anything else locally in your scene file.
-- Diagrams over decoration. Prefer simple shapes (Circle, Square, Arrow, Line, Dot, Axes, NumberLine, Rectangle, Polygon). Proportions must be right (sizes, angles, distances that the narration compares).
+- Diagrams over decoration. Prefer simple shapes (Circle, Square, Arrow, Line, Dot, Axes, NumberLine, NumberPlane, Polygon). Proportions must be right (sizes, angles, distances that the narration compares).
 - Motion is calm: run_times about 0.5-1.5 s; nothing flashes.
 - Accuracy: any number, term, or claim on screen must agree with the narration.`
 
@@ -304,11 +315,14 @@ ${SCENES.map(sceneBlock).join('\n\n')}
 
 ${API}
 
+${STYLE}
+
 Write scenes/common.py:
 - First line: from ivideo.synced import *
 - A function for every object, icon, or diagram part that appears in more than one scene, or that is hard to draw (for example a camera icon, a drone, a sensor grid, an axis setup). Each returns a Mobject or VGroup and takes simple arguments (position, color, scale).
 - Named position constants for recurring objects, so every scene puts them in the same place inside safe_box() and below the title (content_top()).
-- A dict CONCEPT_COLORS mapping each recurring concept to one style color (ACCENT, ACCENT_2, GOOD, BAD, PURPLE, MUTED, FG).
+- A dict CONCEPT_COLORS mapping each recurring concept, quantity, or variable to ONE color from the 3b1b palette (BLUE, YELLOW, GREEN, RED, TEAL, GOLD, PURPLE, PINK, MAROON, GREY_B). Also a dict TEX_COLORS mapping TeX substrings (for example "x", "\\theta") to the same colors, for MathTex(..., tex_to_color_map=TEX_COLORS).
+- Follow the visual style below for every drawing function.
 - For each cut between consecutive scenes, decide if the next scene continues the same diagram (carry_over). If yes, write a function handoff_<from>_<to>() that builds exactly the objects that are on screen at the cut (no title), at their positions. The outgoing scene must end showing exactly these; the incoming scene starts with self.add(*handoff_<from>_<to>()) at frame 0. If no carry-over, the outgoing scene may end with its diagram and the incoming scene starts clean with its title.
 - A class Gallery(Scene) that sets self.camera.background_color = BG and shows every drawing function once, side by side with small labels, inside the frame.
 - Do not put scene-specific animation in common.py. Keep it importable without side effects.
@@ -355,7 +369,7 @@ ${LIB}
 Steps:
 1. Run "uv run ivideo frames ${P} ${s.id}" and read ${PDIR}/renders/draft/${s.id}.report.json.
 2. Use the Read tool to look at the contact sheet, at EVERY frame PNG it lists (one per line, just before the line ends, plus the last frame), and at start_frame.
-3. For each line judge: does the screen show what the words talk about, at the time they say it (the visual field is the plan; small deviations are fine if clear)? Is all text readable (size, contrast) and spelled right? Any overlap, cut-off, clutter, or empty screen? Any on-screen claim or proportion that disagrees with the narration? Is there a visible change between consecutive lines? Does the start frame and the last frame follow the scene cut contract?
+3. For each line judge: does the screen show what the words talk about, at the time they say it (the visual field is the plan; small deviations are fine if clear)? Is all text readable (size, contrast) and spelled right? Any overlap, cut-off, clutter, or empty screen? Any on-screen claim or proportion that disagrees with the narration? Is there a visible change between consecutive lines? Does the start frame and the last frame follow the scene cut contract? Does it follow the 3b1b-inspired style (black background, classic palette, one color per concept used the same way in drawings and equations, LaTeX math, no slide look: no bullet lists, boxes, or mascots)?
 4. Severity: blocker = broken, unreadable, wrong facts, or nothing matches the words; major = overlap, cut-off text, clutter, a line with no matching visual, timing clearly off, cut contract broken; minor = polish.
 5. Set "pass" to true only if there is no blocker and no major issue. If it passes, run "uv run ivideo mark ${P} ${s.id} approved --note 'score N'".
 Give each issue a concrete fix an animator can apply (what object, where, what change).`, { label: `review:${s.id}`, phase: 'Review', schema: REVIEW_SCHEMA, ...AI })
@@ -373,6 +387,8 @@ ${cutNote(s)}
 ${LIB}
 
 ${API}
+
+${STYLE}
 
 ${RULES}
 
@@ -427,6 +443,8 @@ ${LIB}
 
 ${API}
 
+${STYLE}
+
 ${RULES}
 
 ${LOOP(s.id, MAX_RENDERS)}
@@ -453,7 +471,7 @@ ${design.cuts.map(c => `- ${c.from_scene} -> ${c.to_scene}: ${c.carry_over ? `ca
 Steps:
 1. For every scene id (${SCENES.map(s => s.id).join(', ')}), run "uv run ivideo frames ${P} <id>" (this refreshes start.png, the line frames, and end.png from the latest draft render).
 2. For every cut, use the Read tool on the outgoing scene's end.png and the incoming scene's start.png (both in ${PDIR}/frames/draft/<id>/). For a carry-over cut, the shared objects must match in position, size, shape, and color, and nothing should blink or jump. For a clean cut, the new scene must not open on an empty screen for long.
-3. Read every scene's contact_sheet.png. Check the whole video looks like one piece: same title placement, fonts, sizes, colors per concept, and drawing style; no scene repeats another's content.
+3. Read every scene's contact_sheet.png. Check the whole video looks like one piece in the 3b1b-inspired style: black background, same title placement, serif fonts, the same color for each concept in every scene, and the same drawing style; no scene repeats another's content.
 4. List fixes only for problems a viewer would notice, at most 3 scenes, each with concrete issues (severity, problem, fix). Set "pass" to true if there are no fixes.`, { label: 'continuity', phase: 'Continuity', schema: CONTINUITY_SCHEMA, ...AI })
 
   const fixes = continuity && !continuity.pass ? (continuity.fixes || []).slice(0, 3) : []
