@@ -2,8 +2,10 @@
 
 ivideo doctor
 ivideo new <project> --topic "..." [--audience ..] [--minutes 3] [--speakers 2]
-ivideo dialogue <project> [--model id] [--fallback id ...] [--source file ...]
-ivideo voice <project> [--engine kokoro|tone] [--speed 1.0] [--only s01 ...]
+ivideo script-rules <project>              # rules + schema; a Claude agent writes script.json
+ivideo check-script <project>              # validate script.json
+ivideo dialogue <project> [--model id] ...  # optional: script from an OpenRouter LLM instead
+ivideo voice <project> [--engine openrouter|kokoro|tone] [--tts-model id] [--voice host=nadine]
 ivideo brief <project> [<scene>]          # scene data an animator needs
 ivideo render <project> <scene> [--quality draft|final] [--no-frames]
 ivideo render-all <project> [--quality final]
@@ -54,14 +56,16 @@ def cmd_doctor(_a) -> dict:
     checks["font_dejavu"] = "DejaVu Sans" in fonts
     required = ["manim", "kokoro_onnx", "ffmpeg", "ffprobe", "kokoro_model", "font_dejavu"]
     checks["ready_for_render"] = all(checks[k] for k in required)
-    checks["ready_for_dialogue"] = checks["openrouter_key"]
+    checks["ready_for_voice"] = checks["openrouter_key"]  # default voice engine is OpenRouter
     checks["notes"] = []
     if not checks["latex"]:
         checks["notes"].append(
             "No LaTeX: scenes must not use MathTex/Tex. Use Text. Run ./setup.sh --latex to enable."
         )
     if not checks["openrouter_key"]:
-        checks["notes"].append("OPENROUTER_API_KEY is not set: `ivideo dialogue` cannot run.")
+        checks["notes"].append(
+            "OPENROUTER_API_KEY is not set: the OpenRouter voice cannot run (use --engine kokoro to voice locally)."
+        )
     else:
         from . import openrouter
 
@@ -87,6 +91,55 @@ def cmd_new(a) -> dict:
     }
     write_json(proj.brief, brief)
     return {"project": str(proj.root), "brief": brief}
+
+
+def cmd_script_rules(a) -> dict:
+    """The rules and JSON shape for a script written by a Claude agent."""
+    from . import dialogue
+    from .schema import SCRIPT_SCHEMA
+
+    proj = Project.open(a.project)
+    brief = read_json(proj.brief) if proj.brief.exists() else {}
+    minutes = float(brief.get("minutes", 3.0))
+    return {
+        "write_to": str(proj.script),
+        "brief": brief,
+        "target_words": int(minutes * dialogue.WORDS_PER_MINUTE),
+        "rules": dialogue.SYSTEM_PROMPT,
+        "speaker_mode": dialogue.speaker_mode(int(brief.get("speakers", 2))),
+        "json_schema": SCRIPT_SCHEMA,
+    }
+
+
+def cmd_check_script(a) -> dict:
+    """Validate script.json, give scenes ids s01.., and add word counts."""
+    from . import dialogue
+    from .schema import assign_scene_ids, total_words, validate_script
+
+    proj = Project.open(a.project)
+    data = read_json(proj.script)
+    brief = read_json(proj.brief) if proj.brief.exists() else {}
+    problems = validate_script(data, speakers=brief.get("speakers"))
+    if problems:
+        return {"ok": False, "problems": problems}
+    data = assign_scene_ids(data)
+    words = total_words(data)
+    data["meta"] = {
+        **data.get("meta", {}),
+        "topic": brief.get("topic", data.get("meta", {}).get("topic", "")),
+        "script_writer": a.writer,
+        "words": words,
+        "estimated_minutes": round(words / dialogue.WORDS_PER_MINUTE, 2),
+    }
+    write_json(proj.script, data)
+    return {
+        "ok": True,
+        "words": words,
+        "estimated_minutes": data["meta"]["estimated_minutes"],
+        "scenes": [
+            {"id": s["id"], "title": s["title"], "lines": len(s["lines"])} for s in data["scenes"]
+        ],
+    }
 
 
 def cmd_dialogue(a) -> dict:
@@ -133,7 +186,13 @@ def cmd_voice(a) -> dict:
     script = load_script(proj)
     overrides = dict(v.split("=", 1) for v in (a.voice or []))
     timing = synthesize(
-        proj, script, engine=a.engine, speed=a.speed, voice_overrides=overrides, only=a.only
+        proj,
+        script,
+        engine=a.engine,
+        speed=a.speed,
+        voice_overrides=overrides,
+        only=a.only,
+        model=a.tts_model,
     )
     st = proj.load_status()
     for sc in timing["scenes"]:
@@ -141,6 +200,8 @@ def cmd_voice(a) -> dict:
     write_json(proj.status_file, st)
     return {
         "timing": str(proj.timing),
+        "engine": timing["engine"],
+        "tts_model": timing["tts_model"],
         "voices": timing["voices"],
         "total_duration": timing["total_duration"],
         "scenes": [
@@ -300,11 +361,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     v = sub.add_parser("voice")
     v.add_argument("project")
-    v.add_argument("--engine", default="kokoro", choices=["kokoro", "tone"])
+    v.add_argument("--engine", default="openrouter", choices=["openrouter", "kokoro", "tone"])
+    v.add_argument(
+        "--tts-model", help="OpenRouter speech model (default heygen/heygen-voice-1-turbo:free)"
+    )
     v.add_argument("--speed", type=float, default=1.0)
-    v.add_argument("--voice", action="append", help="speaker_id=kokoro_voice, e.g. host=af_heart")
+    v.add_argument("--voice", action="append", help="speaker_id=voice, e.g. host=nadine")
     v.add_argument("--only", action="append", help="re-synthesize only these scene ids")
     v.set_defaults(fn=cmd_voice)
+
+    sr = sub.add_parser("script-rules", help="rules + JSON schema for writing script.json")
+    sr.add_argument("project")
+    sr.set_defaults(fn=cmd_script_rules)
+
+    cs = sub.add_parser("check-script", help="validate script.json and assign scene ids")
+    cs.add_argument("project")
+    cs.add_argument("--writer", default="claude-opus-5-5 (Claude plan)")
+    cs.set_defaults(fn=cmd_check_script)
 
     b = sub.add_parser("brief")
     b.add_argument("project")

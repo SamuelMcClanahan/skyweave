@@ -45,6 +45,8 @@ class FakeOpenRouter:
         self.responses = list(responses)
         self.requests: list[dict] = []
         self.headers: list[dict] = []
+        self.speech_requests: list[dict] = []
+        self.audio = b""
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -70,6 +72,15 @@ class FakeOpenRouter:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 outer.requests.append(body)
                 outer.headers.append(dict(self.headers))
+                if self.path.endswith("/audio/speech"):
+                    outer.speech_requests.append(body)
+                    data = outer.audio
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/mpeg")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 status, payload = outer.responses.pop(0)
                 self._send(status, payload, {"Retry-After": "0"} if status == 429 else None)
 
@@ -239,3 +250,60 @@ def test_sources_are_included(tmp_path):
     )
     assert "Rays cross at the target." in msgs[1]["content"]
     assert "Narrator mode" in msgs[1]["content"]
+
+
+def _mp3(seconds: float = 1.0) -> bytes:
+    import subprocess
+
+    return subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"sine=frequency=300:duration={seconds}",
+         "-ac", "1", "-ar", "24000", "-f", "mp3", "pipe:1"],
+        capture_output=True, check=True,
+    ).stdout  # fmt: skip
+
+
+def test_openrouter_voice_engine(fake, tmp_path, demo_script):
+    from ivideo.schema import assign_scene_ids
+    from ivideo.tts import synthesize
+
+    f = fake([])
+    f.audio = _mp3(1.0)
+    proj = Project(tmp_path / "p").ensure()
+    script = assign_scene_ids(demo_script)
+    timing = synthesize(proj, script)  # default engine: OpenRouter HeyGen
+    req = f.speech_requests
+    assert len(req) == 6
+    assert {r["model"] for r in req} == {"heygen/heygen-voice-1-turbo:free"}
+    assert {r["voice"] for r in req} == {"nadine", "bram"}
+    assert all(r["response_format"] == "mp3" and "speed" not in r for r in req)
+    assert timing["engine"] == "openrouter" and timing["voices"] == {
+        "host": "nadine",
+        "learner": "bram",
+    }
+    assert all(0.9 < ln["duration"] < 1.2 for sc in timing["scenes"] for ln in sc["lines"])
+    # cached: same text and voice -> no new calls; a new voice -> only that speaker again
+    synthesize(proj, script)
+    assert len(f.speech_requests) == 6
+    synthesize(proj, script, voice_overrides={"host": "gareth"})
+    assert len(f.speech_requests) == 9 and f.speech_requests[-1]["voice"] == "gareth"
+
+
+def test_check_script_cli(tmp_path, demo_script, capsys):
+    from ivideo.cli import main
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "brief.json").write_text(json.dumps({"topic": "t", "minutes": 1, "speakers": 2}))
+    bad = copy.deepcopy(demo_script)
+    bad["scenes"][0]["lines"][0]["text"] = "**bold**"
+    (proj / "script.json").write_text(json.dumps(bad))
+    main(["check-script", str(proj)])
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is False and any("markup" in p for p in out["problems"])
+    (proj / "script.json").write_text(json.dumps(demo_script))
+    main(["check-script", str(proj)])
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is True and [s["id"] for s in out["scenes"]] == ["s01", "s02"]
+    main(["script-rules", str(proj)])
+    rules = json.loads(capsys.readouterr().out)
+    assert rules["target_words"] == 155 and "Dialogue mode" in rules["speaker_mode"]

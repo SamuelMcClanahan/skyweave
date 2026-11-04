@@ -49,6 +49,17 @@ Structure:
 """
 
 
+def speaker_mode(speakers: int) -> str:
+    return (
+        "Dialogue mode with exactly 2 speakers: one with role 'teacher' (id 'host') "
+        "and one with role 'learner' (id 'learner')."
+        if speakers == 2
+        else "Narrator mode with exactly 1 speaker: role 'narrator' (id 'narrator')."
+        if speakers == 1
+        else f"Dialogue mode with exactly {speakers} speakers; the first is the teacher."
+    )
+
+
 def build_messages(
     *,
     topic: str,
@@ -59,14 +70,7 @@ def build_messages(
     notes: str = "",
 ) -> list[dict]:
     words = int(minutes * WORDS_PER_MINUTE)
-    mode = (
-        "Dialogue mode with exactly 2 speakers: one with role 'teacher' (id 'host') "
-        "and one with role 'learner' (id 'learner')."
-        if speakers == 2
-        else "Narrator mode with exactly 1 speaker: role 'narrator' (id 'narrator')."
-        if speakers == 1
-        else f"Dialogue mode with exactly {speakers} speakers; the first is the teacher."
-    )
+    mode = speaker_mode(speakers)
     user = [
         f"Topic: {topic}",
         f"Audience: {audience}",

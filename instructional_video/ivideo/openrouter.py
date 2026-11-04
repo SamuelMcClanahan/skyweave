@@ -264,6 +264,72 @@ def chat(
     raise RuntimeError("every OpenRouter model failed:\n" + "\n".join(errors))
 
 
+DEFAULT_SPEECH_MODEL = "heygen/heygen-voice-1-turbo:free"
+
+
+def speech(
+    text: str,
+    *,
+    model: str = DEFAULT_SPEECH_MODEL,
+    voice: str | None = None,
+    response_format: str = "mp3",
+    speed: float | None = None,
+    retries: int = 6,
+    timeout: float = 120.0,
+) -> tuple[bytes, str]:
+    """POST /audio/speech (OpenAI-compatible). Returns (audio bytes, content type).
+
+    401/402/403 stop at once. 408/429/5xx retry with backoff (free models rate-limit).
+    """
+    key = api_key()
+    body: dict = {"model": model, "input": text, "response_format": response_format}
+    if voice:
+        body["voice"] = voice
+    if speed is not None and abs(speed - 1.0) > 1e-6:
+        body["speed"] = speed
+    delay = 2.0
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(
+            base_url() + "/audio/speech",
+            data=json.dumps(body).encode(),
+            method="POST",
+            headers=_headers(key),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = r.read()
+                ctype = r.headers.get("Content-Type", "")
+            if ctype.startswith("application/json"):  # an error wrapped in a 200
+                raise OpenRouterError(502, data.decode(errors="replace"))
+            if not data:
+                raise OpenRouterError(502, "empty audio")
+            return data, ctype
+        except urllib.error.HTTPError as e:
+            ra = e.headers.get("Retry-After") if e.headers else None
+            err = OpenRouterError(e.code, e.read().decode(errors="replace"))
+            if e.code in RETRYABLE and attempt < retries:
+                try:
+                    time.sleep(float(ra) if ra else delay)
+                except ValueError:
+                    time.sleep(delay)
+                delay = min(delay * 2, 60)
+                continue
+            raise err from None
+        except OpenRouterError as e:
+            if attempt < retries:
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
+                continue
+            raise e
+        except (urllib.error.URLError, TimeoutError):
+            if attempt < retries:
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
+                continue
+            raise
+    raise RuntimeError("unreachable")
+
+
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.S)
 
 

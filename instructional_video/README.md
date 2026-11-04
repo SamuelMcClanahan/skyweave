@@ -2,9 +2,12 @@
 
 This tool makes a short animated teaching video from a topic.
 
-- **OpenRouter** writes the spoken dialogue (the script).
-- **Kokoro-82M** (a free, local text-to-speech model) speaks each line.
-- **Claude Opus agents** (your Claude account, through a Claude Code Workflow) write
+- **Claude Opus 5.5** (your Claude plan, effort high, through a Claude Code Workflow)
+  writes the script: the spoken dialogue and the on-screen beat for each line.
+- **OpenRouter** speaks each line with the free voice model
+  `heygen/heygen-voice-1-turbo:free` (voices: nadine, tabitha, bram, gareth, noelle,
+  meredith, sabrina, lucian, weston, vincent). Kokoro-82M is a local option with no key.
+- **Claude Opus 5.5 agents** (same plan, effort high) write
   Manim animation code for each scene, render it, look at the frames, and fix problems.
 - **ffmpeg** joins the scenes, the voice, and the subtitles into one MP4.
 
@@ -14,7 +17,7 @@ This folder is separate from SkyWeave. It does not touch `v1/` or `v2/`.
 
 ```bash
 cd instructional_video
-./setup.sh            # system packages, Python env, Kokoro voice model (about 350 MB)
+./setup.sh            # system packages, Python env, Kokoro voice model (about 350 MB; local fallback voice)
 ./setup.sh --latex    # optional: adds LaTeX so scenes can show formulas with MathTex
 ```
 
@@ -52,42 +55,50 @@ Workflow arguments (all optional except a topic for a new project):
 | `speakers` | 1 = narrator, 2 = teacher + learner dialogue | 2 |
 | `sources` | Files with facts to use (paths) | none |
 | `notes` | Extra instructions for the scriptwriter | none |
-| `model` | OpenRouter model id for the dialogue | `anthropic/claude-opus-5.5` |
-| `fallbacks` | More OpenRouter model ids, tried in order | `openai/gpt-6.1-sol`, `x-ai/grok-4.7` |
-| `script_file` | Use this script JSON. Skips OpenRouter. | none |
-| `redo_dialogue` | Ask OpenRouter for a new script | false |
+| `script_file` | Use this script JSON instead of writing one | none |
+| `redo_script` | Write a new script for an existing project | false |
+| `voice_engine` | `openrouter` or `kokoro` (local, no key) | openrouter |
+| `tts_model` | OpenRouter speech model | `heygen/heygen-voice-1-turbo:free` |
+| `redo_voice` | Speak all lines again | false |
 | `redo_scenes` | Scene ids to animate again, for example `["s02"]` | none |
-| `voices` | Kokoro voice per speaker, for example `{"host": "bf_emma"}` | af_heart, am_michael |
+| `voices` | Voice per speaker, for example `{"host": "gareth"}` | host nadine, learner bram |
 | `speed` | Speech speed | 1.0 |
 | `max_fix_rounds` | Review-and-repair rounds per scene | 2 |
 | `max_renders` | Renders per animator agent | 6 |
 | `redo_design` | Write `scenes/common.py` again | false |
-| `animator_model` | Model alias for the Claude agents | opus |
+| `animator_model` | Model for every Claude agent | `claude-opus-5-5` |
+| `effort` | Reasoning effort for every Claude agent | high |
 | `burn_subtitles` | Draw subtitles into the picture | false (soft subtitles) |
 | `latex` | Install LaTeX during setup | false |
 
 What the workflow does:
 
-1. **Prepare** (1 agent): checks the setup, gets the dialogue from OpenRouter,
-   speaks every line, and measures the time of each line.
-2. **Design** (1 Claude Opus agent): writes `scenes/common.py`, the shared drawing
+Every Claude agent runs on `claude-opus-5-5` at effort `high`.
+
+1. **Prepare** (1 agent): checks the setup and the OpenRouter key, and writes the brief.
+2. **Script** (1 Claude Opus 5.5 agent): writes `script.json` with `ivideo script-rules`
+   and checks it with `ivideo check-script` until it passes.
+3. **Voice** (1 agent): OpenRouter `heygen/heygen-voice-1-turbo:free` speaks each line;
+   the tool measures the time of each line. A line is spoken again only if its text,
+   voice, or model changed.
+4. **Design** (1 Claude Opus agent): writes `scenes/common.py`, the shared drawing
    library for this video. It holds a drawing function for each object that more
    than one scene uses, fixed positions, one color per concept, and a "handoff"
    function for each scene cut where the next scene continues the same diagram.
    It renders a gallery image of the library and checks it.
-3. **Animate** (1 Claude Opus agent per scene, in parallel): writes `scenes/sNN.py`,
+5. **Animate** (1 Claude Opus agent per scene, in parallel): writes `scenes/sNN.py`,
    renders a 480p draft, looks at one frame per line, and fixes problems.
-4. **Review** (1 Claude Opus agent per scene, that did not write the code):
+6. **Review** (1 Claude Opus agent per scene, that did not write the code):
    looks at every frame and approves or rejects. A rejected scene goes to a
    repair agent, then to review again (at most `max_fix_rounds` times).
-5. **Continuity** (1 Claude Opus agent): compares the last frame of each scene with
+7. **Continuity** (1 Claude Opus agent): compares the last frame of each scene with
    the first frame of the next, and the look of all scenes. It can send at most
    3 scenes back for repair (each repair is reviewed again).
-6. **Assemble** (1 agent): renders all scenes at 1080p 30 fps and joins them.
-7. **Final check** (1 Claude Opus agent): checks length, audio level, streams,
+8. **Assemble** (1 agent): renders all scenes at 1080p 30 fps and joins them.
+9. **Final check** (1 Claude Opus agent): checks length, audio level, streams,
    and that all scenes look like one video.
 
-Agent count: about 3 + 2 to 4 per scene. A 6-scene video uses about 20 to 30 agents.
+Agent count: about 5 + 2 to 4 per scene. A 6-scene video uses about 20 to 30 agents.
 
 Output: `projects/<project>/out/final.mp4`, `final.srt`, `contact_sheet.png`.
 
@@ -98,8 +109,10 @@ Run it again with the same `project` to continue. Approved scenes stay as they a
 ```bash
 uv run ivideo doctor
 uv run ivideo new <project> --topic "..." --minutes 3 --speakers 2 [--source notes.md]
-uv run ivideo dialogue <project> [--model id] [--fallback id]   # calls OpenRouter
-uv run ivideo voice <project> [--voice host=af_heart] [--speed 1.0]
+uv run ivideo script-rules <project>          # rules + JSON schema for the script writer
+uv run ivideo check-script <project>          # validate script.json
+uv run ivideo voice <project> [--engine openrouter|kokoro] [--voice host=nadine]
+uv run ivideo dialogue <project> [--model id] # optional: script from an OpenRouter LLM instead
 uv run ivideo brief <project> [sNN]           # what an animator needs
 uv run ivideo render <project> sNN            # 480p draft + layout report + frames
 uv run ivideo still <project> common.py       # last frame of a plain Scene (class Gallery)
@@ -142,7 +155,7 @@ length, streams, loudness, long silences, and one subtitle per line.
 
 ## 5. The script format
 
-`script.json` (from OpenRouter, checked by `ivideo/schema.py`):
+`script.json` (written by the Claude Opus 5.5 Script agent, checked by `ivideo/schema.py`):
 
 ```json
 {
@@ -157,7 +170,8 @@ length, streams, loudness, long silences, and one subtitle per line.
 Rules: at most 40 words per line (the prompt asks for 30), no markup, no stage
 directions, every speaker used.
 
-How the OpenRouter request works (`ivideo/openrouter.py`):
+The optional `ivideo dialogue` command can ask an OpenRouter LLM for the script
+instead. The workflow does not use it. How that request works (`ivideo/openrouter.py`):
 
 - The tool reads the model's `supported_parameters` from `/api/v1/models` and sends
   only those. Claude 5.5 and GPT-6.1 Sol reject `temperature`, so it is not sent to them.
@@ -172,18 +186,18 @@ How the OpenRouter request works (`ivideo/openrouter.py`):
 ## 6. Tests
 
 ```bash
-uv run pytest        # 27 tests, about 30 s; no network and no key needed
+uv run pytest        # 29 tests, about 30 s; no network and no key needed
 uv run ruff check .
 ```
 
 The OpenRouter tests use a local fake server. The render tests use the `tone` voice
 engine (a quiet beep, no model needed).
-`tests/fixtures/demo_script.json` is a hand-written test script, not OpenRouter output.
+`tests/fixtures/demo_script.json` is a hand-written test script.
 
 ## 7. Limits
 
 - 2D motion graphics only (Manim). No avatars, faces, or video footage.
-- English voices only by default (Kokoro has some other languages).
+- English voices by default. The free HeyGen model may rate-limit; the tool retries.
 - No background music.
 - Render time is about 1 to 3 minutes per scene at 1080p on 4 CPUs.
 - The reviewers judge still frames, not motion between frames.

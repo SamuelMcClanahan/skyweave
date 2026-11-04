@@ -1,4 +1,8 @@
-"""Speak every line with Kokoro-82M (ONNX, CPU) and write timing.json.
+"""Speak every line and write timing.json.
+
+Engines: "openrouter" (default; OpenRouter /audio/speech, model
+heygen/heygen-voice-1-turbo:free), "kokoro" (local Kokoro-82M, no key),
+"tone" (tests: a quiet beep).
 
 Audio comes first. The animation is then timed to the measured audio, so
 sync never drifts: each scene's video must hit line start times from timing.json.
@@ -6,8 +10,11 @@ sync never drifts: each scene's video must hit line start times from timing.json
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -21,9 +28,23 @@ GAP_SAME = 0.35  # silence between two lines by the same speaker
 GAP_SWITCH = 0.55  # silence when the speaker changes
 TAIL = 1.0  # silence after the last line of a scene
 
-# Voice per speaker role. Kokoro v1.0 voice ids (American English).
-DEFAULT_VOICES = {"host": "af_heart", "learner": "am_michael", "narrator": "af_heart"}
-SPARE_VOICES = ["am_puck", "af_bella", "bm_george", "bf_emma"]
+DEFAULT_ENGINE = "openrouter"
+
+# Voice per speaker id, per engine.
+# HeyGen default voices: nadine, tabitha, bram, gareth, noelle, meredith, sabrina,
+# lucian, weston, vincent. Kokoro v1.0 ids are American English voices.
+ENGINE_VOICES = {
+    "openrouter": (
+        {"host": "nadine", "learner": "bram", "narrator": "nadine"},
+        ["gareth", "tabitha", "lucian", "noelle", "weston", "meredith"],
+    ),
+    "kokoro": (
+        {"host": "af_heart", "learner": "am_michael", "narrator": "af_heart"},
+        ["am_puck", "af_bella", "bm_george", "bf_emma"],
+    ),
+    "tone": ({"host": "a", "learner": "b", "narrator": "a"}, ["c", "d", "e", "f"]),
+}
+DEFAULT_VOICES, SPARE_VOICES = ENGINE_VOICES["kokoro"]
 
 _SPOKEN = [
     (re.compile(r"\s*[—–]\s*"), ", "),  # long dashes read as a pause
@@ -37,15 +58,50 @@ def clean_for_speech(text: str) -> str:
     return text.strip()
 
 
-class Synth:
-    """Wraps a TTS engine. engine='kokoro' (default) or 'tone' (tests and dry runs:
-    a quiet 220 Hz beep, 0.4 s per word, no model needed)."""
+def decode_audio(data: bytes, ctype: str = "") -> np.ndarray:
+    """Any audio bytes (mp3, wav, ...) -> mono float32 at SAMPLE_RATE, via ffmpeg."""
+    fmt = ["-f", "s16le", "-ar", "24000", "-ac", "1"] if "pcm" in ctype else []
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            *fmt,
+            "-i",
+            "pipe:0",
+            "-f",
+            "f32le",
+            "-ac",
+            "1",
+            "-ar",
+            str(SAMPLE_RATE),
+            "pipe:1",
+        ],
+        input=data,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"could not decode {ctype or 'audio'}: {proc.stderr.decode()[-500:]}")
+    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
 
-    def __init__(self, engine: str = "kokoro", speed: float = 1.0):
+
+class Synth:
+    """Wraps a TTS engine: 'openrouter' (default), 'kokoro', or 'tone' (tests and
+    dry runs: a quiet 220 Hz beep, 0.4 s per word, no model or key needed)."""
+
+    def __init__(self, engine: str = DEFAULT_ENGINE, speed: float = 1.0, model: str | None = None):
         self.engine = engine
         self.speed = speed
         self._k = None
-        if engine == "kokoro":
+        self.model = None
+        if engine == "openrouter":
+            from . import openrouter
+
+            openrouter.api_key()  # fail early with a clear message
+            self.model = (
+                model or os.environ.get("IVIDEO_TTS_MODEL") or openrouter.DEFAULT_SPEECH_MODEL
+            )
+        elif engine == "kokoro":
             from kokoro_onnx import Kokoro
 
             model = Path(os.environ.get("IVIDEO_KOKORO_MODEL", MODELS_DIR / "kokoro-v1.0.onnx"))
@@ -58,10 +114,22 @@ class Synth:
         elif engine != "tone":
             raise ValueError(f"unknown TTS engine {engine!r}")
 
+    def signature(self, text: str, voice: str) -> str:
+        """Hash of everything that changes the audio of a line (cache key)."""
+        key = json.dumps([self.engine, self.model, voice, self.speed, clean_for_speech(text)])
+        return hashlib.sha256(key.encode()).hexdigest()[:16]
+
     def voices(self) -> list[str]:
         return sorted(self._k.get_voices()) if self._k else []
 
     def say(self, text: str, voice: str) -> np.ndarray:
+        if self.engine == "openrouter":
+            from . import openrouter
+
+            data, ctype = openrouter.speech(
+                clean_for_speech(text), model=self.model, voice=voice, speed=self.speed
+            )
+            return decode_audio(data, ctype)
         if self._k is None:  # tone engine: deterministic, 0.4 s per word
             n = int(SAMPLE_RATE * 0.4 * max(1, len(text.split())))
             return (0.1 * np.sin(2 * np.pi * 220 * np.arange(n) / SAMPLE_RATE)).astype(np.float32)
@@ -73,15 +141,18 @@ class Synth:
         return np.asarray(samples, dtype=np.float32)
 
 
-def assign_voices(speakers: list[dict], overrides: dict[str, str] | None = None) -> dict[str, str]:
+def assign_voices(
+    speakers: list[dict], overrides: dict[str, str] | None = None, engine: str = "kokoro"
+) -> dict[str, str]:
+    defaults, spares = ENGINE_VOICES.get(engine, ENGINE_VOICES["kokoro"])
     out: dict[str, str] = {}
-    spare = iter(SPARE_VOICES)
+    spare = iter(spares)
     for s in speakers:
         sid = s["id"]
-        v = (overrides or {}).get(sid) or DEFAULT_VOICES.get(sid)
+        v = (overrides or {}).get(sid) or defaults.get(sid)
         if v is None or v in out.values():
             role = s.get("role", "").lower()
-            v = DEFAULT_VOICES.get(role) if "narrat" in role else None
+            v = defaults.get("narrator") if "narrat" in role else None
             if v is None or v in out.values():
                 v = next(spare)
         out[sid] = v
@@ -105,15 +176,19 @@ def synthesize(
     project: Project,
     script: dict,
     *,
-    engine: str = "kokoro",
+    engine: str = DEFAULT_ENGINE,
     speed: float = 1.0,
     voice_overrides: dict[str, str] | None = None,
     only: list[str] | None = None,
+    model: str | None = None,
 ) -> dict:
-    """Write audio/<sid>/<n>.wav, audio/<sid>.wav and timing.json. Returns the timing dict."""
+    """Write audio/<sid>/<n>.wav, audio/<sid>.wav and timing.json. Returns the timing dict.
+
+    A line is re-synthesized only if its text, voice, engine, model or speed changed
+    (or its scene is listed in `only`)."""
     project.ensure()
-    synth = Synth(engine, speed)
-    voices = assign_voices(script["speakers"], voice_overrides)
+    synth = Synth(engine, speed, model)
+    voices = assign_voices(script["speakers"], voice_overrides, engine)
     scenes_out = []
     for sc in script["scenes"]:
         sid = sc["id"]
@@ -129,9 +204,13 @@ def synthesize(
                 chunks.append(_silence(gap))
                 cursor += gap
             wav = line_dir / f"{i:02d}.wav"
-            if only is None or sid in only or not wav.exists():
+            sig_file = wav.with_suffix(".sig")
+            sig = synth.signature(ln["text"], voices[ln["speaker"]])
+            fresh = wav.exists() and sig_file.exists() and sig_file.read_text() == sig
+            if (only is not None and sid in only) or not fresh:
                 audio = _trim(synth.say(ln["text"], voices[ln["speaker"]]))
                 sf.write(wav, audio, SAMPLE_RATE, subtype="PCM_16")
+                sig_file.write_text(sig)
             else:
                 audio, _ = sf.read(wav, dtype="float32")
             dur = len(audio) / SAMPLE_RATE
@@ -171,6 +250,7 @@ def synthesize(
         "title": script["title"],
         "sample_rate": SAMPLE_RATE,
         "engine": engine,
+        "tts_model": synth.model,
         "voices": voices,
         "speakers": script["speakers"],
         "total_duration": round(sum(s["duration"] for s in scenes_out), 3),
