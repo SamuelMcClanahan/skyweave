@@ -121,7 +121,9 @@ class Synth:
 
     def signature(self, text: str, voice: str) -> str:
         """Hash of everything that changes the audio of a line (cache key)."""
-        key = json.dumps([self.engine, self.model, voice, self.speed, clean_for_speech(text)])
+        key = json.dumps(
+            [self.engine, self.model, voice, self.speed, clean_for_speech(text), TRIM_THRESH]
+        )
         return hashlib.sha256(key.encode()).hexdigest()[:16]
 
     def voices(self) -> list[str]:
@@ -174,7 +176,12 @@ def _silence(seconds: float) -> np.ndarray:
     return np.zeros(int(round(seconds * SAMPLE_RATE)), dtype=np.float32)
 
 
-def _trim(x: np.ndarray, thresh: float = 1e-3, pad: float = 0.03) -> np.ndarray:
+# -45 dBFS: above the HeyGen PCM noise floor (about -60 dBFS, 0.3 s before each
+# line) and above the -50 dB silence check in assemble, far below speech.
+TRIM_THRESH = 10 ** (-45 / 20)
+
+
+def _trim(x: np.ndarray, thresh: float = TRIM_THRESH, pad: float = 0.05) -> np.ndarray:
     """Cut leading/trailing near-silence so gaps are set by us, not by the engine."""
     idx = np.flatnonzero(np.abs(x) > thresh)
     if idx.size == 0:

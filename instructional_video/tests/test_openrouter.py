@@ -310,3 +310,17 @@ def test_check_script_cli(tmp_path, demo_script, capsys):
     main(["script-rules", str(proj)])
     rules = json.loads(capsys.readouterr().out)
     assert rules["target_words"] == 155 and "Dialogue mode" in rules["speaker_mode"]
+
+
+def test_trim_cuts_engine_noise_floor():
+    import numpy as np
+
+    from ivideo.tts import SAMPLE_RATE, _trim
+
+    rng = np.random.default_rng(0)
+    noise = (rng.uniform(-1, 1, int(0.3 * SAMPLE_RATE)) * 10 ** (-58 / 20)).astype(np.float32)
+    t = np.arange(SAMPLE_RATE) / SAMPLE_RATE
+    speech = (0.5 * np.sin(2 * np.pi * 200 * t)).astype(np.float32)
+    out = _trim(np.concatenate([noise, speech, noise]))
+    # only the 0.05 s pad is left on each side of the 1.0 s of speech
+    assert abs(len(out) / SAMPLE_RATE - 1.1) < 0.01
