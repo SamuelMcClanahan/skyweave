@@ -17,7 +17,7 @@ payload.
 
 Build one parametric true-X frame with two configurations:
 
-- **5-inch primary:** enough room for the Cubie A7Z, cooling, battery, camera,
+- **5-inch primary:** enough room for the Cubie A7S, cooling, battery, camera,
   and serviceable wiring;
 - **4-inch alternate:** useful only if the weighed payload fits without
   sacrificing thrust, cooling, or battery retention.
@@ -295,7 +295,7 @@ supported F7/H7 flight controller with blackbox, receiver failsafe, and spare UA
 receiver and independent manual transmitter
 low-latency pilot camera/VTX or another safe pilot-view link
 dedicated 5 V companion buck, initially provisioned around 6 A (measure actual need)
-Cubie A7Z + heatsink/fan + storage
+Cubie A7S + heatsink/fan + storage
 global-shutter tracking camera + lens + cable/adapter
 4S LiPo, battery lead, low-ESR capacitor, charger, and storage-safe case
 buzzer, physical arming/kill procedure, and strain-relieved wiring
@@ -326,7 +326,7 @@ CAD master before freezing holes:
 1 x receiver, independent transmitter/arming/kill path, and buzzer
 1 x low-latency pilot camera/VTX or another independent pilot-view link
 1 x current-limited 5 V companion buck, initially reserved at about 6 A
-1 x Cubie A7Z, heatsink/fan, storage, and camera interface hardware
+1 x Cubie A7S, heatsink/fan, storage, and camera interface hardware
 1 x global-shutter tracking camera, lens, rigid bracket, and lens window
 1 x 4S LiPo, charger, storage case, connector, capacitor, and battery straps
 several propeller sets, verified motor screws, spare arms, and structural hardware

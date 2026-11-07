@@ -23,7 +23,7 @@ with a separately reviewed safety plan.
 
 Use a **5-inch X-frame** as the default CAD configuration.
 
-The Cubie A7Z is only 65 x 30 mm, but the complete payload also needs a
+The Cubie A7S is only 65 x 30 mm, but the complete payload also needs a
 heatsink or airflow, camera board and lens, wiring, radio hardware, battery,
 and a protective fairing. A 4-inch frame can work only if the measured
 all-up mass stays low and the payload is kept compact.
@@ -39,13 +39,13 @@ vehicle type:        4-motor X quadcopter
 configuration:       5-inch primary, 4-inch alternate
 first battery:       4S LiPo
 control:             independent flight controller owns stabilization/failsafe
-companion:           Cubie A7Z owns camera processing and experiment software
+companion:           Cubie A7S owns camera processing and experiment software
 camera:              global-shutter camera, fixed lens, forward-facing
 test nose:           rounded removable TPU sensor fairing, not an impactor
 test environment:    tethered/contained, low altitude, clear propeller area
 ```
 
-## Cubie A7Z constraints to design around
+## Cubie A7S constraints to design around
 
 Radxa's current documentation lists:
 
@@ -207,7 +207,7 @@ Use this ownership split:
 
 ```text
 flight controller: attitude stabilization, motor output, arming, failsafe
-Cubie A7Z:         camera capture, tracking, logging, high-level experiments
+Cubie A7S:         camera capture, tracking, logging, high-level experiments
 ```
 
 The Cubie should not directly generate motor PWM during the first flight
@@ -261,7 +261,7 @@ Use separate, filtered power domains:
 LiPo
   -> 4-in-1 ESC / motors
   -> flight-controller regulated rail
-  -> dedicated 5 V high-current buck -> Cubie A7Z
+  -> dedicated 5 V high-current buck -> Cubie A7S
   -> camera rail as required by the selected module
 ```
 
@@ -325,7 +325,7 @@ frame plates, arms, standoffs, and fasteners
 motors and propellers
 FC, 4-in-1 ESC, receiver, buzzer, and wiring
 LiPo and connector
-Cubie A7Z, heatsink/fan, storage, antenna, and mount
+Cubie A7S, heatsink/fan, storage, antenna, and mount
 camera, lens, FPC/USB cable, and camera pod
 TPU fairing and lens window
 10-15% growth margin
@@ -348,7 +348,7 @@ Model these as separate parts/configurations:
 2. motor/arm plates and replaceable standoffs;
 3. FC/ESC adapter plate;
 4. adjustable battery tray and strap slots;
-5. Cubie A7Z clamp/tray with connector keep-outs;
+5. Cubie A7S clamp/tray with connector keep-outs;
 6. camera bracket with a repeatable optical datum;
 7. heatsink/fan and airflow clearance;
 8. removable TPU fairing/soft bumper;

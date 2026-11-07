@@ -30,6 +30,13 @@ skyweave2-detect = "skyweave2.detector.runner:main"
 dev = [
   "pytest>=8.0",
   "ruff>=0.4",
+  # Drone stack F/S series (fc_link, SITL harness) run in the documented
+  # `uv sync --extra dev` + `uv run pytest` path.
+  "pymavlink>=2.4.50",
+]
+# Drone stack (phase E1): MAVLink2 to the FC. SITL only in E1 (contract [F1]).
+drone = [
+  "pymavlink>=2.4.50",
 ]
 # Regeneration only (`python -m skyweave2.transport.generate`). Deliberately
 # NOT in `dev`: the generated module is checked in, so the documented
@@ -46,6 +53,11 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# TESTING_DOCTRINE rule 6: the slow tier is marked and runs at hand-back.
+markers = [
+  "slow: slow tier (SITL scenarios, soak-class); run at hand-back on the gate platform",
+  "sitl: needs the pinned ArduCopter 4.7.0 SITL (skyweave2.drone.sitl.ensure_sitl)",
+]
 
 [tool.ruff]
 line-length = 100
