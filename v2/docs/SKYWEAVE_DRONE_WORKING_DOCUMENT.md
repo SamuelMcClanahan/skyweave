@@ -20,7 +20,7 @@ detailed source material:
 
 - [`background/DRONE_RESEARCH_VEHICLE_REQUIREMENTS.md`](./background/DRONE_RESEARCH_VEHICLE_REQUIREMENTS.md)
   — the original integration brief. Still the fullest treatment of the Cubie
-  A7Z constraints, separated power domains, camera requirements, and vendor
+  A7S constraints, separated power domains, camera requirements, and vendor
   references.
 - [`background/DRONE_CAD_FREEZE_SHEET.md`](./background/DRONE_CAD_FREEZE_SHEET.md)
   — the detailed CAD parameter tables, material schedule, waterjet and carbon
@@ -30,6 +30,11 @@ Neither overrides this document. Where they disagree with it, this document
 wins; where they carry detail this document does not repeat, use them. Both
 still describe a 4S first battery and a 2:1/2.5:1 thrust target, which sections
 11.1 and 11.3 have replaced with the 6S candidate and the 4:1 goal.
+
+**Missing drone documents (noted 2026-10-08, `PHASE_E1_BRIEF.md` §8).**
+`DRONE_STACK_SPEC_HANDOFF.md` and the D8 set of drone documents are not in this
+repository. They are to be restored from Samuel's copies in his Cowork Project;
+Samuel supplies the files. Do not reconstruct them from memory.
 
 Source priority is:
 
@@ -75,6 +80,10 @@ flight controller:
 The drone never begins with open-world search. It starts with a known track and
 a bounded search window from the ground system.
 
+> **Amended 2026-10-08.** The line above no longer holds. The drone now searches
+> and acquires on its own after a ground prime, with no ground cue
+> (`PHASE_E1_BRIEF.md` 3.1). See the §14 ledger entry "Onboard search".
+
 ## 3. Safety boundary
 
 Samuel's source notes include deliberate physical-contact geometry and an
@@ -88,6 +97,33 @@ bumper. Any soft-capture experiment would need a separate safety review.
 
 Live tests use owned targets, a controlled site, conservative separation,
 human authorization, a continuous abort path, and an FC-owned failsafe.
+
+**Amendment 2026-10-08: soft-contact terminal state.** A terminal `TOUCH` state
+for soft-contact demos was reviewed and adopted on 2026-10-08
+(`PHASE_E1_BRIEF.md` 3.4; **Chosen**). For those demos only, it supersedes the
+non-contact-only statement above. Standoff trials stay non-contact. `TOUCH` is
+allowed only under all of these conditions:
+
+- owned, soft, unmanned targets only;
+- a controlled site, with no people in the operating volume;
+- nose-first contact, never the props;
+- closure speed capped by the primed trial cap `v_max` (Provisional default
+  2.5 m/s, `PHASE_E1_BRIEF.md` §6);
+- an image-space commit gate: commit only when the box fill `w / 1920 >= alpha`
+  and the box center lies within `beta` (a fraction of the frame width) of the
+  image center, on a confirmed track with `k` consecutive hits that is not
+  coasting (`DRONE_CONTRACTS_D0.md` [G4]). After commit the vehicle flies open
+  loop through the predicted contact point, then brakes and climbs ([G5]);
+- v1 flies one pass, then an unconditional RTL (T16; `pass_budget` is 1).
+  Autonomous miss handling and retry are v2: specced, not flown ([M6]);
+- hit or miss is decided on the ground by the human plus replay, not by the
+  vehicle ([M6]); and
+- the closure-speed cap rises only after two clean trials at the current cap,
+  and never in the same trial as a gains change.
+
+The rejection of rigid impact geometry above is unchanged: no rigid contact
+cone, axial impact spine, brittle contact tip, or structural optimization for
+ramming is part of this design.
 
 ## 4. End-to-end architecture
 
@@ -234,7 +270,7 @@ USB/UVC global-shutter fallback.
 
 ### 6.2 Companion computer
 
-**Chosen:** Radxa Cubie A7Z for camera processing, relative tracking, logging,
+**Chosen:** Radxa Cubie A7S for camera processing, relative tracking, logging,
 and later high-level commands.
 
 Known vendor envelope:
@@ -616,7 +652,7 @@ supported F7/H7 flight controller and soft-mount hardware
 receiver, transmitter, buzzer, and independent kill/abort path
 6S LiPo candidates, connector, capacitor, charger, and safe storage
 5 V high-current buck with filtering/current limiting
-Cubie A7Z, storage, heatsink/fan, antenna, and tray
+Cubie A7S, storage, heatsink/fan, antenna, and tray
 global-shutter camera, lens, cable/adapter, and USB fallback
 independent pilot-view camera/link if required for manual flight
 carbon laminate, G10 deck, fasteners, insulation, straps, and spares
@@ -664,6 +700,14 @@ and measured curves stay in one place.
 | Low motor resistance | fixed temperature benefit claimed | Temperature depends on full operating point | Prefer documented low loss, but reject fixed 20 °C claim without test |
 | Specific thrust | about 4.5 g/W fixed by disk loading | System efficiency depends on more than disk area | **Rejected as a fixed constant** |
 | Battery endurance | 2500 mAh gives about 12 min | No measured hover-current budget | **Unverified;** determine from usable energy and measured current |
+| Ground cueing | Ground layer owns cueing (the §2 split) | §2, §4.4: the drone starts from a ground cue and bounded search window | **Dropped for now, 2026-10-08** (`PHASE_E1_BRIEF.md` §1, 3.1). Returns later for full autonomy |
+| Onboard search | — | §2: the drone never begins with open-world search | **Adopted, 2026-10-08** (`PHASE_E1_BRIEF.md` 3.1): after a ground prime the drone launches, searches, and acquires on its own, with no ground cue; engaging still needs human authorization. Amends the §2 line, which is marked amended |
+| TOUCH state | Contact geometry described as settled (Physical contact row) | Physical contact row: non-contact tracking only; §3 required a separate safety review for any soft-capture experiment | **Reviewed and adopted, 2026-10-08** (`PHASE_E1_BRIEF.md` 3.4; §3 amendment). Supersedes the non-contact-only part of the Physical contact row for soft-contact demos only, under the §3 conditions. The rejection of rigid impact geometry stands |
+| Gimbal launcher | — | — | **Rejected, 2026-10-08** (`PHASE_E1_BRIEF.md` 3.10): a quad self-aims in flight. Launch is a ground auto-takeoff from a flat stand |
+| Throw mode / hand launch | — | — | **Shelved, 2026-10-08** (`PHASE_E1_BRIEF.md` 3.10). Hazard on record: prop spin-up near hands |
+| Drone packet contract | — | — | **JSON wire v1 frozen, 2026-10-08** (`PHASE_E1_BRIEF.md` 3.7; [`DRONE_CONTRACTS_D0.md`](./DRONE_CONTRACTS_D0.md) §2, decision E1-D1) |
+| Flight recording | — | — | **Packets only, whole flight, 2026-10-08** (`PHASE_E1_BRIEF.md` 3.8; `DRONE_CONTRACTS_D0.md` [R1]): detections, tracks, mission state, fc_link health, and the full MAVLink log. No in-flight frame recording for now; training data comes from ground sessions |
+| Airframe layout | — | §10.1: true-X quadcopter | **Folded in, 2026-10-08** (`PHASE_E1_BRIEF.md` §1, §2): pusher configuration (prop-free nose, camera aligned with flight direction) and symmetric X |
 
 ## 15. Open questions
 
@@ -679,9 +723,16 @@ than carried forward.
    controlled target be larger and higher contrast?
 3. What state rate and maximum age follow from the actual speed and allowed
    position-error budget?
-4. What end-to-end exposure-to-command latency does the A7Z classical-CV path
+4. What end-to-end exposure-to-command latency does the A7S classical-CV path
    achieve?
-5. Which exact global-shutter module works on the A7Z, and is USB required?
+   **Answered 2026-10-08** (`PHASE_E1_BRIEF.md` §2): percepd v0 runs 18.4 ms
+   glass-to-boxes at 54 FPS sequential and 27.3 ms at 60 FPS pipelined
+   keep-latest (Measured, as recorded in the brief). That measurement ends at
+   the boxes; the tracker, guidance, and FC-command terms after it are not in it.
+5. Which exact global-shutter module works on the A7S, and is USB required?
+   **Answered 2026-10-08** (`PHASE_E1_BRIEF.md` §2): an AR0234 global-shutter
+   camera over USB3 UVC, flight capture YUYV 1920x1200 at 80 FPS; MJPG is
+   rejected and 640x360 at 120 FPS is a reserved sprint mode (Chosen).
 6. What is the real installed Cubie/camera/cooling mass and peak 5 V power?
 7. Does the proposed 2207/2208, 1700–1900 KV, 6S, high-pitch 5-inch system meet
    thrust, eRPM, current, sag, vibration, and temperature limits?
@@ -710,11 +761,16 @@ than carried forward.
     resistance — is wrong, and does the answer change the candidate stack?
 16. At the measured all-up mass, what companion-payload mass is actually
     allowable, and how much growth margin is left after it?
-17. Which exact Cubie A7Z RAM/storage variant, heatsink, and fan arrangement is
+17. Which exact Cubie A7S RAM/storage variant, heatsink, and fan arrangement is
     the build standard, so that its mass and thermal behavior mean one thing?
 18. Which FC firmware target — Betaflight for manual flight, or ArduPilot/PX4
     for the later high-level command path — and does that choice constrain the
     F7/H7 board selection in §6.3?
+    **Answered 2026-10-08** (`PHASE_E1_BRIEF.md` §1, §2): ArduPilot Copter
+    4.7.0 on a Matek H743 SLIM V4, an H7 board inside §6.3's preference
+    (Chosen). The companion link is SERIAL1 (UART7), MAVLink2 at 921600; the
+    1251-parameter baseline is versioned; the GUIDED command path (arm,
+    takeoff, velocity setpoint, land) is proven in SITL, not on the real FC.
 19. Which 6S battery connector, charger, storage, and transport procedure is
     standard, and does the connector survive the measured burst current?
 20. Where is the onboard camera's optical axis relative to the vehicle datum,
@@ -728,6 +784,19 @@ than carried forward.
 24. Which independent pilot-view camera and link is used for manual flight, and
     are its latency and failure behavior verified separately from the tracking
     camera's?
+25. How is the camera boresight calibrated from the miss vectors logged at
+    commit (`DRONE_CONTRACTS_D0.md` [G6], [R4]), and how many logged passes
+    does it need? Until then the AR0234 intrinsics and the mount roll and
+    uptilt are placeholders (contract findings E1-F3, E1-F9). Added 2026-10-08.
+26. What is the dataset and negatives plan for the single-class target
+    detector: how much ground-session AR0234 footage, auto-labeled by
+    classical CV, plus synthetic renders; which negatives (birds, planes,
+    clouds); and which held-out real clips form the replay gate before flight
+    (`PHASE_E1_BRIEF.md` 3.9)? Added 2026-10-08.
+27. What range does the Cubie Wi-Fi access point reach at the flying site,
+    between the ground laptop and the drone at search altitude, and does it
+    hold the ground UI link inside the ground-link timeout
+    (`DRONE_CONTRACTS_D0.md` T18)? Added 2026-10-08.
 
 ## 16. Source-note references to verify
 

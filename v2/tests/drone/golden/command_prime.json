@@ -1,0 +1,1 @@
+{"cmd_id":"ui-0001","command":"prime","params":{"alpha":0.4,"battery_floor_pct":30.0,"beta":0.1,"d_s":5.0,"engage_preauthorized":false,"flight_time_cap_s":180.0,"geofence_radius_m":60.0,"k":5,"pass_budget":1,"search_alt":10.0,"target_width_m":1.0,"trial_type":"touch","v_max":2.5},"token":"fixture-token-not-a-secret","v":1}

@@ -1,0 +1,18 @@
+# gitleaks false positives. Each line is a finding fingerprint:
+#   <commit>:<path at that commit>:<rule>:<line>
+# Check each new entry by hand before you add it. On a true hit, rotate the
+# secret. An ignore entry does not un-expose a secret.
+#
+# Commit f28fbe9 (2026-06-06), third-party vendor bundles. The paths are
+# from before the v1/ move; the files are now under v1/viz_web/vendor/.
+
+# chevrotain (three.js examples): the match is the class name
+# "MismatchedTokenException" in minified code. It is not a key.
+f28fbe9398d7617395d1b5b2badeae1c0ea3b89b:viz_web/vendor/three/examples/jsm/libs/chevrotain.module.min.js:generic-api-key:84
+
+# Cesium 1.113: the JWT is Ion.defaultAccessToken, the public default ion
+# token that ships inside every Cesium build. It is the same value in all
+# three bundle files.
+f28fbe9398d7617395d1b5b2badeae1c0ea3b89b:viz_web/vendor/cesium/index.cjs:jwt:5665
+f28fbe9398d7617395d1b5b2badeae1c0ea3b89b:viz_web/vendor/cesium/index.js:jwt:5665
+f28fbe9398d7617395d1b5b2badeae1c0ea3b89b:viz_web/vendor/cesium/Cesium.js:jwt:5665
