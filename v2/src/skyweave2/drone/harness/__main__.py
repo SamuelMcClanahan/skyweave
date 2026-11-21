@@ -48,7 +48,7 @@ from skyweave2.drone.harness.batch import (
     versions,
     write_aggregate,
 )
-from skyweave2.drone.harness.seeds import GATE_REPEATS, SCENARIOS, SeedSet
+from skyweave2.drone.harness.seeds import ALL_SCENARIOS, GATE_REPEATS, SCENARIOS, SeedSet
 from skyweave2.drone.harness.sitl_loop import core_config
 from skyweave2.drone.sitl import ensure_sitl, sitl_available
 
@@ -56,14 +56,20 @@ from skyweave2.drone.sitl import ensure_sitl, sitl_available
 def _parse(argv: list[str] | None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         prog="python -m skyweave2.drone.harness",
-        description="Closed-loop SITL scenarios S1-S6 (DRONE_CONTRACTS_D0.md §8).",
+        description="Closed-loop SITL scenarios S1-S6 and probes P1-P7 (DRONE_CONTRACTS_D0.md §8).",
     )
     ap.add_argument("--seed-set", choices=[s.value for s in SeedSet], help="[S7] seed set")
     ap.add_argument(
         "--seed", type=int, action="append", help="explicit seed (repeatable); probe label"
     )
     ap.add_argument("--out", required=True, type=Path, help="output directory")
-    ap.add_argument("--scenarios", nargs="+", choices=SCENARIOS, default=list(SCENARIOS))
+    ap.add_argument(
+        "--scenarios",
+        nargs="+",
+        choices=ALL_SCENARIOS,
+        default=list(SCENARIOS),
+        help="default: the gate scenes S1-S6; P1-P7 are probe scenarios ([S9], probe set only)",
+    )
     ap.add_argument("--law", action="append", choices=sorted(LAWS), help="guidance law(s)")
     ap.add_argument(
         "--speedup",

@@ -1,5 +1,8 @@
 """Closed-loop scenarios S1-S6 (DRONE_CONTRACTS_D0.md §8): seeded worlds and scripts.
 
+The probe scenarios P1-P7 ([S9]) build their worlds in ``probes`` and share
+the :class:`Script` below; their few script hooks are marked with their IDs.
+
 A scenario is two things, both pure (no clock, no I/O, randomness only from
 the run's seed):
 
@@ -49,6 +52,7 @@ from typing import Any
 import numpy as np
 
 from skyweave2.drone.harness.camera_sim import PROVISIONAL_NOISE, CameraSimConfig
+from skyweave2.drone.harness.environment import PLUS, Airframe, Wind
 from skyweave2.drone.harness.scorecard import (
     Check,
     RunTrace,
@@ -56,7 +60,7 @@ from skyweave2.drone.harness.scorecard import (
     check_lock_window_covers,
     check_reacquired,
 )
-from skyweave2.drone.harness.seeds import SCENARIOS
+from skyweave2.drone.harness.seeds import ALL_SCENARIOS, PROBE_SCENARIOS
 from skyweave2.drone.harness.targets import CrossingBird, SlowKite, StaticBalloon, Trajectory
 from skyweave2.drone.packets import (
     AckPacket,
@@ -117,6 +121,10 @@ S6_BIRD_HALF_WINDOW_MS = 2_000
 S6_BIRD_SPEED_MPS = 4.0
 S6_BIRD_STANDOFF_FRAC = 0.5  # the bird crosses halfway between the drone's standoff and the kite
 S6_COMPLETE_MS = 13_000
+
+# Probe scenarios ([S9]), relative to the first T07 or to SEARCH.
+P3_COMPLETE_MS = 15_000  # the human marks the kite standoff complete
+P5_COMPLETE_MS = 30_000  # fallback if the hold never completes ([G7] still decides S1's check)
 
 TRIAL_TYPES: Mapping[str, TrialType] = {
     "S1": TrialType.STANDOFF,
@@ -245,18 +253,27 @@ class WindowedObject:
 
 @dataclass(frozen=True, kw_only=True)
 class World:
-    """One run's world: trial, camera error model, truth objects (seeded)."""
+    """One run's world: trial, camera error model, truth objects (seeded), and
+    the SITL side: airframe ([S12]) and wind ([S10]). ``checks_as`` names the
+    §8 table rows a probe scenario is scored against ([S9]); empty means the
+    scenario's own row."""
 
     scenario: str
     seed: int
     prime: PrimeParams
     camera: CameraSimConfig
     target: str
-    scene: tuple[Any, ...]  # Trajectory objects; S6 holds mutable ones
+    scene: tuple[Any, ...]  # Trajectory objects; S6 and P4 hold mutable ones
     geometry: Mapping[str, float]  # the drawn numbers, for the run log
+    airframe: Airframe = PLUS
+    wind: Wind | None = None
+    checks_as: tuple[str, ...] = ()
 
     def to_obj(self) -> dict[str, Any]:
-        return {
+        """JSON object for the run log. The airframe, wind and checks keys
+        appear only when they differ from the E1 gate world, so a gate world's
+        object is unchanged."""
+        out: dict[str, Any] = {
             "scenario": self.scenario,
             "seed": self.seed,
             "prime": self.prime.to_obj(),
@@ -265,6 +282,13 @@ class World:
             "objects": [o.name for o in self.scene],
             "geometry": {k: float(v) for k, v in self.geometry.items()},
         }
+        if self.airframe != PLUS:
+            out["airframe"] = self.airframe.to_obj()
+        if self.wind is not None:
+            out["wind"] = self.wind.to_obj()
+        if self.checks_as:
+            out["checks_as"] = list(self.checks_as)
+        return out
 
 
 def _anchor(
@@ -279,10 +303,14 @@ def _anchor(
 
 def build_world(scenario: str, seed: int) -> World:
     """The scenario's world for ``seed`` ([S7]); deterministic in both."""
-    if scenario not in SCENARIOS:
+    if scenario not in ALL_SCENARIOS:
         raise ValueError(f"unknown scenario {scenario!r}")
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**32:
         raise ValueError(f"seed must be a 32-bit unsigned int, got {seed!r}")
+    if scenario in PROBE_SCENARIOS:
+        from skyweave2.drone.harness.probes import build_probe_world  # probes imports this
+
+        return build_probe_world(scenario, seed)
     rng = stream_rng(seed, _WORLD_STREAM)
     prime = PrimeParams(trial_type=TRIAL_TYPES[scenario])  # contract §9 defaults
     width = prime.target_width_m
@@ -484,6 +512,8 @@ class Script:
             self._cancel("approve")  # the candidate is gone (T06) or engaged (T07)
         if name == "transition:PRIMED->LAUNCH":
             self._launch_t = t
+        if name == "transition:LAUNCH->SEARCH" and sc == "P4":
+            self._start_p4(t)
         if name == "transition:ACQUIRING->ENGAGED":
             self._t07.append(t)
             self._on_t07(t, len(self._t07))
@@ -520,6 +550,18 @@ class Script:
         elif sc == "S6" and n == 1:
             self._start_s6(t)
             self._command(t + S6_COMPLETE_MS, CommandName.MARK_COMPLETE)
+        elif sc == "P3" and n == 1:
+            self._command(t + P3_COMPLETE_MS, CommandName.MARK_COMPLETE)
+        elif sc == "P5" and n == 1:
+            self._command(t + P5_COMPLETE_MS, CommandName.MARK_COMPLETE)
+
+    def _start_p4(self, t_search: int) -> None:
+        """P4: the thrower throws a fixed delay after SEARCH starts (future time only).
+        The world placed the crossing where the yaw scan points then (``probes``)."""
+        plane = next(o for o in self.world.scene if o.name == self.world.target)
+        t_throw = t_search + round(self.world.geometry["throw_delay_ms"])
+        plane.throw(t_throw)
+        self.log.notes.append((t_search, f"p4 throw at {t_throw}"))
 
     def _start_s6(self, t7: int) -> None:
         """Kite maneuver and crossing bird, timed from the first T07 (future times only)."""

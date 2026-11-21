@@ -37,6 +37,29 @@ board ms. Its truth (pose and targets) is taken at that instant: the sim's
 is delivered ``latency_ms`` later, rounded up to the next integer ms. A
 packet cannot be used before it exists.
 
+Bad frames ([S11], V-D16; probe scenarios only, all off by default):
+
+- Clutter: per frame, a Poisson number of false boxes (mean
+  ``clutter_per_frame``) at uniform image positions, width log-uniform in
+  ``clutter_w_px``, aspect ratio log-uniform in [0.5, 2], confidence uniform in
+  [0.3, 0.9]. They come after the true boxes, so true box indices never move.
+  A persistent false track is a scene object instead (``targets.WanderingBird``).
+- Frame drops: a dropped frame produces no packet at all (percepd skipped it;
+  ``frame_seq`` jumps). Random drops with ``frame_drop_p`` per frame, and
+  bursts: start times a Poisson process at ``burst_per_s`` from ``t0``,
+  durations uniform in ``burst_ms``. A detector miss (``dropout_p``, scripted
+  windows) is different: the frame still produces a packet.
+- Latency jitter: frame ``k`` is delivered ``latency_ms + j_k`` after capture,
+  rounded up, with ``j_k = min(latency_jitter_ms * E_k, latency_jitter_max_ms)``
+  and ``E_k`` a unit exponential draw. Delivery never goes back: a frame is
+  never delivered before the one captured ahead of it (percepd is one pipeline).
+
+Each bad-frame feature draws from its own generator,
+``SeedSequence([seed, k], spawn_key=(0xCA, n))`` per frame and
+``SeedSequence([seed], spawn_key=(0xCA, 3))`` for the burst schedule, so the
+frame noise above is the same draw for draw with or without them, and with
+every feature off a frame is identical to the E1 camera's.
+
 All numbers are Provisional (E1) model inputs, never tuned on gate seeds.
 The 27.3 ms latency and 60 fps are brief §2's percepd v0 pipelined figures.
 They are Measured there for percepd v0 only and used here as model inputs.
@@ -48,7 +71,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -61,6 +84,11 @@ from skyweave2.drone.types import Attitude
 PERCEPD_V0_LATENCY_MS = 27.3  # brief §2, pipelined keep-latest @60 FPS; model input here
 PERCEPD_V0_FPS = 60.0
 _DRAWS_PER_OBJECT = 4  # du, dv, size w, size h (standard normal); plus one uniform for dropout
+_STREAM_CLUTTER = (0xCA, 1)
+_STREAM_FRAME = (0xCA, 2)  # frame drop and latency jitter
+_STREAM_BURST = (0xCA, 3)
+CLUTTER_ASPECT = (0.5, 2.0)
+CLUTTER_CONF = (0.3, 0.9)
 
 
 def _is_finite_number(x: Any) -> bool:
@@ -114,6 +142,14 @@ class CameraSimConfig:
     latency_ms: float = PERCEPD_V0_LATENCY_MS
     fps: float = PERCEPD_V0_FPS
     conf: float = 0.9
+    # Bad frames ([S11], V-D16): all off by default (module docstring).
+    clutter_per_frame: float = 0.0
+    clutter_w_px: tuple[float, float] = (8.0, 80.0)
+    frame_drop_p: float = 0.0
+    burst_per_s: float = 0.0
+    burst_ms: tuple[int, int] = (100, 600)
+    latency_jitter_ms: float = 0.0
+    latency_jitter_max_ms: float = 100.0
 
     def __post_init__(self) -> None:
         err = self.boresight_error_rad
@@ -138,9 +174,54 @@ class CameraSimConfig:
                 raise ValueError(
                     f"dropout window must be (start_ms, end_ms) ints, start < end: {window!r}"
                 )
+        for name in ("clutter_per_frame", "burst_per_s", "latency_jitter_ms"):
+            val = getattr(self, name)
+            if not (_is_finite_number(val) and 0.0 <= val <= 1000.0):
+                raise ValueError(f"{name} must be in [0, 1000], got {val!r}")
+        if not (_is_finite_number(self.frame_drop_p) and 0.0 <= self.frame_drop_p <= 1.0):
+            raise ValueError(f"frame_drop_p must be in [0, 1], got {self.frame_drop_p!r}")
+        lo, hi = self.clutter_w_px
+        if not (_is_finite_number(lo) and _is_finite_number(hi) and 0.0 < lo <= hi):
+            raise ValueError(f"clutter_w_px must be (min, max) with 0 < min <= max: {(lo, hi)!r}")
+        b0, b1 = self.burst_ms
+        if any(isinstance(x, bool) or not isinstance(x, int) for x in (b0, b1)) or not (
+            0 < b0 <= b1
+        ):
+            raise ValueError(f"burst_ms must be (min, max) ints, 0 < min <= max: {(b0, b1)!r}")
+        cap = self.latency_jitter_max_ms
+        if not (_is_finite_number(cap) and cap >= 0.0):
+            raise ValueError(f"latency_jitter_max_ms must be a finite number >= 0, got {cap!r}")
+
+    @property
+    def bad_frames(self) -> bool:
+        """Any [S11] bad-frame feature on."""
+        return (
+            self.clutter_per_frame > 0.0
+            or self.frame_drop_p > 0.0
+            or self.burst_per_s > 0.0
+            or self.latency_jitter_ms > 0.0
+        )
 
     def to_obj(self) -> dict[str, Any]:
-        """Plain JSON object, so a scorecard or run log can name its world."""
+        """Plain JSON object, so a scorecard or run log can name its world. The
+        bad-frame fields appear only when one is on, so an E1 world's object is
+        unchanged."""
+        out = self._base_obj()
+        if self.bad_frames:
+            out.update(
+                {
+                    "clutter_per_frame": float(self.clutter_per_frame),
+                    "clutter_w_px": [float(x) for x in self.clutter_w_px],
+                    "frame_drop_p": float(self.frame_drop_p),
+                    "burst_per_s": float(self.burst_per_s),
+                    "burst_ms": [int(x) for x in self.burst_ms],
+                    "latency_jitter_ms": float(self.latency_jitter_ms),
+                    "latency_jitter_max_ms": float(self.latency_jitter_max_ms),
+                }
+            )
+        return out
+
+    def _base_obj(self) -> dict[str, Any]:
         return {
             "boresight_error_rad": [float(x) for x in self.boresight_error_rad],
             "center_sigma_px": float(self.center_sigma_px),
@@ -198,11 +279,15 @@ class FrameTruth:
 
 @dataclass(frozen=True, kw_only=True)
 class Frame:
-    """One rendered frame: the packet, when it is delivered, and its truth."""
+    """One rendered frame: the packet, when it is delivered, and its truth.
+
+    ``dropped`` is a whole-frame drop ([S11]): the packet (with no boxes) is
+    never delivered, so the tracker and the recording never see the frame."""
 
     packet: DetectionPacket
     t_deliver_ms: int
     truth: FrameTruth
+    dropped: bool = False
 
 
 def mount_with_error(nominal: CameraModel, error_rad: tuple[float, float, float]) -> CameraModel:
@@ -245,6 +330,12 @@ class SyntheticCamera:
         self.true_cam = mount_with_error(self.nominal, config.boresight_error_rad)
         self._u_max = self.true_cam.width - 0.5
         self._v_max = self.true_cam.height - 0.5
+        self._deliver: list[int] = []  # delivery time per frame index, monotone ([S11])
+        self._bursts: list[tuple[int, int]] = []  # [start, end) on t_cap, generated lazily
+        self._burst_rng = np.random.default_rng(
+            np.random.SeedSequence([seed], spawn_key=_STREAM_BURST)
+        )
+        self._burst_horizon = float(t0_ms)  # the next burst starts after this time
 
     # -- timing ---------------------------------------------------------------
 
@@ -255,11 +346,87 @@ class SyntheticCamera:
         return self.t0_ms + math.floor(k * 1000.0 / self.config.fps + 0.5)
 
     def deliver_time(self, t_cap: int) -> int:
-        """``t_cap`` plus the capture-to-delivery latency, rounded up to whole ms."""
+        """``t_cap`` plus the base capture-to-delivery latency, rounded up to whole
+        ms (no jitter)."""
         return t_cap + math.ceil(self.config.latency_ms)
+
+    def _frame_rng(self, k: int, stream: tuple[int, int]) -> np.random.Generator:
+        return np.random.default_rng(np.random.SeedSequence([self.seed, k], spawn_key=stream))
+
+    def _frame_draws(self, k: int) -> tuple[float, float]:
+        """Frame ``k``'s drop uniform and unit-exponential jitter draw ([S11])."""
+        rng = self._frame_rng(k, _STREAM_FRAME)
+        return float(rng.random()), float(rng.standard_exponential())
+
+    def jitter_ms(self, k: int) -> float:
+        """Frame ``k``'s extra latency ([S11]); 0 when jitter is off."""
+        cfg = self.config
+        if cfg.latency_jitter_ms <= 0.0:
+            return 0.0
+        return min(cfg.latency_jitter_ms * self._frame_draws(k)[1], cfg.latency_jitter_max_ms)
+
+    def deliver_time_of(self, k: int) -> int:
+        """Delivery time of frame ``k``: capture plus latency plus jitter, rounded
+        up, and never before the previous frame's delivery. With jitter off it is
+        :meth:`deliver_time` of the capture time."""
+        if isinstance(k, bool) or not isinstance(k, int) or k < 0:
+            raise ValueError(f"frame index must be an int >= 0, got {k!r}")
+        while len(self._deliver) <= k:
+            j = len(self._deliver)
+            t = self.capture_time(j) + math.ceil(self.config.latency_ms + self.jitter_ms(j))
+            if self._deliver:
+                t = max(t, self._deliver[-1])
+            self._deliver.append(t)
+        return self._deliver[k]
 
     def in_dropout_window(self, t_cap: int) -> bool:
         return any(a <= t_cap < b for a, b in self.config.dropout_windows_ms)
+
+    def bursts_until(self, t_ms: int) -> list[tuple[int, int]]:
+        """The burst-drop windows ``[start, end)`` that start at or before ``t_ms``
+        ([S11]); a pure function of the seed and ``t0``."""
+        cfg = self.config
+        if cfg.burst_per_s <= 0.0:
+            return []
+        while self._burst_horizon <= t_ms:
+            gap_ms = 1000.0 * float(self._burst_rng.standard_exponential()) / cfg.burst_per_s
+            start = math.ceil(self._burst_horizon + gap_ms)
+            dur = int(self._burst_rng.integers(cfg.burst_ms[0], cfg.burst_ms[1] + 1))
+            self._bursts.append((start, start + dur))
+            self._burst_horizon = float(start + dur)
+        return [b for b in self._bursts if b[0] <= t_ms]
+
+    def frame_dropped(self, k: int) -> bool:
+        """Whole frame ``k`` dropped: a random drop or inside a burst ([S11])."""
+        cfg = self.config
+        if cfg.frame_drop_p > 0.0 and self._frame_draws(k)[0] < cfg.frame_drop_p:
+            return True
+        if cfg.burst_per_s > 0.0:
+            t_cap = self.capture_time(k)
+            return any(a <= t_cap < b for a, b in self.bursts_until(t_cap))
+        return False
+
+    def _clutter(self, k: int) -> list[Box]:
+        """Frame ``k``'s false boxes ([S11]); none when clutter is off."""
+        cfg = self.config
+        if cfg.clutter_per_frame <= 0.0:
+            return []
+        rng = self._frame_rng(k, _STREAM_CLUTTER)
+        n = int(rng.poisson(cfg.clutter_per_frame))
+        draws = rng.random((n, 5))
+        lw0, lw1 = (math.log(x) for x in cfg.clutter_w_px)
+        la0, la1 = (math.log(x) for x in CLUTTER_ASPECT)
+        out: list[Box] = []
+        for du, dv, dw, da, dc in draws.tolist():
+            w = math.exp(lw0 + (lw1 - lw0) * dw)
+            h = w * math.exp(la0 + (la1 - la0) * da)
+            u = -0.5 + du * self.true_cam.width
+            v = -0.5 + dv * self.true_cam.height
+            box = self._clip(u, v, w, h)
+            if box is not None:
+                conf = CLUTTER_CONF[0] + (CLUTTER_CONF[1] - CLUTTER_CONF[0]) * dc
+                out.append(replace(box, conf=conf))
+        return out
 
     # -- geometry -------------------------------------------------------------
 
@@ -332,9 +499,12 @@ class SyntheticCamera:
             box = self._clip(u_d, v_d, w_d, h_d)
             if box is not None:
                 boxes.append(box)
-        packet = DetectionPacket(t_cap=t_cap, frame_seq=k, boxes=tuple(boxes))
+        boxes.extend(self._clutter(k))
+        dropped = self.frame_dropped(k)
+        packet = DetectionPacket(t_cap=t_cap, frame_seq=k, boxes=() if dropped else tuple(boxes))
         return Frame(
             packet=packet,
-            t_deliver_ms=self.deliver_time(t_cap),
+            t_deliver_ms=self.deliver_time_of(k),
             truth=FrameTruth(t_cap=t_cap, frame_seq=k, objects=tuple(truths)),
+            dropped=dropped,
         )

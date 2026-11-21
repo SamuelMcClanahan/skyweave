@@ -280,6 +280,15 @@ class SitlInstance:
 
     ``extra_params`` go into the extra defaults file after
     :data:`COMPANION_STREAM_PARAMS` (a defaults file, never a parameter write).
+
+    ``frame_file`` is an ArduPilot JSON frame file (contract V-F2). It is
+    copied into the working directory and SITL runs ``--model
+    <model>:<file name>``. A bare name is required: this 4.7.0 build maps an
+    absolute path through AP_Filesystem, fails to find it, and panics, and a
+    panicking SITL hangs in its stack dump instead of exiting (checked
+    2026-11-20). The frame file's ``motorN_position`` entries set the motor
+    layout; the ``quad`` template only supplies motor numbers and spin
+    directions.
     """
 
     def __init__(
@@ -290,13 +299,17 @@ class SitlInstance:
         speedup: float = 1.0,
         home: str = DEFAULT_HOME,
         model: str = "+",
+        frame_file: Path | None = None,
         extra_params: Mapping[str, float] | None = None,
     ) -> None:
+        if frame_file is not None and not Path(frame_file).is_file():
+            raise SitlError(f"frame file {frame_file} does not exist")
         self.paths = paths
         self.instance = instance
         self.speedup = speedup
         self.home = home
         self.model = model
+        self.frame_file = None if frame_file is None else Path(frame_file)
         self.extra_params = dict(extra_params or {})
         s0, s1, _ = instance_ports(instance)
         self.gcs_endpoint = f"tcp:{LOOPBACK_HOST}:{s0}"
@@ -314,28 +327,39 @@ class SitlInstance:
         p = self.log_path
         return "" if p is None or not p.exists() else p.read_text(errors="replace")
 
-    def start(self, timeout_s: float = 30.0) -> PilotLink:
-        """Launch SITL, connect the pilot link on SERIAL0, wait for SERIAL1."""
+    def prepare(self) -> list[str]:
+        """Make the working directory, write the extra defaults file (the only way a
+        parameter reaches SITL, [F1]), copy the frame file, and return SITL's argv."""
         self.workdir = Path(tempfile.mkdtemp(prefix="skyweave-sitl-"))
         extra = self.workdir / "skyweave_companion.parm"
         lines = [f"{k} {v:g}" for k, v in {**COMPANION_STREAM_PARAMS, **self.extra_params}.items()]
         extra.write_text("\n".join(lines) + "\n")
+        model = self.model
+        if self.frame_file is not None:
+            shutil.copyfile(self.frame_file, self.workdir / self.frame_file.name)
+            model = f"{self.model}:{self.frame_file.name}"
+        return [
+            str(self.paths.binary),
+            "-w",
+            "--model",
+            model,
+            "--speedup",
+            f"{self.speedup:g}",
+            "--home",
+            self.home,
+            "--defaults",
+            f"{self.paths.parm},{extra}",
+            "-I",
+            str(self.instance),
+        ]
+
+    def start(self, timeout_s: float = 30.0) -> PilotLink:
+        """Launch SITL, connect the pilot link on SERIAL0, wait for SERIAL1."""
+        argv = self.prepare()
+        assert self.workdir is not None
         self._log = open(self.workdir / "sitl.log", "wb")  # noqa: SIM115
         self._proc = subprocess.Popen(
-            [
-                str(self.paths.binary),
-                "-w",
-                "--model",
-                self.model,
-                "--speedup",
-                f"{self.speedup:g}",
-                "--home",
-                self.home,
-                "--defaults",
-                f"{self.paths.parm},{extra}",
-                "-I",
-                str(self.instance),
-            ],
+            argv,
             cwd=self.workdir,
             stdout=self._log,
             stderr=subprocess.STDOUT,

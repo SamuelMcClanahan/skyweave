@@ -11,6 +11,12 @@ seeds use the same rule in the ``E1-probe`` namespace. Development,
 debugging, and any tuning use probe seeds only, and every scorecard names
 its seed set. :func:`check_seed` refuses a scorecard whose seed does not
 belong to the set it claims, and it refuses a gate seed labelled as a probe.
+
+Probe scenarios ([S9], V-F3): ``P1``-``P7`` are not gate scenes. They have no
+gate seeds at all, and their probe seeds use their own namespace,
+``V-probe`` (``sha256("V-probe:<scenario>:<i>")``), so no probe-scenario
+seed is drawn from either E1 namespace. A probe seed is still refused when
+it equals any gate seed of S1-S6.
 """
 
 from __future__ import annotations
@@ -19,8 +25,13 @@ import hashlib
 from enum import Enum
 
 SCENARIOS: tuple[str, ...] = ("S1", "S2", "S3", "S4", "S5", "S6")
+"""The gate scenes (contract §8 table)."""
+PROBE_SCENARIOS: tuple[str, ...] = ("P1", "P2", "P3", "P4", "P5", "P6", "P7")
+"""The probe scenarios ([S9]); never part of the gate."""
+ALL_SCENARIOS: tuple[str, ...] = SCENARIOS + PROBE_SCENARIOS
 GATE_NAMESPACE = "E1-gate"
 PROBE_NAMESPACE = "E1-probe"
+V_PROBE_NAMESPACE = "V-probe"
 GATE_SEED_COUNT_S2 = 20  # contract §9 gate_seed_count (E1), Provisional
 GATE_SEED_COUNT_OTHER = 3
 GATE_REPEATS = 2  # contract §9 gate_repeats (E1), [S0]
@@ -34,8 +45,14 @@ class SeedSet(str, Enum):
 
 
 def _check_scenario(scenario: str) -> None:
-    if scenario not in SCENARIOS:
-        raise ValueError(f"unknown scenario {scenario!r}; known: {', '.join(SCENARIOS)}")
+    if scenario not in ALL_SCENARIOS:
+        raise ValueError(f"unknown scenario {scenario!r}; known: {', '.join(ALL_SCENARIOS)}")
+
+
+def is_probe_scenario(scenario: str) -> bool:
+    """A [S9] probe scenario: no gate seeds, ``V-probe`` namespace."""
+    _check_scenario(scenario)
+    return scenario in PROBE_SCENARIOS
 
 
 def seed_from_label(label: str) -> int:
@@ -48,13 +65,22 @@ def seed_for(seed_set: SeedSet, scenario: str, i: int) -> int:
     _check_scenario(scenario)
     if isinstance(i, bool) or not isinstance(i, int) or i < 0:
         raise ValueError(f"seed index must be an int >= 0, got {i!r}")
-    namespace = GATE_NAMESPACE if SeedSet(seed_set) is SeedSet.GATE else PROBE_NAMESPACE
+    gate = SeedSet(seed_set) is SeedSet.GATE
+    if scenario in PROBE_SCENARIOS:
+        if gate:
+            raise ValueError(f"{scenario} is a probe scenario; it has no gate seeds ([S9])")
+        namespace = V_PROBE_NAMESPACE
+    else:
+        namespace = GATE_NAMESPACE if gate else PROBE_NAMESPACE
     return seed_from_label(f"{namespace}:{scenario}:{i}")
 
 
 def gate_seed_count(scenario: str) -> int:
-    """Contract §9 ``gate_seed_count``: 20 for S2, 3 for the others."""
+    """Contract §9 ``gate_seed_count``: 20 for S2, 3 for the others, 0 for a
+    probe scenario ([S9])."""
     _check_scenario(scenario)
+    if scenario in PROBE_SCENARIOS:
+        return 0
     return GATE_SEED_COUNT_S2 if scenario == "S2" else GATE_SEED_COUNT_OTHER
 
 
