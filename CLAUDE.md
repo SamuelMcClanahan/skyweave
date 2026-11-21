@@ -5,7 +5,23 @@ RV1106 edge nodes find motion and send compact observations. A Jetson fuses
 them: triangulation first, sparse voxel evidence as the proposal stage, then
 an EKF track. This repo holds v1 (the reference MVP) and v2 (the rewrite).
 
-## Read these before writing code
+## Current focus (since 2026-11-20): the drone stack only
+
+Work happens on the drone stack (`v2/src/skyweave2/drone/`). The ground
+detection line below (D8, C-004) is parked; do not start work on it. For
+drone work, read these instead of the detection list:
+
+1. `v2/docs/PHASE_E1_BRIEF.md`: the E1 brief (E1 merged as PR #1).
+2. `v2/docs/DRONE_CONTRACTS_D0.md`: the fenced drone contract. §11.1
+   holds the 2026-11-20 vetting decisions (`V-` IDs) that the next phase
+   implements. A clause changes only in a PR that cites its decision ID.
+3. `v2/docs/TESTING_DOCTRINE.md`: still applies.
+
+The drone fast tier runs from `v2/` with
+`uv run pytest tests/drone -m "not slow and not sitl"`. The SITL tier needs
+Linux x86-64 (pinned ArduCopter 4.7.0, contract [F1]).
+
+## Read these before writing code (detection line, parked)
 
 1. `v2/docs/DETECTION_ARCHITECTURE_WORKING_PLAN.md` — the architecture.
 2. `v2/docs/DETECTION_CONTRACTS_D0.md` — frozen contracts and the decisions

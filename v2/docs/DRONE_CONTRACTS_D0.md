@@ -1,6 +1,6 @@
 # SkyWeave drone stack contracts (E1 / D0)
 
-**Revision:** 2026-10-08
+**Revision:** 2026-10-08, amended 2026-11-20 (§11.1 vetting decisions)
 **Status:** §2 (JSON wire v1) is FROZEN per `PHASE_E1_BRIEF.md` 3.7. §1 and
 §3-§8 are behavior clauses written in phase E1, labeled clause by clause.
 Nothing in this document is Measured. Numbers marked Provisional are
@@ -762,3 +762,38 @@ Tracker clauses (Provisional reimplementation, brief §2 spec):
 | E1-F24 | The [F7] radio approve path is covered by fast tests only; the closed-loop human approves through UI command packets (§8) | Finding |
 | E1-F25 | `POST /command` does not require a JSON content type, so a page in the operator's browser can post cross-site. The token still gates execution; unauthenticated posts are acked `rejected_auth` and logged | Finding |
 | E1-F26 | Radio approves are stamped at their RC sample, so each live driver must stamp its next core input no earlier than the frames fc_link already ingested (companiond, the UI, and the harness do) | Finding |
+
+### 11.1 Vetting review decisions (2026-11-20)
+
+Samuel reviewed the merged E1 stack with Claude on 2026-11-20 and made the
+decisions below. They authorize clause changes in the next phase. The
+clauses above stay as written until the PR that implements a decision edits
+them and cites its `V-` ID. Inside wire v1 every packet change is additive
+([C7], §2). Numbers here are Provisional; none is Measured. [F1] (SITL
+only, no parameter writes from fc_link) still holds until a phase brief
+lifts it.
+
+| ID | Item | Label |
+| --- | --- | --- |
+| V-F1 | Airframe correction. The vehicle is an X quadrotor with a tall cone tower above the props that holds the battery and electronics, so it is top-heavy. The camera sits at the tip of the nose. At hover the nose points up, along the thrust axis. [C3] (camera Z on body x, no uptilt), the `camera_sim` mount, and the July CAD sheet's forward-camera quad do not describe this vehicle. Lens: 100 deg HFOV, so `f` is about 806 px on 1920 px (half-angles about 50 deg wide and 36.7 deg short). It replaces the 1000 px placeholder and is still uncalibrated (E1-F3) | Finding |
+| V-D1 | The camera mount becomes a configured rotation `R_body_cam`, measured on the airframe, instead of the fixed matrix in [C3]. Guidance and tracking read it from config. The mount angle itself is open (V-F5) | Chosen |
+| V-D2 | The touch-trial closing pass uses proportional navigation (PN) sent as acceleration setpoints. ArduCopter adds gravity to an acceleration setpoint, which gives the gravity feedforward. Changes [G5] and [F6] (a `type_mask` that uses acceleration). Pure pursuit [G3] stays for reaching the hold point and for standoff trials | Chosen |
+| V-D3 | The approach may climb into a target above the vehicle, which suits the cone airframe. The touch-trial hold point no longer has to be level with the target. This supersedes E1-D3 for touch trials; E1-D3 stays Provisional for standoff trials. The implementing PR sets the hold-point geometry | Chosen |
+| V-D4 | Touch hold distance about 2 m, a prime parameter. Consequence: with `f` = 806 px and `W` = 1 m the box is 403 px (0.21 of the frame) at 2 m, so the [G4] fill clause cannot hold at the §9 `alpha` of 0.4. `alpha` drops to about 0.18-0.2, or the commit gate changes, in the implementing PR | Chosen (number Provisional) |
+| V-D5 | During the pass, guidance steers until the box touches the frame edge, the tracker loses the target, or time to contact falls below about 0.2 s (V-D9). Then it holds the last command and steers no more. For a 1 m balloon with the 100 deg lens this happens at about 0.4-0.6 m. This replaces the open-loop flight from the commit point in [G5]; brake, climb and `pass_done` stay | Chosen (numbers Provisional) |
+| V-D6 | Setpoints run at 50 Hz during the pass (today 10 Hz, §9 `setpoint_hz`). Changes [G11] and §9 | Chosen (number Provisional) |
+| V-D7 | FC parameter changes are allowed (for example `ANGLE_MAX`, acceleration setpoint support), in the next phase. The operator sets them; fc_link keeps no parameter-write path ([F1]) | Chosen |
+| V-D8 | MPC guidance. Trigger: a recorded scenario or flight where PN fails | Deferred |
+| V-D9 | Time to contact `tau = w / (dw/dt)` from the tracker's smoothed width and width rate. It needs neither `f` nor `W`. Uses: hand-off timing (V-D5), a cross-check of size range [G2] (a mismatch means the primed `W` is wrong and is logged), and a second closing-speed source for PN. It needs an additive width-rate field on the track packet [P2]; the implementing PR names it. Valid only while closing, and not once the box clips the frame edge | Chosen |
+| V-D10 | Track in world angles. Each box center is de-rotated with the attitude at capture time ([G1]) before the tracker filters it, so the vehicle's own rotation does not break association and PN gets the line-of-sight rate directly. Changes [K1] and the tracker input. Wire changes stay additive | Chosen |
+| V-D11 | Lens calibration includes distortion. Box centers are undistorted before use, and `camera_sim` gets the same distortion model. The ChArUco calibration itself happens later | Chosen |
+| V-D12 | A detection dropout during the pass holds the last command for up to `coast_cap`. If the track dies, the pass ends: brake, climb, `MISS`. Changes [G10] for `COASTING` inside the pass | Chosen |
+| V-D13 | Abort stays RTL for both the Wi-Fi abort and the radio switch. No change | Chosen |
+| V-D14 | A target may be tethered (a string to the ground). Accepted risk: the string can wrap a prop, which loses the balloon or crashes the vehicle. Fly over soft ground with no people near, and keep the string off the approach side | Chosen |
+| V-D15 | The SITL harness gets wind and gusts (SITL wind parameters) in new scenarios. Gate scenes S1-S6 and their seeds [S7] do not change | Chosen |
+| V-D16 | `camera_sim` gets bad frames: false boxes, dropped frames, latency jitter, in new scenarios. Gate scenes do not change. Random dropout in a standoff hold still meets E1-F16 | Chosen |
+| V-F2 | SITL flies model `+` (a plus frame). The vehicle is an X with a top-heavy tower. ArduPilot SITL takes a JSON frame file (`--model quad:<file>.json`: mass, diagonal, inertia, motor positions, drag), so the cone can be modeled. The numbers (all-up mass, tower height, battery position, motor diagonal) are open: from CAD or estimated, labeled Provisional | Finding |
+| V-F3 | Sim coverage gaps: every touch run uses a static balloon; `ThrownPlane` exists but no scenario uses it; the only false box is S6's scripted bird; targets sit 2-18 deg above the horizon (the old level-approach geometry); the camera model has no distortion and the old mount. New scenarios cover these; gate scenes stay | Finding |
+| V-F4 | No YOLO model exists yet, and the percepd v0 source is still missing (E1-F1, E1-F2). Detector-in-the-loop sim waits for a model. A 3D renderer can make labeled training images | Finding |
+| V-F6 | Airframe numbers from the Onshape assembly `Skyweave-000-ASM` (2026-11-20). CAD mass 0.527 kg (1.162 lb); Samuel estimates the real vehicle at CAD + 0.25 lb or a little more, so about 0.64 kg. Inertia about the center of mass from CAD: Ixx 2.24e-3, Iyy 2.22e-3, Izz 1.99e-3 kg m^2 (about 2.71e-3, 2.69e-3, 2.41e-3 scaled to 0.64 kg, assuming the added mass spreads like the rest). X frame: motor-to-motor diagonal about 210 mm (side 149 mm). Overall about 256 x 257 mm at the prop tips, 221 mm tall. The battery stands upright in the tower above the props, the nose electronics and camera sit on top, and the FC/ESC stack and feet sit below the props. The center of mass is about 19 mm above the prop plane and about 11 mm sideways from the motor center in CAD (check this on the vehicle). Motors T-Motor Velox V2207 1750KV (the CAD uses a stand-in motor model); props Gemfan Hurricane 51433 (5.1 in diameter, 3.3 in pitch, tri-blade; an `R` on the hub marks the reverse-rotation props; the CAD model shows a 51466); battery 6S 1300 mAh. Thrust is not measured (a thrust stand comes later): T-Motor lists about 740 g at 60 % throttle with a 5.1 in prop, and full throttle is likely 1.3-1.6 kg per motor, so thrust-to-weight is about 8-10 and hover throttle about 0.2. ArduCopter's hover-throttle learning gives a measured hover throttle from the first hover flight. The mesh measurements are from the STL export (inches). These numbers feed the SITL frame file (V-F2) and the 3D model. None is Measured | Provisional |
+| V-F5 | Open for Samuel: camera tilt (proposal: about 30 deg forward of the nose axis, wide axis along pitch; Samuel is weighing a yaw rotation of the wide axis between scan and pursuit); lens 100 deg vs 80-90 deg; the 3D sim design (proposal: render-only, with SITL keeping the physics); E1-F5, E1-F15, E1-F16, E1-F17 and E1-F23 stay open | Finding |
