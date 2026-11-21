@@ -1,6 +1,7 @@
 # SkyWeave drone stack contracts (E1 / D0)
 
-**Revision:** 2026-10-08, amended 2026-11-20 (§11.1 vetting decisions)
+**Revision:** 2026-10-08, amended 2026-11-20 (§11.1 vetting decisions; §8.1
+probe scenarios for V-F3, V-D15, V-D16, V-F2)
 **Status:** §2 (JSON wire v1) is FROZEN per `PHASE_E1_BRIEF.md` 3.7. §1 and
 §3-§8 are behavior clauses written in phase E1, labeled clause by clause.
 Nothing in this document is Measured. Numbers marked Provisional are
@@ -648,6 +649,56 @@ Every transition the code makes is a row here; any other change is a defect.
   <= `geofence_radius_m`); true altitude >= `alt_floor_m` while in `SEARCH`
   through `LOST` (`A` minus `LAUNCH`); no sent setpoint faster than `v_max`.
 
+### 8.1 Probe scenarios, wind, bad frames, airframe (2026-11-20)
+
+These clauses implement §11.1 decisions V-F3, V-D15, V-D16 and V-F2. They
+add probe scenarios beside the gate. They change no gate row above, no [S7]
+gate seed, no §9 number, and no guidance or tracker clause. Every number in
+a probe world is Provisional.
+
+- **[S9] Probe scenarios (V-F3).** The scenarios below are not gate scenes.
+  They have no gate seeds. Their probe seeds are seed_i = the first 4 bytes,
+  big-endian, of `sha256("V-probe:<scenario>:<i>")`. A seed equal to any
+  S1-S6 gate seed is refused. A probe run is scored against the table rows
+  in its "Scored as" column: the union of those rows' checks, plus the
+  safety floors, [R3] replay, and run completion. Its scorecard names those
+  rows (`checks_as`) and carries its world. A probe scenario never counts
+  toward the gate verdict ([S0], `gate_complete`). Failing probes are
+  expected until the guidance and tracking decisions (V-D2 to V-D12) land;
+  they are a baseline, not a gate.
+
+  | ID | Probe | Trial | Scored as |
+  | --- | --- | --- | --- |
+  | P1 | Static balloon 20-60 deg above the vehicle | touch | S2 |
+  | P2 | Tethered balloon blown and swaying in the wind (V-D14), SITL wind | touch | S2 |
+  | P3 | Kite flying figure-8s in the wind, SITL wind | standoff | S6 |
+  | P4 | Thrown paper plane through the yaw scan, engage preauthorized | touch | S2, S6 |
+  | P5 | False-box clutter and a persistent circling bird | standoff | S1, S6 |
+  | P6 | Detector misses, frame drops, burst drops, latency jitter | touch | S2 |
+  | P7 | The cone-tower X airframe (V-F2, V-F6) | touch | S2 |
+
+- **[S10] Wind (V-D15).** A probe world may carry a wind: a steady speed
+  and direction plus SITL turbulence. It reaches SITL only through the
+  launch defaults file: `SIM_WIND_SPD`, `SIM_WIND_DIR` (where the wind comes
+  from, deg true), `SIM_WIND_TURB`, `SIM_WIND_TC`, and `SIM_WIND_T` = 1 (no
+  height scaling). The targets that drift in the wind (P2, P3) use the same
+  speed and direction. No code path writes a parameter to a running FC
+  ([F1]). Gate worlds carry no wind.
+- **[S11] Bad frames (V-D16).** The synthetic camera may add, per world:
+  clutter boxes that match no truth object; whole-frame drops, random and in
+  bursts (a dropped frame produces no detection packet); and latency
+  jitter (delivery stays in frame order). A persistent false track is a
+  scene object that the detector reports as a target (P5's bird). Every
+  feature is off by default. With all of them off, the camera's output is
+  identical to E1's, frame by frame. Gate worlds use none. Random dropout
+  in a standoff hold still meets E1-F16.
+- **[S12] Airframe (V-F2).** A world names the airframe SITL flies: `plus`
+  (SITL model `+`, the E1 gate airframe) or `cone_x` (the V-F6 X quad, from
+  the JSON frame file `harness/frames/cone_x.json` with `FRAME_TYPE` 1 and
+  the operator's hover throttle and 6S battery limits in the defaults file).
+  Gate scenes S1-S6 fly `plus`. The frame file's numbers and sources are in
+  its README; all are Provisional.
+
 ## 9. Provisional defaults
 
 From brief §6 unless marked "E1". All Provisional.
@@ -710,6 +761,7 @@ Tone table (E1, [F8], [M12]): `ACQUIRING`, `ENGAGED`, `TOUCH`, `LOST`,
 | F | [F1]-[F11] | Interlock refusal and SITL proof, gate provably blocks sends, setpoint form and limits, staleness via injected clock, radio approve detector; SITL scripted run (arm, takeoff, velocity, land) and injected attitude staleness | fast + slow (SITL) |
 | U | [U1]-[U6] | Headless: command idempotency, invalid-state rejection, four commands only, render from a recorded stream | fast |
 | S | [S0]-[S8] | Closed-loop SITL scenarios under gate seeds, `gate_repeats` times, [R3] per run, scorecard emitted | slow (SITL) |
+| S (probe) | [S9]-[S12] | Probe worlds and seeds, wind and airframe through the defaults file, bad frames (gate camera output unchanged), probe scoring; the cone frame hovers and the wind pushes, on SITL | fast + slow (SITL) |
 
 Tracker clauses (Provisional reimplementation, brief §2 spec):
 

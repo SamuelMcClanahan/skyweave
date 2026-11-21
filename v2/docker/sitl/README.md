@@ -31,18 +31,27 @@ v2/docker/sitl/run.sh pytest tests/drone -m sitl -k "not test_s_gate"   # F seri
 v2/docker/sitl/run.sh harness --seed-set probe --probe-count 1 --scenarios S1 S2 \
     --out "$PWD/_local/sim-runs/$(date +%F)/probe"
 v2/docker/sitl/run.sh gate "$PWD/_local/sim-runs/$(date +%F)/gate" --jobs 4   # full gate, 70 runs
+v2/docker/sitl/run.sh harness --seed-set probe --probe-count 3 \
+    --scenarios P1 P2 P3 P4 P5 P6 P7 --speedup 2 \
+    --out "$PWD/_local/sim-runs/$(date +%F)/probes"          # probe scenarios ([S9]), never gate
 v2/docker/sitl/run.sh pytest tests/drone -m sitl             # F series + the gate again via pytest
 v2/docker/sitl/run.sh shell                                  # bash inside the container
 ```
 
-`-m slow` and `-m sitl` select the same 9 tests; the six
+`-m slow` and `-m sitl` select the same 11 tests; the six
 `test_s_gate_scenario_green_every_repeat[S*]` tests are the whole gate
 (`SKYWEAVE_HARNESS_JOBS` and `SKYWEAVE_HARNESS_SPEEDUP` are passed through).
+The two in `test_s_probes.py` fly the cone frame and the wind.
+
+Probe scenarios P1-P7 (contract §8.1) run under `--seed-set probe` only; the
+gate set refuses them. Their airframe and wind reach SITL through the launch
+defaults file, as everything else does.
 
 ## How it is wired
 
 - The repo is mounted at its own host path, and the container works in
-  `<repo>/v2`. Give `--out` an absolute path under `<repo>/_local/` (git-excluded);
+  `<repo>/v2`. In a git worktree, the main checkout's `.git` is also mounted
+  read-only at its own path, so `git rev-parse HEAD` works in the container. Give `--out` an absolute path under `<repo>/_local/` (git-excluded);
   a relative `harness --out` lands inside the tracked `v2/` tree. `gate` turns a
   relative OUT into an absolute one and refuses a path outside the repo.
 - The environment is the named volume `skyweave-sitl-venv` at `/opt/venv`
@@ -56,7 +65,7 @@ v2/docker/sitl/run.sh shell                                  # bash inside the c
   named volume `skyweave-sitl-cache` (`SKYWEAVE_SITL_DIR=/cache/sitl-copter-4.7.0`),
   so they download once.
 - No bytecode or `.pytest_cache` is written into the tree.
-- Scorecards record `versions.git` as `<rev>+dirty` while this folder is
-  untracked.
+- Scorecards record `versions.git` as `<rev>+dirty` when the tree has
+  uncommitted changes.
 
 Reset: `docker volume rm skyweave-sitl-venv skyweave-sitl-cache`.

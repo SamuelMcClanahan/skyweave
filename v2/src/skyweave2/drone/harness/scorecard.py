@@ -52,7 +52,7 @@ import numpy as np
 from pymavlink.dialects.v20 import ardupilotmega as mavlink2
 
 from skyweave2.drone.harness.camera_sim import FrameTruth, Pose
-from skyweave2.drone.harness.seeds import SeedSet, check_seed, gate_seeds
+from skyweave2.drone.harness.seeds import SeedSet, check_seed, gate_seeds, is_probe_scenario
 from skyweave2.drone.harness.targets import Vec3
 from skyweave2.drone.packets import (
     AckPacket,
@@ -944,6 +944,29 @@ def _scenario_checks(
     return checks
 
 
+CHECKS_AS_ROWS = ("S1", "S2", "S4", "S5", "S6")
+"""§8 rows a probe scenario may be scored against ([S9]). S3's checks need its
+own scripted dropout windows, so it is not one."""
+
+
+def _rows_checks(
+    rows: Sequence[str],
+    tl: _Timeline,
+    metrics: Mapping[str, Any],
+    thresholds: Thresholds,
+    fc_ids: tuple[int, int],
+) -> list[Check]:
+    """The union of several rows' checks, first occurrence of each name kept."""
+    out: list[Check] = []
+    seen: set[str] = set()
+    for row in rows:
+        for c in _scenario_checks(row, tl, metrics, thresholds, fc_ids):
+            if c.name not in seen:
+                seen.add(c.name)
+                out.append(c)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Scorecard
 # ---------------------------------------------------------------------------
@@ -963,8 +986,15 @@ def score_run(
     thresholds: Thresholds | None = None,
     extra_checks: Sequence[Check] = (),
     fc_ids: tuple[int, int] = (1, 1),
+    checks_as: Sequence[str] = (),
+    world: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One run's scorecard ([S8] "Scorecard JSON per run") as a JSON-ready object.
+
+    ``checks_as`` ([S9]) scores a probe scenario against the named §8 table
+    rows instead of its own (it has none); the card then records them, and
+    ``world`` (the run's world object) when given. A gate card carries
+    neither key.
 
     Carries: scenario, seed and seed set, backend and versions, law, the
     [S8] metrics (``null`` where undefined), the safety floors, the final
@@ -995,6 +1025,13 @@ def score_run(
         raise ValueError("versions must map strings to strings")
     if not isinstance(replay_ok, bool):
         raise ValueError("replay_ok must be a bool")
+    rows = tuple(checks_as)
+    if rows and (any(r not in CHECKS_AS_ROWS for r in rows) or len(set(rows)) != len(rows)):
+        raise ValueError(f"checks_as must name distinct rows of {CHECKS_AS_ROWS}, got {rows}")
+    if is_probe_scenario(scenario) and not rows:
+        raise ValueError(f"probe scenario {scenario} needs checks_as ([S9])")
+    if rows and not is_probe_scenario(scenario):
+        raise ValueError("checks_as is for probe scenarios only; a gate scene has its own row")
     tl = _parse(trace)
     engaged = _engaged_packets(tl)
     metrics: dict[str, Any] = {
@@ -1012,7 +1049,7 @@ def score_run(
         else:
             attributed[ep.attribution] = attributed.get(ep.attribution, 0) + 1
     floors = _safety_floors(tl, trace.truth, th.alt_floor_m)
-    checks = _scenario_checks(scenario, tl, metrics, th, fc_ids)
+    checks = _rows_checks(rows or (scenario,), tl, metrics, th, fc_ids)
     checks += [
         Check(
             name="floor_geofence",
@@ -1040,7 +1077,13 @@ def score_run(
     if len(set(names)) != len(names):
         raise ValueError(f"check names must be unique, got {names}")
     final_state = tl.transitions[-1][2] if tl.transitions else None
+    probe: dict[str, Any] = {}
+    if rows:
+        probe["checks_as"] = list(rows)
+    if world is not None:
+        probe["world"] = dict(world)
     return {
+        **probe,
         "format": FORMAT,
         "format_v": FORMAT_V,
         "scenario": scenario,

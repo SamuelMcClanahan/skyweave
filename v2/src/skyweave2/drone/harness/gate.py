@@ -26,7 +26,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from skyweave2.drone.harness.scorecard import Thresholds, miss_p95
-from skyweave2.drone.harness.seeds import GATE_REPEATS, SCENARIOS, SeedSet, gate_seeds
+from skyweave2.drone.harness.seeds import (
+    ALL_SCENARIOS,
+    GATE_REPEATS,
+    SCENARIOS,
+    SeedSet,
+    gate_seeds,
+)
 
 FORMAT = "skyweave-drone-gate"
 FORMAT_V = 2
@@ -181,7 +187,7 @@ def aggregate(
     gate (DT-4). For the probe set ``gate_complete`` is ``null``.
     """
     for s in scenarios:
-        if s not in SCENARIOS:
+        if s not in ALL_SCENARIOS:
             raise ValueError(f"unknown scenario {s!r}")
     th = thresholds or Thresholds()
     results: list[dict[str, Any]] = []
