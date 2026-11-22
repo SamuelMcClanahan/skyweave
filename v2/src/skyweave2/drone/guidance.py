@@ -4,7 +4,9 @@ Guidance turns the one track the mission lets it see into velocity setpoints
 and three events (``commit``, ``pass_done``, ``hold_complete``):
 
 - [G1] de-rotation: the track's pixel center becomes a NED line of sight with
-  the FC attitude at the frame's capture time ``t_cap``.
+  the FC attitude at the frame's capture time ``t_cap``. The box is first
+  undistorted into the pinhole image (V-D11, :func:`pinhole_box`); [G2],
+  [G4] and [G6] use the same undistorted box.
 - [G2] size range ``Z = f W / w`` (assume-and-bound fallback below
   ``w_min_px``). Onboard scope is bearing plus size range; no 3D estimation.
 - [G3] the pluggable law (v1: pure pursuit to a standoff point level with the
@@ -243,12 +245,25 @@ class CommitRecord:
 # ---------------------------------------------------------------------------
 
 
+def pinhole_box(track: TrackPacket, cam: CameraModel) -> tuple[float, float, float]:
+    """V-D11: the track box's center ``(u, v_px)`` and width ``w`` undistorted
+    into the pinhole image (``CameraModel.undistort_box``). [G1], [G2], [G4]
+    and [G6] use these. Unchanged when the camera has no distortion; NaN
+    outside the lens model's domain, which [G1a] treats as degraded."""
+    if not cam.distorted:
+        return track.u, track.v_px, track.w
+    u, v, w, _ = cam.undistort_box(track.u, track.v_px, track.w, track.h)
+    return u, v, w
+
+
 def derotate(track: TrackPacket, cam: CameraModel, att: Attitude) -> np.ndarray:
-    """[G1] unit line of sight in NED: ``R_ned_body(att) R_body_cam normalize(ray)``.
+    """[G1] unit line of sight in NED: ``R_ned_body(att) R_body_cam normalize(ray)``,
+    the ray of the undistorted box center (V-D11).
 
     ``att`` is the [G1] sample for ``track.t_cap`` (see ``VehicleState.attitude_at``).
     """
-    ray = cam.ray(track.u, track.v_px)
+    u, v, _ = pinhole_box(track, cam)
+    ray = cam.ray(u, v)
     return r_ned_body(att) @ cam.rotation() @ (ray / np.linalg.norm(ray))
 
 
@@ -257,10 +272,12 @@ def size_range(
 ) -> tuple[float, float, RangeSource]:
     """[G2] ``(Z, r, source)``: ``Z = f W / w`` and ``r = Z |ray|`` when
     ``w >= w_min_px``; otherwise ``r = clamp(r_assume, r_min, r_max)`` and the
-    depth is the matching ``Z = r / |ray|``."""
-    ray_norm = float(np.linalg.norm(cam.ray(track.u, track.v_px)))
-    if track.w >= cfg.w_min_px:
-        z = cam.f_px * target_width_m / track.w
+    depth is the matching ``Z = r / |ray|``. ``w`` and the ray are of the
+    undistorted box (V-D11)."""
+    u, v, w = pinhole_box(track, cam)
+    ray_norm = float(np.linalg.norm(cam.ray(u, v)))
+    if w >= cfg.w_min_px:
+        z = cam.f_px * target_width_m / w
         return z, z * ray_norm, RangeSource.SIZE
     r = min(max(cfg.r_assume, cfg.r_min), cfg.r_max)
     return r / ray_norm, r, RangeSource.ASSUMED
@@ -274,9 +291,11 @@ def geometry_usable(
     The wire bounds nothing about ``u``/``v_px`` beyond finiteness; a far
     out-of-frame value (|u| above about 1e157) overflows ``|ray|`` and would
     turn the line of sight and the [G3] command into NaN (bug-hunt finding 3).
-    Such a packet is treated as attitude-degraded.
+    Such a packet is treated as attitude-degraded, and so is a box outside the
+    lens model's domain (NaN from undistortion, V-D11).
     """
-    ray_norm = float(np.linalg.norm(cam.ray(track.u, track.v_px)))
+    u, v, _ = pinhole_box(track, cam)
+    ray_norm = float(np.linalg.norm(cam.ray(u, v)))
     if not (math.isfinite(ray_norm) and ray_norm > 0.0):
         return False
     z, r, _ = size_range(track, cam, target_width_m, cfg)
@@ -289,13 +308,15 @@ def miss_vector(
     target_width_m: float,
     cfg: GuidanceConfig | None = None,
 ) -> MissVector:
-    """[G6] ``eps = (u - cx, v_px - cy)``; ``miss = Z eps / f`` (camera right, down).
+    """[G6] ``eps = (u - cx, v_px - cy)`` of the undistorted center (V-D11);
+    ``miss = Z eps / f`` (camera right, down).
 
     ``cfg`` matters only below ``w_min_px`` (the [G2] fallback); replay passes
     the recorded guidance config ([R4]).
     """
     z, _, source = size_range(track, cam, target_width_m, cfg or GuidanceConfig())
-    eps = (track.u - cam.cx, track.v_px - cam.cy)
+    u, v, _ = pinhole_box(track, cam)
+    eps = (u - cam.cx, v - cam.cy)
     return MissVector(
         eps_px=eps,
         z_m=z,
@@ -564,12 +585,13 @@ class Guidance:
     def _commit_gate(
         self, pkt: TrackPacket, t_ms: int, trial: PrimeParams, att_cap: Attitude
     ) -> list[GuidanceEvent]:
-        """[G4]; attitude was checked by the caller ([G1a])."""
+        """[G4] on the undistorted box (V-D11); attitude was checked by the caller ([G1a])."""
         cam, cfg = self.cam, self.config
         if self._committed:
             return []  # at most one commit per pass
-        fill_ok = pkt.w / cam.width >= trial.alpha
-        center_ok = math.hypot(pkt.u - cam.cx, pkt.v_px - cam.cy) <= trial.beta * cam.width
+        u, v, w = pinhole_box(pkt, cam)
+        fill_ok = w / cam.width >= trial.alpha
+        center_ok = math.hypot(u - cam.cx, v - cam.cy) <= trial.beta * cam.width
         if not (
             fill_ok and center_ok and pkt.state is TrackState.CONFIRMED and pkt.hits >= trial.k
         ):

@@ -56,7 +56,7 @@ from typing import Any
 
 from pymavlink.dialects.v20 import ardupilotmega as mavlink2
 
-from skyweave2.drone.camera import wrap_pi
+from skyweave2.drone.camera import CameraModel, wrap_pi
 from skyweave2.drone.core import CompanionCore, CoreConfig, CoreOutput, replay
 from skyweave2.drone.fc_link import LOOPBACK_HOST, FcLink
 from skyweave2.drone.ground_ui import CommandReceiver
@@ -317,6 +317,10 @@ class RunSpec:
     versions: Mapping[str, str] = field(default_factory=dict)
     sim_timeout_ms: int = SIM_TIMEOUT_MS
     home: str = DEFAULT_HOME
+    lens_dist: tuple[float, float, float, float, float] | None = None
+    """V-D11 probe override: the world camera's distortion ``(k1, k2, p1, p2,
+    k3)``, for a placeholder-lens run. Probe seeds only; ``None`` keeps the
+    world's camera."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -330,10 +334,13 @@ class RunResult:
     scorecard_path: Path
 
 
-def core_config(law: str) -> CoreConfig:
+def core_config(law: str, camera: CameraModel | None = None) -> CoreConfig:
     """The companion configuration under test: contract §9 defaults, the law
-    named on the command line, and the setpoint gate enabled (SITL only, [F5])."""
-    return CoreConfig(link=LinkConfig(setpoints_enabled=True), law=law)
+    named on the command line, the world's camera (V-D1; the E1 camera when
+    ``None``), and the setpoint gate enabled (SITL only, [F5])."""
+    return CoreConfig(
+        link=LinkConfig(setpoints_enabled=True), law=law, camera=camera or CameraModel()
+    )
 
 
 def backend_obj(spec: RunSpec) -> dict[str, Any]:
@@ -349,8 +356,13 @@ class ClosedLoop:
     def __init__(self, spec: RunSpec) -> None:
         check_seed(spec.seed_set, spec.scenario, spec.seed)
         self.spec = spec
-        self.config = core_config(spec.law)
-        self.world: World = build_world(spec.scenario, spec.seed)
+        world = build_world(spec.scenario, spec.seed)
+        if spec.lens_dist is not None:
+            if spec.seed_set is not SeedSet.PROBE:
+                raise ValueError("lens_dist is a probe-run override (V-D11); gate worlds are fixed")
+            world = replace(world, camera_model=replace(world.camera_model, dist=spec.lens_dist))
+        self.world: World = world
+        self.config = core_config(spec.law, world.camera_model)
         self.script = Script(
             self.world,
             approve_settle_ms=self.config.mission.approve_settle_ms,
@@ -469,7 +481,9 @@ class ClosedLoop:
             self.fc.send_velocity(out.setpoint)
 
     def _start_camera(self, t: int) -> None:
-        self.camera = SyntheticCamera(self.world.camera, seed=self.spec.seed, t0_ms=t)
+        self.camera = SyntheticCamera(
+            self.world.camera, seed=self.spec.seed, nominal=self.world.camera_model, t0_ms=t
+        )
         self._frame_k = 0
 
     def _apply_dropouts(self) -> None:
@@ -477,7 +491,9 @@ class ClosedLoop:
             return
         windows = tuple((w.start_ms, w.end_ms) for w in self.script.dropouts)
         new_cfg = replace(self.camera.config, dropout_windows_ms=windows)
-        self.camera = SyntheticCamera(new_cfg, seed=self.spec.seed, t0_ms=self.camera.t0_ms)
+        self.camera = SyntheticCamera(
+            new_cfg, seed=self.spec.seed, nominal=self.camera.nominal, t0_ms=self.camera.t0_ms
+        )
         self._dropouts_applied = len(self.script.dropouts)
 
     def _next_frame(self) -> tuple[int, int] | None:

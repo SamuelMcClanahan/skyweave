@@ -2,7 +2,8 @@
 
 **Revision:** 2026-10-08, amended 2026-11-20 (§11.1 vetting decisions; §8.1
 probe scenarios for V-F3, V-D15, V-D16, V-F2); 2026-11-21 (§11.2 E2
-planning decisions)
+planning decisions; E2a-1 and E2a-2: [C2], [C3], [G1], [G2], [G4], [G6],
+[R2], [R4] and §9 for V-D1, E2-D2 and V-D11)
 **Status:** §2 (JSON wire v1) is FROZEN per `PHASE_E1_BRIEF.md` 3.7. §1 and
 §3-§8 are behavior clauses written in phase E1, labeled clause by clause.
 Nothing in this document is Measured. Numbers marked Provisional are
@@ -38,14 +39,22 @@ as a finding.
 - **[C2] Pixels.** Image coordinates are continuous pixels on the flight
   capture grid, 1920 x 1200 (brief §2). `(0.0, 0.0)` is the center of the
   top-left pixel, `u` right, `v` down (same convention as detection D0 §2). The
-  640 x 360 sprint mode is reserved; it is not representable in v1.
+  640 x 360 sprint mode is reserved; it is not representable in v1. Packet
+  pixels are raw sensor pixels, distorted by the lens, as in detection D0.
+  Guidance undistorts a box before it uses it ([G1], V-D11).
 - **[C3] Frames.** Vehicle body FRD (x forward, y right, z down). Local level
   frame NED, origin at the FC's EKF origin (home). Camera: OpenCV (+X right,
   +Y down, +Z along the optical axis). `R_A_B` maps vectors from frame B into
   frame A. Attitude is ArduPilot `ATTITUDE` roll, pitch, yaw (radians), with
-  `R_ned_body = Rz(yaw) Ry(pitch) Rx(roll)`. The camera mount is upright with
-  no uptilt: `R_body_cam = [[0,0,1],[1,0,0],[0,1,0]]` (body x = camera Z,
-  body y = camera X, body z = camera Y).
+  `R_ned_body = Rz(yaw) Ry(pitch) Rx(roll)`. The camera mount `R_body_cam` is
+  configured (V-D1): a named mount or a measured one, recorded in
+  `meta.config` [R2] with the lens (§9). Named mounts:
+  - `c3_forward`, upright with no uptilt: `R_body_cam = [[0,0,1],[1,0,0],[0,1,0]]`
+    (body x = camera Z, body y = camera X, body z = camera Y). The E1 mount.
+    The E1 gate and probes P1-P7 keep it (E2-D1).
+  - `cone_up` (E2-D2): `R_body_cam = [[1,0,0],[0,-1,0],[0,0,-1]]`. The
+    optical axis lies along body -z (up at hover), image u along body x,
+    image v along body -y.
 - **[C4] Units.** Meters, m/s, seconds, radians inside code. Packet fields carry
   the unit named in their table. `alpha` and `beta` are fractions of frame
   width (1920 px). Positive yaw rate turns the nose right (clockwise seen
@@ -271,7 +280,7 @@ ack (companion -> the command's sender):
 
   | `stream` | Other fields | Content |
   | --- | --- | --- |
-  | `meta` | `format` = `skyweave-drone-rec`, `format_v` = 1, `config` (object) | First line. The configuration replay needs: mission constants (including `coast_cap`, `track_timeout_ms`), guidance constants, camera model, link constants, law name, gate setting, and, when the companion runs the tracker (E2-D5), the tracker constants (key `tracker`) with its `id_base` [K4]. Never the token |
+  | `meta` | `format` = `skyweave-drone-rec`, `format_v` = 1, `config` (object) | First line. The configuration replay needs: mission constants (including `coast_cap`, `track_timeout_ms`), guidance constants, camera model (mount and lens names, `R_body_cam`, `f`, `cx`, `cy`, distortion; V-D1, V-D11), link constants, law name, gate setting, and, when the companion runs the tracker (E2-D5), the tracker constants (key `tracker`) with its `id_base` [K4]. Never the token. A camera object without the names and distortion (an E1 recording) reads as the E1 camera: `c3_forward`, `e1_f1000`, no distortion |
   | `detection`, `track`, `mission_state`, `fc_link_health`, `ack` | `pkt` (the packet object) | Packets as on the wire |
   | `command` | `pkt` (the command object; it never contains `token`), `auth_ok` (bool) | Commands as received; the token is removed and replaced by the authentication result. A command record that carries a token is malformed |
   | `mavlink` | `dir` (`rx` or `tx`), `raw` (base64 of the MAVLink2 frame bytes) | Every MAVLink frame the companion receives or sends |
@@ -295,9 +304,9 @@ ack (companion -> the command's sender):
 - **[R4] Miss vector offline.** The commit miss vector [G6] is computable from
   a recording alone: the `track` record whose `pkt.track_id` and `pkt.t_cap`
   match the `commit:<track_id>:<t_cap>` event; `target_width_m` from the last
-  accepted `prime` command record before that event; `f`, `cx`, `cy` from
-  `meta.config`. The result equals the logged `miss:` event within its
-  rounding.
+  accepted `prime` command record before that event; the camera (`f`, `cx`,
+  `cy` and the distortion, V-D11) from `meta.config`. The result equals the
+  logged `miss:` event within its rounding.
 
 ## 4. Mission state machine (Chosen, brief 3.2-3.4)
 
@@ -455,13 +464,26 @@ Every transition the code makes is a row here; any other change is a defect.
   is held; nothing is extrapolated. The packet is attitude-degraded when the
   sample used lies more than `attitude_bound_ms` from `t_cap`, or no sample
   exists.
+  - **Undistorted box (V-D11).** In [G1], [G2], [G4] and [G6], `u`, `v_px`
+    and `w` are the track box undistorted into the pinhole image. The model
+    is Brown-Conrady `(k1, k2, p1, p2, k3)` on normalized coordinates, the
+    detection D0 convention (`contracts/camera.py`); the coefficients are
+    camera config, zero until calibrated (§9). The box center is
+    undistorted. The width is the pinhole length whose distorted end points,
+    on the row through that center, lie the raw width apart; the height
+    likewise, on the column. The synthetic camera applies the same rule
+    forward. With zero coefficients the box is the packet's. A box past the
+    model's domain (the radius where the radial term stops growing) has no
+    undistorted form; its ray is not finite, so the packet is
+    attitude-degraded ([G1a]).
 - **[G1a] Degraded at a step.** Attitude is degraded for a guidance step when
   [F3] holds at the step's stamp, or the packet the step uses is
   attitude-degraded [G1]. A packet whose ray or [G2] range is not finite and
   positive counts as attitude-degraded too. [G4], [G7], and [G8] use only this
   term.
 - **[G2] Size range** (brief 3.5). `Z = f * W / w` with `W` the primed
-  `target_width_m`; range along the line of sight `r = Z * |ray|`. Valid when
+  `target_width_m` and `w` undistorted ([G1], V-D11); range along the line of
+  sight `r = Z * |ray|`. Valid when
   `w >= w_min_px`. Otherwise the assume-and-bound fallback applies:
   `r = clamp(r_assume, r_min, r_max)`, and the range source is "assumed".
   Onboard scope is bearing plus size range only; no 3D target estimation.
@@ -486,7 +508,8 @@ Every transition the code makes is a row here; any other change is a defect.
 - **[G4] Commit gate** (brief 3.4). In `ENGAGED`, touch trials only, on an
   engaged-track packet: commit when `w / 1920 >= alpha` AND
   `hypot(u - cx, v_px - cy) <= beta * 1920` AND `state = confirmed` AND
-  `hits >= k` AND attitude not degraded [G1a]. At most one commit per pass.
+  `hits >= k` AND attitude not degraded [G1a]. `u`, `v_px` and `w` are of the
+  undistorted box ([G1], V-D11). At most one commit per pass.
 - **[G5] Terminal segment.** At commit: contact point `c = r * los` (NED,
   relative to the vehicle), closure speed `v_c = v_max` (trial cap). Fly
   `v_c * c / |c|` with yaw rate 0, open loop (no tracker input), for
@@ -497,7 +520,8 @@ Every transition the code makes is a row here; any other change is a defect.
   [G3] limiter and ignores attitude degradation (the FC owns acceleration;
   `t_overrun_s` and `t_brake_s` cover it).
 - **[G6] Miss vector at commit.** `eps = (u - cx, v_px - cy)` px of the
-  committing packet; `miss = Z * eps / f` m (camera right, down), with `Z` from
+  committing packet's undistorted center ([G1], V-D11); `miss = Z * eps / f`
+  m (camera right, down), with `Z` from
   [G2]. Emitted as the `miss:` event right after `commit:` (§4.6) when the
   mission accepts the commit; recomputable from the recording [R4]. It is the
   predicted miss of a pass flown along the boresight.
@@ -735,7 +759,9 @@ From brief §6 unless marked "E1". All Provisional.
 | `approve_settle_ms` | 1000 (E1) | [M8] |
 | `exit_retry_ms` | 1000 (E1) | [M10] |
 | `tick_hz` | 20 (E1) | [R3], [G11] |
-| camera `f`, `cx`, `cy` | 1000 px, 959.5, 599.5 (E1; AR0234 lens uncalibrated) | [G1] |
+| camera mount (V-D1) | `c3_forward` (E1; the E1 gate and probes P1-P7) or `cone_up` (E2-D2; E2b and the E2 gate). Both nominal, not measured (E1-F9) | [C3] |
+| camera lens `f`, `cx`, `cy` (V-D1) | `e1_f1000`: 1000 px, 959.5, 599.5 (E1 placeholder). `hfov100`: 806 px, 959.5, 599.5 (100 deg HFOV, `960 / tan(50 deg)` = 805.5; half-angles 50.0 deg along u, 36.7 deg along v; V-F1, E2-D2). Both uncalibrated (E1-F3) | [G1] |
+| lens distortion `(k1, k2, p1, p2, k3)` (V-D11) | all 0 until calibrated. The E2a-2 closed-loop check uses `k1` = -0.3 as a placeholder | [G1] |
 | `w_min_px`, `r_assume`, `r_min`, `r_max` | 4 px, 15 m, 1 m, 60 m (E1) | [G2] |
 | `Kp`, `deadband_m`, `a_max` | 0.8 1/s, 0.25 m, 2.0 m/s^2 (E1) | [G3] |
 | `margin_m`, `nose_clearance_m` | 0.05 m, 0.3 m (E1) | [G3] |

@@ -25,8 +25,10 @@ import numpy as np
 import pytest
 from pymavlink.dialects.v20 import ardupilotmega as mavlink2
 
+from skyweave2.drone.camera import CameraModel
+from skyweave2.drone.core import miss_vectors_from_recording
 from skyweave2.drone.fc_link import FcLink
-from skyweave2.drone.harness.batch import plan_seeds
+from skyweave2.drone.harness.batch import DEFAULT_SPEEDUP, plan_seeds
 from skyweave2.drone.harness.camera_sim import (
     PROVISIONAL_NOISE,
     Pose,
@@ -45,7 +47,7 @@ from skyweave2.drone.harness.seeds import (
     probe_seeds,
     seed_for,
 )
-from skyweave2.drone.harness.sitl_loop import ClosedLoop, RunSpec
+from skyweave2.drone.harness.sitl_loop import ClosedLoop, RunSpec, run_one
 from skyweave2.drone.harness.targets import StaticBalloon
 from skyweave2.drone.packets import (
     Event,
@@ -112,12 +114,15 @@ def test_s11_s12_gate_worlds_and_e1_camera_output_are_unchanged() -> None:
     world's run-log object and 60 frames rendered from it, with its own camera and with
     the E1 noise preset plus a dropout window, hash to the fingerprint recorded with the
     E1 code before this change. Each gate world flies PLUS with no wind and no extra
-    defaults-file entries, and scores against its own row."""
+    defaults-file entries, and scores against its own row. V-D1, V-D11 (brief E2a-1,
+    E2a-2 gates): the fingerprint holds with the configured E1 camera, ``c3_forward``
+    with f = 1000 and zero distortion, which every gate world keeps (E2-D1)."""
     h = hashlib.sha256()
     for sc in SCENARIOS:
         for seed in gate_seeds(sc):
             w = build_world(sc, seed)
             assert (w.airframe, w.wind, w.checks_as) == (PLUS, None, ())
+            assert w.camera_model == CameraModel.named("c3_forward", "e1_f1000")
             assert sitl_params(w.airframe, w.wind) == {}
             h.update(canonical_json(w.to_obj()))
             n, e, _ = (float(x) for x in _world_target(w).position(0))
@@ -234,6 +239,29 @@ def _offline_loop(tmp_path: Path, scenario: str) -> ClosedLoop:
         sitl_paths=SitlPaths(binary=tmp_path / "arducopter", parm=tmp_path / "copter.parm"),
     )
     return ClosedLoop(spec)
+
+
+def test_v_d1_v_d11_the_world_camera_configures_the_companion_and_the_sim(
+    tmp_path: Path,
+) -> None:
+    """V-D1 (the harness ``World`` owns its camera), V-D11 (a probe run with the
+    placeholder lens): the closed loop configures the companion core and the
+    synthetic camera with the world's camera. Probe and gate worlds keep the E1 camera
+    (E2-D1). The ``lens_dist`` override reaches both and the run log, and a gate run
+    refuses it."""
+    plain = _offline_loop(tmp_path, "P7")
+    assert plain.world.camera_model == CameraModel() == plain.config.camera
+    assert "camera_model" not in plain.world.to_obj()
+    spec = replace(plain.spec, lens_dist=(-0.3, 0.0, 0.0, 0.0, 0.0))
+    loop = ClosedLoop(spec)
+    want = CameraModel(dist=(-0.3, 0.0, 0.0, 0.0, 0.0))
+    assert loop.world.camera_model == want and loop.config.camera == want
+    assert loop.world.to_obj()["camera_model"]["dist"] == [-0.3, 0.0, 0.0, 0.0, 0.0]
+    loop._start_camera(1000)
+    assert loop.camera.nominal == want and loop.camera.true_cam.dist == want.dist
+    gate = replace(spec, seed_set=SeedSet.GATE, scenario="S2", seed=gate_seeds("S2")[0])
+    with pytest.raises(ValueError):
+        ClosedLoop(gate)
 
 
 @pytest.mark.parametrize("drop_p", [1.0, 0.0])
@@ -649,3 +677,37 @@ def test_s10_sitl_wind_from_the_defaults_file_pushes_the_vehicle(sitl_paths) -> 
         assert h["roll_deg"] < -3.0 and abs(h["ve_mps"]) < 0.3, h
     finally:
         inst.stop()
+
+
+@pytest.mark.slow
+@pytest.mark.sitl
+def test_v_d11_sitl_placeholder_lens_probe_closes_the_loop_and_replays(
+    sitl_paths, tmp_path: Path
+) -> None:
+    """V-D11, brief E2a-2 gate: probe world P7 (its first probe seed) flown with the
+    placeholder lens k1 = -0.3 (Provisional) closes the loop: the companion and the
+    sim both use the distorted lens, the vehicle commits and flies the pass, the run
+    lands, the recording replays exactly ([R3]) from a meta.config that carries the
+    distortion, and the miss recomputed offline equals the logged one ([R4])."""
+    k1 = (-0.3, 0.0, 0.0, 0.0, 0.0)
+    spec = RunSpec(
+        scenario="P7",
+        seed=probe_seeds("P7", 1)[0],
+        seed_set=SeedSet.PROBE,
+        out_dir=tmp_path,
+        sitl_paths=sitl_paths,
+        speedup=DEFAULT_SPEEDUP,
+        instance=free_instance(),
+        lens_dist=k1,
+    )
+    result = run_one(spec)
+    assert result.end_reason == "landed", result.end_reason
+    assert result.replay_ok, result.replay_mismatch
+    records = list(read_records(result.recording))
+    assert records[0].config["camera"]["dist"] == list(k1)
+    states = {r.packet.mission_state for r in records if r.stream is Stream.MISSION_STATE}
+    assert S.TOUCH in states and S.LAND in states, sorted(s.value for s in states)
+    (m,) = miss_vectors_from_recording(result.recording)  # [R4] with the distortion
+    assert m.logged_m is not None
+    got = (*m.vector.miss_m, m.vector.z_m)
+    assert all(abs(a - b) <= 0.0005 + 1e-9 for a, b in zip(got, m.logged_m, strict=True))

@@ -51,6 +51,7 @@ from typing import Any
 
 import numpy as np
 
+from skyweave2.drone.camera import CameraModel
 from skyweave2.drone.harness.camera_sim import PROVISIONAL_NOISE, CameraSimConfig
 from skyweave2.drone.harness.environment import PLUS, Airframe, Wind
 from skyweave2.drone.harness.scorecard import (
@@ -256,7 +257,11 @@ class World:
     """One run's world: trial, camera error model, truth objects (seeded), and
     the SITL side: airframe ([S12]) and wind ([S10]). ``checks_as`` names the
     §8 table rows a probe scenario is scored against ([S9]); empty means the
-    scenario's own row."""
+    scenario's own row. ``camera_model`` is the camera the world flies: its
+    mount, lens and distortion (V-D1, V-D11). The companion is configured
+    with it, and the synthetic camera renders through it (plus the boresight
+    error in ``camera``). Gate worlds and probes P1-P7 keep the E1 camera
+    (``c3_forward``, ``e1_f1000``, E2-D1)."""
 
     scenario: str
     seed: int
@@ -268,11 +273,12 @@ class World:
     airframe: Airframe = PLUS
     wind: Wind | None = None
     checks_as: tuple[str, ...] = ()
+    camera_model: CameraModel = field(default_factory=CameraModel)
 
     def to_obj(self) -> dict[str, Any]:
-        """JSON object for the run log. The airframe, wind and checks keys
-        appear only when they differ from the E1 gate world, so a gate world's
-        object is unchanged."""
+        """JSON object for the run log. The airframe, wind, checks and camera
+        model keys appear only when they differ from the E1 gate world, so a
+        gate world's object is unchanged."""
         out: dict[str, Any] = {
             "scenario": self.scenario,
             "seed": self.seed,
@@ -288,6 +294,8 @@ class World:
             out["wind"] = self.wind.to_obj()
         if self.checks_as:
             out["checks_as"] = list(self.checks_as)
+        if self.camera_model != CameraModel():
+            out["camera_model"] = self.camera_model.to_obj()
         return out
 
 
