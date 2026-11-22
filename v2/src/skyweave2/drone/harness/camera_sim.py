@@ -3,12 +3,21 @@
 The camera renders what a detector would report. Each truth object is
 projected through the real camera model (``camera.CameraModel`` and
 ``camera.r_ned_body``). The inputs are the vehicle's truth position and
-attitude and the true camera mount: the [C3] upright mount with an injected
-boresight error, which guidance does not know about. The box is the pinhole
-image of a fronto-parallel object of the target's size at the target's
-camera depth ``Z``: ``w = f W / Z``, ``h = f H / Z``. This is exactly the
-model [G2] inverts, so in a clean world the size range is exact, and the
-only range error is the noise this module injects.
+attitude and the true camera mount: the configured mount (``nominal``, the
+[C3] forward camera by default, V-D1) with an injected boresight error, which
+guidance does not know about. The box is the pinhole image of a
+fronto-parallel object of the target's size at the target's camera depth
+``Z``: ``w = f W / Z``, ``h = f H / Z``. This is exactly the model [G2]
+inverts, so in a clean world the size range is exact, and the only range
+error is the noise this module injects.
+
+Distortion (V-D11): when the lens has distortion coefficients, the center is
+distorted, and the width and height are the raw distances between the
+distorted edge midpoints (``CameraModel.distort_box``). Guidance inverts
+that rule (to 1e-9 px), so a clean world still gives an exact size range.
+An object whose center lies past the lens model's domain gives no box and no
+truth center; one whose edge midpoint does gives no box. Noise is added to
+the raw box. With zero coefficients nothing changes, value for value.
 
 Per object and frame, in this order:
 
@@ -291,9 +300,12 @@ class Frame:
 
 
 def mount_with_error(nominal: CameraModel, error_rad: tuple[float, float, float]) -> CameraModel:
-    """The true camera: ``nominal`` with its mount rotated by the boresight error."""
+    """The true camera: ``nominal`` with its mount rotated by the boresight error.
+    The lens and its distortion are the nominal ones (V-D11). A nonzero error
+    makes the true mount a custom one, named after the nominal."""
     roll, pitch, yaw = (float(x) for x in error_rad)
     r_true = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll) @ nominal.rotation()
+    erred = any(x != 0.0 for x in (roll, pitch, yaw))
     return CameraModel(
         width=nominal.width,
         height=nominal.height,
@@ -301,6 +313,9 @@ def mount_with_error(nominal: CameraModel, error_rad: tuple[float, float, float]
         cx=nominal.cx,
         cy=nominal.cy,
         r_body_cam=tuple((float(row[0]), float(row[1]), float(row[2])) for row in r_true.tolist()),
+        dist=nominal.dist,
+        mount=f"{nominal.mount}+boresight_error" if erred else nominal.mount,
+        lens=nominal.lens,
     )
 
 
@@ -433,9 +448,10 @@ class SyntheticCamera:
     def project(
         self, pose: Pose, p_ned: Sequence[float] | np.ndarray, t_ms: int
     ) -> tuple[tuple[float, float], float] | None:
-        """Noise-free image of a NED point through the true camera.
+        """Noise-free pinhole image of a NED point through the true camera.
 
         Returns ``((u, v), Z)``, or ``None`` for a point behind the camera.
+        Distortion is applied by :meth:`capture` (V-D11).
         """
         rel = np.asarray(p_ned, dtype=float) - np.asarray(pose.pos_ned, dtype=float)
         p_body = r_ned_body(pose.attitude(t_ms)).T @ rel
@@ -475,9 +491,14 @@ class SyntheticCamera:
         dropped_window = self.in_dropout_window(t_cap)
         boxes: list[Box] = []
         truths: list[ObjectTruth] = []
-        f = self.true_cam.f_px
+        lens = self.true_cam
+        f = lens.f_px
         for j, obj in enumerate(scene):
             image = self.project(pose, obj.position(t_cap), t_cap) if obj.present(t_cap) else None
+            if image is not None and lens.distorted:
+                (u_p, v_p), z = image
+                center = lens.distort_px(u_p, v_p)  # V-D11: NaN past the lens model's domain
+                image = (center, z) if all(math.isfinite(c) for c in center) else None
             if image is None:
                 truths.append(
                     ObjectTruth(name=obj.name, center_px=None, depth_m=None, in_fov=False)
@@ -489,11 +510,15 @@ class SyntheticCamera:
             )
             if dropped_window or uniforms[j] < cfg.dropout_p:
                 continue
+            w = f * obj.width_m / z
+            h = f * obj.height_m / z
+            if lens.distorted:  # V-D11: the raw size; (u, v) is already the raw center
+                _, _, w, h = lens.distort_box(u_p, v_p, w, h)
             n = normals[j]
             u_d = u + cfg.center_sigma_px * float(n[0])
             v_d = v + cfg.center_sigma_px * float(n[1])
-            w_d = f * obj.width_m / z * math.exp(cfg.size_sigma_frac * float(n[2]))
-            h_d = f * obj.height_m / z * math.exp(cfg.size_sigma_frac * float(n[3]))
+            w_d = w * math.exp(cfg.size_sigma_frac * float(n[2]))
+            h_d = h * math.exp(cfg.size_sigma_frac * float(n[3]))
             if not all(math.isfinite(x) for x in (u_d, v_d, w_d, h_d)):
                 continue
             box = self._clip(u_d, v_d, w_d, h_d)

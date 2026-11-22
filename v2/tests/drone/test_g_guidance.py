@@ -508,6 +508,27 @@ def test_g4_alpha_and_beta_boundaries() -> None:
     assert _gate(_pkt(u=CX + 192.5, w=800.0, hits=5)) == []
 
 
+def test_g4_g6_v_d11_commit_gate_and_miss_use_the_undistorted_box() -> None:
+    """[G4], [G6], [G2], V-D11: the fill clause, the logged depth and the miss use the
+    undistorted box.
+
+    Hand, k1 = -0.3, f = 1000: a centered pinhole box 800 px wide has a raw width of
+    2 * 1000 * 0.4 (1 - 0.3 * 0.16) = 761.6 px. Read raw, 761.6 / 1920 = 0.3967 < alpha
+    0.4: no commit (the E1 camera). Undistorted, 800 / 1920 = 0.4167: commits, with
+    Z = f W / w = 1000 * 1 / 800 = 1.25 m and a zero miss (centered).
+    """
+    from skyweave2.drone.camera import CameraModel as Cam
+
+    pkt = _pkt(w=761.6, hits=5)
+    assert _gate(pkt) == []  # E1 camera: raw fill below alpha
+    g = Guidance(Cam(dist=(-0.3, 0.0, 0.0, 0.0, 0.0)), CFG, make_law("pure_pursuit", CFG))
+    view = _view(S.ENGAGED, TOUCH, engaged=ID, candidate=ID)
+    (ev,) = g.on_track(pkt, 1010, view, _steady(0, 3000)(1010))
+    assert ev.kind is GuidanceEventKind.COMMIT
+    assert ev.z_m == pytest.approx(1.25, abs=1e-9)
+    _approx(ev.miss_m, (0.0, 0.0))
+
+
 def test_g4_commits_exactly_once_and_never_in_standoff() -> None:
     """[G4]: at most one commit per pass; standoff trials never commit.
 
