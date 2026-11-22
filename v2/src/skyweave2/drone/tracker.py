@@ -245,7 +245,8 @@ def _iou(track: _Track, box: Box) -> float:
 class Tracker:
     """[K1]-[K4] Provisional tracker: detection packets in, track packets out.
 
-    One instance per tracker process run. Feed every detection packet, in
+    One instance per companion process run (E2-D5: the companion core owns
+    it). Feed every detection packet, in
     arrival order, to :meth:`update`; it returns that frame's track packets.
     """
 

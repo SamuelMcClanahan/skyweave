@@ -80,16 +80,18 @@ as a finding.
   contract). The recording (§3) wraps each packet with its stream name.
 - **[C9] Size.** One datagram is at most 65507 bytes (the UDP payload limit).
   The canonical encoder refuses a packet that encodes larger.
-- **[C10] Process topology.** The board runs three processes: percepd, the
-  tracker, and the companion. The companion process holds mission, guidance,
-  fc_link, the UI server, and the recorder; hand-offs inside it are
-  in-process calls, not datagrams. "Mission process" in this document means
-  the companion process. The pure-logic part of it (mission plus guidance plus
-  the vehicle-state parser) is the companion core of [R3]. Each UDP port has
+- **[C10] Process topology.** The board runs two processes: percepd and the
+  companion (E2-D5; the tracker was a third process before). The companion
+  process holds the tracker, mission, guidance, fc_link, the UI server, and
+  the recorder; hand-offs inside it are in-process calls, not datagrams.
+  "Mission process" in this document means the companion process. The
+  pure-logic part of it (the tracker plus mission plus guidance plus the
+  vehicle-state parser) is the companion core of [R3]. Each UDP port has
   exactly one bound receiver; `SO_REUSEPORT` fan-out is not used. detection
-  goes to the tracker; track and command go to the companion; the companion
-  publishes mission_state and fc_link_health on their ports for external
-  listeners.
+  and command go to the companion; the companion publishes track,
+  mission_state and fc_link_health on their ports for external listeners
+  (E2-D5). The packets do not change: the tracker inside the companion makes
+  each [P2] track packet, feeds it to the mission, and publishes it.
 
 ## 2. JSON wire v1 (FROZEN)
 
@@ -278,7 +280,7 @@ ack (companion -> the command's sender):
 
   | `stream` | Other fields | Content |
   | --- | --- | --- |
-  | `meta` | `format` = `skyweave-drone-rec`, `format_v` = 1, `config` (object) | First line. The configuration replay needs: mission constants (including `coast_cap`, `track_timeout_ms`), guidance constants, camera model (mount and lens names, `R_body_cam`, `f`, `cx`, `cy`, distortion; V-D1, V-D11), link constants, law name, gate setting. Never the token. A camera object without the names and distortion (an E1 recording) reads as the E1 camera: `c3_forward`, `e1_f1000`, no distortion |
+  | `meta` | `format` = `skyweave-drone-rec`, `format_v` = 1, `config` (object) | First line. The configuration replay needs: mission constants (including `coast_cap`, `track_timeout_ms`), guidance constants, camera model (mount and lens names, `R_body_cam`, `f`, `cx`, `cy`, distortion; V-D1, V-D11), link constants, law name, gate setting, and, when the companion runs the tracker (E2-D5), the tracker constants (key `tracker`) with its `id_base` [K4]. Never the token. A camera object without the names and distortion (an E1 recording) reads as the E1 camera: `c3_forward`, `e1_f1000`, no distortion |
   | `detection`, `track`, `mission_state`, `fc_link_health`, `ack` | `pkt` (the packet object) | Packets as on the wire |
   | `command` | `pkt` (the command object; it never contains `token`), `auth_ok` (bool) | Commands as received; the token is removed and replaced by the authentication result. A command record that carries a token is malformed |
   | `mavlink` | `dir` (`rx` or `tx`), `raw` (base64 of the MAVLink2 frame bytes) | Every MAVLink frame the companion receives or sends |
@@ -293,7 +295,12 @@ ack (companion -> the command's sender):
   `mission_state` records; its `ack` records other than `rejected_malformed`
   (those have no input record); and the ordered sequence of velocity
   setpoints in its `mavlink` tx records, compared on (coordinate frame,
-  type_mask, vx, vy, vz, yaw_rate) at float32 precision.
+  type_mask, vx, vy, vz, yaw_rate) at float32 precision. When `meta.config`
+  carries the tracker (E2-D5), the core runs it: `detection` records are
+  inputs in place of `track` records, and replay also reproduces the `track`
+  records exactly (every field, with their `t_rx`, in file order). A
+  recording without the tracker key replays as before, from its `track`
+  records.
 - **[R4] Miss vector offline.** The commit miss vector [G6] is computable from
   a recording alone: the `track` record whose `pkt.track_id` and `pkt.t_cap`
   match the `commit:<track_id>:<t_cap>` event; `target_width_m` from the last
@@ -781,7 +788,7 @@ Tone table (E1, [F8], [M12]): `ACQUIRING`, `ENGAGED`, `TOUCH`, `LOST`,
 | Series | Clauses | Content | Tier |
 | --- | --- | --- | --- |
 | P | [C5]-[C9], [P1]-[P5] | Golden packet fixtures beside the tests; byte-exact canonical encoding; decode/encode round-trip; unknown-field tolerance; version, type, range, and undecodable-input rejection through one error type | fast |
-| R | [R1]-[R4] | Recording round-trip; token never recorded; replay of a recorded stream reproduces mission states, acks (except `rejected_malformed`), and setpoints; miss vector recomputed offline | fast |
+| R | [R1]-[R4] | Recording round-trip; token never recorded; replay of a recorded stream reproduces mission states, acks (except `rejected_malformed`), and setpoints, and, when the tracker runs in the core, the track records (E2-D5); miss vector recomputed offline | fast |
 | M | [M1]-[M12], T01-T24 | Every transition and every command rejection; precedence; lock stickiness against a higher-scoring track; approve settle; edge-gated launch; exit retries | fast |
 | K | [K1]-[K4], [P2a] | Provisional tracker: M-of-N confirm, coast cap and final packet, id uniqueness across restarts | fast |
 | G | [G1]-[G11] | Synthetic geometry: known offsets give known commands, commit decisions, and miss vectors | fast |

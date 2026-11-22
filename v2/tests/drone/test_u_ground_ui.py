@@ -30,7 +30,7 @@ import pytest
 from pymavlink.dialects.v20 import ardupilotmega as mavlink2
 
 from skyweave2.drone.companiond import Companion, CompanionConfig
-from skyweave2.drone.core import CompanionCore, CoreConfig, CoreOutput
+from skyweave2.drone.core import CompanionCore, CoreConfig, CoreOutput, replay
 from skyweave2.drone.fc_link import EndpointRefused
 from skyweave2.drone.ground_ui import (
     CommandReceiver,
@@ -45,7 +45,9 @@ from skyweave2.drone.ground_ui import (
 from skyweave2.drone.packets import (
     AckPacket,
     AckResult,
+    Box,
     CommandName,
+    DetectionPacket,
     FcLinkHealthPacket,
     MissionState,
     MissionStatePacket,
@@ -58,6 +60,7 @@ from skyweave2.drone.packets import (
     encode,
 )
 from skyweave2.drone.recording import Record, Recorder, Stream, read_records
+from skyweave2.drone.tracker import id_base_from_start
 from skyweave2.drone.types import LandedState
 from skyweave2.drone.vehicle_state import parse_frames
 
@@ -579,24 +582,27 @@ def _udp(timeout_s: float = 2.0) -> socket.socket:
 
 
 def test_c10_companion_process_wires_udp_fc_ui_and_recording(tmp_path: Path) -> None:
-    """[C10], [C8], [P5], [P5b], [F4], [U6], [R2]: one companion process. FC
-    frames arrive on its link; a track and commands arrive on their UDP ports;
-    each command's ack goes back to its sender (accepted prime, rejected_auth,
-    rejected_malformed); the mission_state and fc_link_health packets reach
-    their listeners; an undecodable track datagram is counted, not recorded;
-    the UI polls through the same lock; and the recording starts with meta and
-    holds every input, with no token."""
+    """[C10], [C8], [P5], [P5b], [F4], [U6], [R2], E2-D5: one companion process.
+    FC frames arrive on its link; a detection and commands arrive on their UDP
+    ports; the tracker inside the process publishes the frame's track packet
+    on the track port; each command's ack goes back to its sender (accepted
+    prime, rejected_auth, rejected_malformed); the mission_state and
+    fc_link_health packets reach their listeners; an undecodable detection
+    datagram is counted, not recorded; the UI polls through the same lock; and
+    the recording starts with meta and holds every input and the published
+    track, with no token."""
     fc_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     fc_listener.bind(("127.0.0.1", 0))
     fc_listener.listen(1)
-    states_rx, health_rx, sender = _udp(), _udp(), _udp()
+    states_rx, health_rx, tracks_rx, sender = _udp(), _udp(), _udp(), _udp()
     clock = _Clock(T0)
     rec = tmp_path / "flight.jsonl"
     config = CompanionConfig(
         fc_endpoint=f"tcp:127.0.0.1:{fc_listener.getsockname()[1]}",
         recording=rec,
-        track_port=0,
+        detection_port=0,
         command_port=0,
+        track_port=tracks_rx.getsockname()[1],
         mission_state_port=states_rx.getsockname()[1],
         fc_link_health_port=health_rx.getsockname()[1],
         ui_port=0,
@@ -614,22 +620,11 @@ def test_c10_companion_process_wires_udp_fc_ui_and_recording(tmp_path: Path) -> 
             assert isinstance(health, FcLinkHealthPacket)
             assert health.fc_link_up is True and health.gate_state.value == "locked"
 
-            track = TrackPacket(
-                t_cap=T0,
-                track_id=7,
-                state=TrackState.TENTATIVE,
-                u=900.0,
-                v_px=500.0,
-                du=0.0,
-                dv=0.0,
-                w=20.0,
-                h=20.0,
-                hits=1,
-                misses=0,
-                age_frames=1,
+            det = DetectionPacket(
+                t_cap=T0, frame_seq=0, boxes=(Box(x=890.0, y=490.0, w=20.0, h=20.0, conf=0.9),)
             )
-            sender.sendto(encode(track), comp.tracks.address)
-            sender.sendto(b"not a track", comp.tracks.address)
+            sender.sendto(encode(det), comp.detections.address)
+            sender.sendto(b"not a detection", comp.detections.address)
             sends = [
                 _body("ui-c1", "prime", params=PRIME_PARAMS),
                 _body("ui-c2", "abort", token=WRONG_TOKEN),
@@ -652,7 +647,9 @@ def test_c10_companion_process_wires_udp_fc_ui_and_recording(tmp_path: Path) -> 
             published = decode(PacketKind.MISSION_STATE, states_rx.recv(65536))
             assert isinstance(published, MissionStatePacket)
             assert published.mission_state is MissionState.PRIMED
-            assert comp.tracks.rejected == 1
+            track = decode(PacketKind.TRACK, tracks_rx.recv(65536))
+            assert isinstance(track, TrackPacket) and track.t_cap == T0
+            assert comp.detections.rejected == 1
 
             host, port = comp.server.address
             conn = http.client.HTTPConnection(host, port, timeout=5)
@@ -666,7 +663,7 @@ def test_c10_companion_process_wires_udp_fc_ui_and_recording(tmp_path: Path) -> 
     finally:
         if fc_conn is not None:
             fc_conn.close()
-        for s in (fc_listener, states_rx, health_rx, sender):
+        for s in (fc_listener, states_rx, health_rx, tracks_rx, sender):
             s.close()
 
     text = rec.read_text(encoding="ascii")
@@ -674,9 +671,153 @@ def test_c10_companion_process_wires_udp_fc_ui_and_recording(tmp_path: Path) -> 
     assert records[0].stream is Stream.META
     by = {s: [r for r in records if r.stream is s] for s in Stream}
     assert [r.t_rx for r in by[Stream.TICK]] == [T0, T0 + 50]
+    assert [r.packet for r in by[Stream.DETECTION]] == [det]
     assert [r.packet for r in by[Stream.TRACK]] == [track]
     assert [r.auth_ok for r in by[Stream.COMMAND]] == [True, False]
     assert [r.t_rx for r in by[Stream.GROUND_HB]] == [T0 + 10]
     assert len(by[Stream.FC_LINK_HEALTH]) == 1
     assert by[Stream.MAVLINK] and all(r.direction == "rx" for r in by[Stream.MAVLINK])
     assert UI_TOKEN not in text and WRONG_TOKEN not in text
+
+
+GUIDED_MODE = 4  # ArduCopter custom_mode (fixture fact)
+FLIGHT_FRAMES = 6  # frames per _fc_flight bundle
+
+
+def _fc_flight(boot_ms: int, *, mode: int, armed: bool, landed: LandedState, alt_m: float) -> bytes:
+    """One [M2a] telemetry bundle: mode, arming, landed state, altitude, battery, attitude."""
+    mav = mavlink2.MAVLink(None, srcSystem=1, srcComponent=1)
+    base = mavlink2.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+    if armed:
+        base |= mavlink2.MAV_MODE_FLAG_SAFETY_ARMED
+    alt_mm = round(alt_m * 1000)
+    msgs = [
+        mav.heartbeat_encode(
+            mavlink2.MAV_TYPE_QUADROTOR,
+            mavlink2.MAV_AUTOPILOT_ARDUPILOTMEGA,
+            base,
+            mode,
+            mavlink2.MAV_STATE_ACTIVE,
+        ),
+        mav.extended_sys_state_encode(0, int(landed)),
+        mav.global_position_int_encode(boot_ms, 0, 0, alt_mm, alt_mm, 0, 0, 0, 0),
+        mav.local_position_ned_encode(boot_ms, 0.0, 0.0, -alt_m, 0.0, 0.0, 0.0),
+        mav.sys_status_encode(0, 0, 0, 0, 12000, 100, BATTERY_PCT, 0, 0, 0, 0, 0, 0),
+        mav.attitude_encode(boot_ms, 0.0, 0.0, 0.3, 0.0, 0.0, 0.0),
+    ]
+    assert len(msgs) == FLIGHT_FRAMES
+    return b"".join(bytes(m.pack(mav)) for m in msgs)
+
+
+def _drain(s: socket.socket, kind: PacketKind) -> list[Any]:
+    """Every datagram already queued on a listener, decoded."""
+    out = []
+    while select.select([s], [], [], 0.0)[0]:
+        out.append(decode(kind, s.recv(65536)))
+    return out
+
+
+def test_c10_e2d5_companion_runs_the_tracker_publishes_tracks_and_replays(
+    tmp_path: Path,
+) -> None:
+    """E2-D5, [C10], [P2], [K2], [K4], T01 T03 T04 T05, [R2], [R3]: the
+    companion process binds the detection port and runs the tracker in
+    process. The FC takes it through prime, the switch into GUIDED, and
+    takeoff to SEARCH; three detection frames of one box then come in on the
+    detection port. The tracker's packets reach the track port, one per frame,
+    and the third (confirmed) one makes the candidate (T05). The recording
+    holds the detections and the published tracks, its meta.config carries
+    the tracker with the id_base of the process start, and replay re-runs the
+    tracker from the detection records and matches every track record."""
+    defaults = CompanionConfig(fc_endpoint="tcp:127.0.0.1:5762", recording=tmp_path / "unused")
+    assert (defaults.detection_port, defaults.track_port) == (14601, 14602)  # contract §9
+
+    fc_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fc_listener.bind(("127.0.0.1", 0))
+    fc_listener.listen(1)
+    states_rx, health_rx, tracks_rx, sender = _udp(), _udp(), _udp(), _udp()
+    clock = _Clock(T0)
+    rec = tmp_path / "flight.jsonl"
+    config = CompanionConfig(
+        fc_endpoint=f"tcp:127.0.0.1:{fc_listener.getsockname()[1]}",
+        recording=rec,
+        detection_port=0,
+        command_port=0,
+        track_port=tracks_rx.getsockname()[1],
+        mission_state_port=states_rx.getsockname()[1],
+        fc_link_health_port=health_rx.getsockname()[1],
+        ui_port=0,
+    )
+    dets = [
+        DetectionPacket(
+            t_cap=T0 + 180 + 50 * i,
+            frame_seq=i,
+            boxes=(Box(x=880.0 + i, y=485.0, w=40.0, h=30.0, conf=0.9),),
+        )
+        for i in range(3)
+    ]
+    fc_conn: socket.socket | None = None
+    try:
+        with Companion(config, UI_TOKEN, clock=clock) as comp:
+            comp.start()
+            fc_conn, _ = fc_listener.accept()
+
+            def fc(**vehicle: Any) -> None:
+                """The FC's bundle, read in full before the next tick falls due."""
+                want = comp.fc_link.rx_frames + FLIGHT_FRAMES
+                assert fc_conn is not None
+                fc_conn.sendall(_fc_flight(clock.t, **vehicle))
+                for _ in range(200):
+                    comp.run_once(0.01)
+                    if comp.fc_link.rx_frames >= want:
+                        return
+                raise AssertionError("the companion did not read the FC's frames")
+
+            def tick(t: int, *datagrams: tuple[bytes, Any]) -> None:
+                """Inputs at ``t``, then the companion's step (its tick is due)."""
+                clock.t = t
+                for data, addr in datagrams:
+                    sender.sendto(data, addr)
+                comp.run_once()
+
+            ground = {"armed": False, "landed": LandedState.ON_GROUND, "alt_m": 0.0}
+            flying = {"armed": True, "landed": LandedState.IN_AIR, "alt_m": 10.0}
+            fc(mode=LOITER, **ground)  # the first step also ticks at T0 (unprimed)
+            prime = _body("ui-p1", "prime", params=PRIME_PARAMS)
+            tick(T0 + 50, (prime, comp.commands.address))  # T01; the tick sees LOITER
+            ack = decode(PacketKind.ACK, sender.recv(65536))
+            assert isinstance(ack, AckPacket) and ack.result is AckResult.ACCEPTED
+            fc(mode=GUIDED_MODE, **ground)  # the pilot moves the switch into GUIDED
+            tick(T0 + 100)  # T03
+            fc(mode=GUIDED_MODE, **flying)
+            tick(T0 + 150)  # T04
+            for det in dets:
+                fc(mode=GUIDED_MODE, **flying)
+                tick(det.t_cap + 20, (encode(det), comp.detections.address))
+            tids = [row[1] for row in comp.core.mission.transition_log]
+            tracks = _drain(tracks_rx, PacketKind.TRACK)
+            states = _drain(states_rx, PacketKind.MISSION_STATE)
+    finally:
+        if fc_conn is not None:
+            fc_conn.close()
+        for s in (fc_listener, states_rx, health_rx, tracks_rx, sender):
+            s.close()
+
+    assert tids == ["T01", "T03", "T04", "T05"]
+    assert [p.state for p in tracks] == [TrackState.TENTATIVE] * 2 + [TrackState.CONFIRMED]
+    assert [p.t_cap for p in tracks] == [d.t_cap for d in dets]  # one packet per frame
+    (track_id,) = {p.track_id for p in tracks}
+    assert states[-1].mission_state is MissionState.ACQUIRING
+    assert f"candidate:{track_id}" in [e.name for s in states for e in s.events]
+
+    records = list(read_records(rec.read_text(encoding="ascii").splitlines()))
+    assert records[0].config is not None
+    tracker_cfg = records[0].config["tracker"]  # [R2]: the tracker the process ran
+    assert tracker_cfg["id_base"] == id_base_from_start(T0)  # [K4]: the process start
+    assert tracker_cfg["coast_cap"] == records[0].config["coast_cap"]  # [P2a]
+    assert [r.packet for r in records if r.stream is Stream.DETECTION] == dets
+    assert [r.packet for r in records if r.stream is Stream.TRACK] == tracks
+
+    result = replay(rec)  # [R3]: the tracker re-runs from the detection records
+    assert result.mismatch() is None
+    assert [p for _, p in result.recorded_tracks] == tracks

@@ -8,6 +8,9 @@ recording fed back through a fresh core gives the same outputs ([R3]). The
 order of calls per input is part of that contract, so it lives here and
 nowhere else:
 
+- DET (a detection packet; only when the core runs the tracker, E2-D5):
+  the tracker's ``update``; then each of that frame's track packets, in the
+  tracker's order, as a TRK input stamped like the detection.
 - TRK (a track packet): ``mission.on_track``; then ``guidance.on_track`` with
   the mission view after that packet; then each guidance event goes to
   ``mission.on_guidance`` as its own GDE input ([M2]).
@@ -35,10 +38,18 @@ Time ([M2], [R3], E1-D8): the core never reads a clock. "Now" is the stamp of
 the input being processed, and every output record carries that stamp
 ([R2]). Stamps of the core's own inputs must not decrease.
 
+The tracker (E2-D5, [C10]): when ``CoreConfig.tracker`` is set, the core owns
+the companion's :class:`tracker.Tracker`. Detections come in, the core
+records each ``detection`` and each ``track`` packet the tracker makes from
+it, and the caller publishes those track packets for external listeners. A
+core with a tracker takes no track packets from outside, and a core without
+one takes no detections, so a recording has one route and replay follows it.
+
 What the core records, through :class:`recording.Recorder`: the ``meta`` line
 (its configuration, never a token), each input record before the input is
-processed (``track``, ``command`` with the token removed, ``tick``,
-``ground_hb``), and each output (``ack``, ``mission_state``). fc_link records
+processed (``detection`` or ``track``, ``command`` with the token removed,
+``tick``, ``ground_hb``), each track packet its tracker makes, and each
+output (``ack``, ``mission_state``). fc_link records
 ``mavlink`` frames ([F10]); a radio approve is re-derived from its ``mavlink``
 rx record and is never a ``command`` record ([F7]).
 
@@ -59,7 +70,7 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +96,7 @@ from skyweave2.drone.packets import (
     AckResult,
     CommandName,
     CommandPacket,
+    DetectionPacket,
     GateState,
     MissionStatePacket,
     PrimeParams,
@@ -99,6 +111,7 @@ from skyweave2.drone.recording import (
     Stream,
     read_records,
 )
+from skyweave2.drone.tracker import Tracker, TrackerConfig, id_base_from_start
 from skyweave2.drone.types import FcRequest, GuidanceEvent, VelocityCommand
 from skyweave2.drone.vehicle_state import (
     LinkConfig,
@@ -116,6 +129,7 @@ yaw_rate), the four numbers at float32 precision."""
 _CONFIG_KEYS = frozenset(
     {"mission", "guidance", "camera", "link", "law", "coast_cap", "track_timeout_ms", "gate"}
 )
+_TRACKER_KEY = "tracker"  # present only when the core runs the tracker (E2-D5)
 _SETPOINT_MSG = "SET_POSITION_TARGET_LOCAL_NED"
 
 
@@ -133,6 +147,11 @@ class CoreConfig:
     mission config; :meth:`to_obj` also names them at the top level, with the
     gate setting, because [R2] and [P2a] call them out (the tracker must run
     with the same ``coast_cap``).
+
+    ``tracker`` is set when the core runs the tracker in process (E2-D5); its
+    ``id_base`` is fixed when the live driver starts ([K4],
+    :meth:`with_tracker`). ``None`` is a core fed track packets (tests, and
+    recordings made before E2-D5); ``meta.config`` then has no ``tracker`` key.
     """
 
     mission: MissionConfig = field(default_factory=MissionConfig)
@@ -140,10 +159,24 @@ class CoreConfig:
     camera: CameraModel = field(default_factory=CameraModel)
     link: LinkConfig = field(default_factory=LinkConfig)
     law: str = DEFAULT_LAW
+    tracker: TrackerConfig | None = None
 
     def __post_init__(self) -> None:
         if self.law not in LAWS:
             raise ValueError(f"unknown guidance law {self.law!r}; known: {sorted(LAWS)}")
+        if self.tracker is not None and self.tracker.coast_cap != self.mission.coast_cap:
+            raise ValueError(
+                f"tracker coast_cap {self.tracker.coast_cap} != mission coast_cap "
+                f"{self.mission.coast_cap} ([P2a]: one shared value)"
+            )
+
+    def with_tracker(self, start_t_ms: int) -> CoreConfig:
+        """This config with the tracker in process (E2-D5), started at
+        ``start_t_ms`` board ms: ``tracker``'s constants when set, else the
+        tracker's Provisional defaults; ``id_base`` from the start time ([K4]);
+        ``coast_cap`` shared with the mission ([P2a])."""
+        base = self.tracker or TrackerConfig(id_base=0, coast_cap=self.mission.coast_cap)
+        return replace(self, tracker=replace(base, id_base=id_base_from_start(start_t_ms)))
 
     @property
     def gate(self) -> GateState:
@@ -152,7 +185,7 @@ class CoreConfig:
 
     def to_obj(self) -> dict[str, Any]:
         """The recording's ``meta.config`` object ([R2])."""
-        return {
+        obj: dict[str, Any] = {
             "mission": self.mission.to_obj(),
             "guidance": self.guidance.to_obj(),
             "camera": self.camera.to_obj(),
@@ -162,6 +195,9 @@ class CoreConfig:
             "track_timeout_ms": self.mission.track_timeout_ms,
             "gate": self.gate.value,
         }
+        if self.tracker is not None:
+            obj[_TRACKER_KEY] = self.tracker.to_obj()
+        return obj
 
     @classmethod
     def from_obj(cls, obj: Any) -> CoreConfig:
@@ -169,19 +205,23 @@ class CoreConfig:
         copies must agree with the nested values. Raises ``ValueError``."""
         if not isinstance(obj, Mapping):
             raise ValueError("core config must be a JSON object")
-        if set(obj) != _CONFIG_KEYS:
-            missing = sorted(_CONFIG_KEYS - set(obj))
-            unknown = sorted(set(obj) - _CONFIG_KEYS)
+        keys = set(obj) - {_TRACKER_KEY}  # the tracker key is optional (E2-D5)
+        if keys != _CONFIG_KEYS:
+            missing = sorted(_CONFIG_KEYS - keys)
+            unknown = sorted(keys - _CONFIG_KEYS)
             raise ValueError(f"core config keys: missing {missing}, unknown {unknown}")
         law = obj["law"]
         if not isinstance(law, str):
             raise ValueError("core config law must be a string")
+        # A tracker key that is present must be a whole tracker config (null too).
+        tracker = TrackerConfig.from_obj(obj[_TRACKER_KEY]) if _TRACKER_KEY in obj else None
         config = cls(
             mission=MissionConfig.from_obj(obj["mission"]),
             guidance=GuidanceConfig.from_obj(obj["guidance"]),
             camera=CameraModel.from_obj(obj["camera"]),
             link=LinkConfig.from_obj(obj["link"]),
             law=law,
+            tracker=tracker,
         )
         mirrors = (
             ("coast_cap", config.mission.coast_cap),
@@ -212,10 +252,14 @@ class CoreOutput:
     ``t``; a drained approve's come first) and writes ``requests`` and then
     ``setpoint`` through fc_link. ``setpoint`` is ``None`` unless this input
     was a TICK with a setpoint step whose state sends one ([G10], [G11]).
+    ``tracks`` are the track packets the core's tracker made from a DET
+    input, in order; the live process publishes them on the track port
+    (E2-D5).
     """
 
     acks: tuple[AckPacket, ...] = ()
     rc_acks: tuple[tuple[int, AckPacket], ...] = ()
+    tracks: tuple[TrackPacket, ...] = ()
     mission_states: tuple[MissionStatePacket, ...] = ()
     requests: tuple[FcRequest, ...] = ()
     setpoint: VelocityCommand | None = None
@@ -225,6 +269,7 @@ class CoreOutput:
 class _Out:
     acks: list[AckPacket] = field(default_factory=list)
     rc_acks: list[tuple[int, AckPacket]] = field(default_factory=list)
+    tracks: list[TrackPacket] = field(default_factory=list)
     mission_states: list[MissionStatePacket] = field(default_factory=list)
     requests: list[FcRequest] = field(default_factory=list)
     setpoint: VelocityCommand | None = None
@@ -233,6 +278,7 @@ class _Out:
         return CoreOutput(
             acks=tuple(self.acks),
             rc_acks=tuple(self.rc_acks),
+            tracks=tuple(self.tracks),
             mission_states=tuple(self.mission_states),
             requests=tuple(self.requests),
             setpoint=self.setpoint,
@@ -240,7 +286,8 @@ class _Out:
 
 
 class CompanionCore:
-    """Mission + guidance + vehicle state behind one input API ([C10], [R3]).
+    """Mission + guidance + vehicle state, and the tracker when the config
+    names one (E2-D5), behind one input API ([C10], [R3]).
 
     ``vehicle`` is the :class:`VehicleState` the core reads: in a live process
     it is ``FcLink.state`` (fc_link ingests and records the frames); in replay
@@ -270,6 +317,7 @@ class CompanionCore:
         self.guidance = Guidance(
             config.camera, config.guidance, make_law(config.law, config.guidance)
         )
+        self.tracker = None if config.tracker is None else Tracker(config.tracker)
         self._recorder = recorder
         self._last_t: int | None = None
         if recorder is not None:
@@ -277,19 +325,34 @@ class CompanionCore:
 
     # -- inputs ([M2]) --------------------------------------------------------
 
-    def on_track(self, pkt: TrackPacket, t_rx: int) -> CoreOutput:
-        """TRK: mission first, then guidance on the view after it, then each
-        guidance event (``commit``, ``hold_complete``) as its own GDE input.
-        Pending radio approves are processed first ([F7])."""
+    def on_detection(self, det: DetectionPacket, t_rx: int) -> CoreOutput:
+        """DET (E2-D5): the tracker takes the frame; each track packet it makes
+        is recorded and processed as a TRK input stamped ``t_rx``, and is
+        returned in ``tracks`` for publishing. Pending radio approves are
+        processed first ([F7])."""
+        if self.tracker is None:
+            raise ValueError("this core runs no tracker; it takes track packets ([C10])")
         out = _Out()
         self._drain_approves(out)
         t = self._input_stamp(t_rx)
         if self._recorder is not None:
-            self._recorder.packet(t, pkt)
-        self.mission.on_track(pkt, t)
-        self._after_input(t, out)
-        for ev in self.guidance.on_track(pkt, t, self.mission.view(), self.vehicle):
-            self._guidance_event(ev, out)
+            self._recorder.packet(t, det)
+        for pkt in self.tracker.update(det):
+            out.tracks.append(pkt)
+            self._track(pkt, t, out)
+        return out.freeze()
+
+    def on_track(self, pkt: TrackPacket, t_rx: int) -> CoreOutput:
+        """TRK: mission first, then guidance on the view after it, then each
+        guidance event (``commit``, ``hold_complete``) as its own GDE input.
+        Pending radio approves are processed first ([F7]). Only for a core
+        without a tracker (E2-D5)."""
+        if self.tracker is not None:
+            raise ValueError("this core runs the tracker (E2-D5); it takes detection packets")
+        out = _Out()
+        self._drain_approves(out)
+        t = self._input_stamp(t_rx)
+        self._track(pkt, t, out)
         return out.freeze()
 
     def on_command(self, cmd: CommandPacket, auth_ok: bool, t_rx: int) -> CoreOutput:
@@ -361,6 +424,14 @@ class CompanionCore:
         return ack
 
     # -- internals ------------------------------------------------------------
+
+    def _track(self, pkt: TrackPacket, t: int, out: _Out) -> None:
+        if self._recorder is not None:
+            self._recorder.packet(t, pkt)
+        self.mission.on_track(pkt, t)
+        self._after_input(t, out)
+        for ev in self.guidance.on_track(pkt, t, self.mission.view(), self.vehicle):
+            self._guidance_event(ev, out)
 
     def _input_stamp(self, t_rx: int) -> int:
         if isinstance(t_rx, bool) or not isinstance(t_rx, int) or t_rx < 0:
@@ -456,10 +527,14 @@ class ReplayResult:
     recording says was produced ([R3]). Pairs are ``(t_rx, packet)``.
 
     ``recorded_acks`` leaves out ``rejected_malformed`` acks (they have no
-    input record, [P5b]); ``skipped_malformed`` counts them.
+    input record, [P5b]); ``skipped_malformed`` counts them. ``tracks`` and
+    ``recorded_tracks`` are empty unless the recording's core ran the tracker
+    (E2-D5): then the ``track`` records are outputs, compared exactly.
     """
 
     config: CoreConfig
+    tracks: tuple[tuple[int, TrackPacket], ...]
+    recorded_tracks: tuple[tuple[int, TrackPacket], ...]
     mission_states: tuple[tuple[int, MissionStatePacket], ...]
     acks: tuple[tuple[int, AckPacket], ...]
     setpoints: tuple[SetpointKey, ...]
@@ -471,12 +546,14 @@ class ReplayResult:
 
     @property
     def matches(self) -> bool:
-        """[R3]: mission states, acks, and setpoints all reproduced exactly."""
+        """[R3]: tracks (when the tracker ran in the core), mission states,
+        acks, and setpoints all reproduced exactly."""
         return self.mismatch() is None
 
     def mismatch(self) -> str | None:
         """The first difference, described; ``None`` when replay matches."""
         for name, got, want in (
+            ("track", self.tracks, self.recorded_tracks),
             ("mission_state", self.mission_states, self.recorded_mission_states),
             ("ack", self.acks, self.recorded_acks),
             ("setpoint", self.setpoints, self.recorded_setpoints),
@@ -531,10 +608,17 @@ def replay(source: str | Path | Iterable[str]) -> ReplayResult:
     ``ground_hb``. ``mission_state``, ``ack`` and ``mavlink`` tx records are
     what the run produced and are collected for comparison; ``detection`` and
     ``fc_link_health`` records are not core inputs and are skipped.
+
+    When ``meta.config`` has a tracker (E2-D5), ``detection`` records are the
+    inputs in place of ``track`` records, and the ``track`` records join the
+    outputs compared.
     """
     config, records = _open(source)
     core = CompanionCore(config)
+    runs_tracker = core.tracker is not None
     writes = _WriteModel(config.link)
+    tracks: list[tuple[int, TrackPacket]] = []
+    rec_tracks: list[tuple[int, TrackPacket]] = []
     states: list[tuple[int, MissionStatePacket]] = []
     acks: list[tuple[int, AckPacket]] = []
     setpoints: list[SetpointKey] = []
@@ -564,7 +648,13 @@ def replay(source: str | Path | Iterable[str]) -> ReplayResult:
             continue
         if stream is Stream.TRACK:
             assert isinstance(r.packet, TrackPacket)
+            if runs_tracker:
+                rec_tracks.append((t, r.packet))
+                continue
             out = core.on_track(r.packet, t)
+        elif stream is Stream.DETECTION and runs_tracker:
+            assert isinstance(r.packet, DetectionPacket)
+            out = core.on_detection(r.packet, t)
         elif stream is Stream.COMMAND:
             assert isinstance(r.packet, CommandPacket) and r.auth_ok is not None
             out = core.on_command(r.packet, r.auth_ok, t)
@@ -575,9 +665,10 @@ def replay(source: str | Path | Iterable[str]) -> ReplayResult:
         elif stream is Stream.META:
             raise RecordingError("a recording has exactly one meta record ([R2])")
         else:
-            continue  # detection, fc_link_health: not core inputs
+            continue  # fc_link_health, and detection without a tracker: not core inputs
         # Each output carries the stamp of the input that caused it ([R2]): a
         # drained radio approve's is its sample's, not this record's.
+        tracks.extend((t, pkt) for pkt in out.tracks)
         states.extend((pkt.t, pkt) for pkt in out.mission_states)
         acks.extend(out.rc_acks)
         acks.extend((t, ack) for ack in out.acks)
@@ -585,6 +676,8 @@ def replay(source: str | Path | Iterable[str]) -> ReplayResult:
             setpoints.append(setpoint_key(out.setpoint, config.link))
     return ReplayResult(
         config=config,
+        tracks=tuple(tracks),
+        recorded_tracks=tuple(rec_tracks),
         mission_states=tuple(states),
         acks=tuple(acks),
         setpoints=tuple(setpoints),

@@ -31,6 +31,7 @@ import io
 import json
 import math
 import os
+import random
 import select
 import shutil
 import socket
@@ -57,8 +58,10 @@ from skyweave2.drone.mission import MissionConfig
 from skyweave2.drone.packets import (
     AckPacket,
     AckResult,
+    Box,
     CommandName,
     CommandPacket,
+    DetectionPacket,
     MissionState,
     PrimeParams,
     TrackPacket,
@@ -68,6 +71,7 @@ from skyweave2.drone.packets import (
     strict_json_loads,
 )
 from skyweave2.drone.recording import Record, Recorder, Stream, read_records
+from skyweave2.drone.tracker import id_base_from_start
 from skyweave2.drone.types import LandedState, VelocityCommand
 from skyweave2.drone.vehicle_state import LinkConfig, parse_frames
 
@@ -788,3 +792,108 @@ def test_m2_core_input_stamps_must_not_decrease() -> None:
     core.on_ground_heartbeat(100)  # equal stamps are fine
     with pytest.raises(ValueError):
         core.on_tick(99)
+
+
+# -- E2-D5: the tracker inside the companion core ----------------------------------
+
+TRACKER_T0 = 5_000  # board ms when the tracker-in-core recording starts
+FRAME_MS = 33
+
+
+def _tracker_detections(seed: int) -> list[DetectionPacket]:
+    """Seeded frames for one recording: target A crosses the frame with noise;
+    target B is seen, drops out long enough to die ([P2a], coast_cap 5), and
+    returns as a new track; a false box flickers (tentative deletions); one
+    frame repeats an old t_cap (dropped as stale)."""
+    rng = random.Random(seed)
+    dets = []
+    for i in range(90):
+        boxes = [Box(x=300.0 + 6.0 * i + rng.gauss(0.0, 1.5), y=400.0, w=60.0, h=45.0, conf=0.9)]
+        if not 20 <= i < 40:
+            x_b = 1200.0 - 3.0 * i + rng.gauss(0.0, 1.5)
+            boxes.append(Box(x=x_b, y=700.0 + rng.gauss(0.0, 1.0), w=50.0, h=50.0, conf=0.8))
+        if rng.random() < 0.15:
+            x_f, y_f = rng.uniform(0.0, 1800.0), rng.uniform(0.0, 1100.0)
+            boxes.append(Box(x=x_f, y=y_f, w=20.0, h=20.0, conf=0.3))
+        dets.append(
+            DetectionPacket(t_cap=TRACKER_T0 + FRAME_MS * i, frame_seq=i, boxes=tuple(boxes))
+        )
+    dets.insert(50, dataclasses.replace(dets[48], frame_seq=999))  # [P1]: stale t_cap
+    return dets
+
+
+def _tracker_recording(dets: list[DetectionPacket]) -> list[str]:
+    """A core that runs the tracker, fed the frames (each 10 ms after capture)
+    and a tick every 50 ms, recorded."""
+    buf = io.StringIO()
+    config = CoreConfig(mission=MissionConfig(coast_cap=5)).with_tracker(TRACKER_T0)
+    core = CompanionCore(config, recorder=Recorder(buf), t_start_ms=TRACKER_T0)
+    t_tick = last = TRACKER_T0
+    for det in dets:
+        t = max(det.t_cap + 10, last)  # the stale frame arrives in order
+        while t_tick <= t:
+            core.on_tick(t_tick)
+            t_tick += 50
+        core.on_detection(det, t)
+        last = t
+    return buf.getvalue().splitlines()
+
+
+def test_r3_e2d5_replay_reruns_the_tracker_and_matches_every_track_record() -> None:
+    """[R3], E2-D5, [K1]-[K4], [P2a]: a recording made by a core that runs the
+    tracker replays from its detection records to the same track records, every
+    field and stamp, through births, confirmations, coasting, a death, a re-birth
+    under a new id, tentative deletions, and a stale frame. Moving one box by a
+    tenth of a pixel, or losing one track record, shows up as a track mismatch."""
+    lines = _tracker_recording(_tracker_detections(seed=20261121))
+    result = replay(lines)
+    assert result.mismatch() is None
+    recorded = [p for _, p in result.recorded_tracks]
+    assert len({p.track_id for p in recorded}) >= 3  # A, B, and B again after its death
+    assert any(p.state is TrackState.COASTING and p.misses > 5 for p in recorded)  # a death
+
+    idx = next(
+        i for i, ln in enumerate(lines) if '"stream":"detection"' in ln and '"frame_seq":60' in ln
+    )
+    obj = json.loads(lines[idx])
+    obj["pkt"]["boxes"][0]["x"] += 0.1
+    moved = lines[:idx] + [canonical_json(obj).decode("ascii")] + lines[idx + 1 :]
+    assert (replay(moved).mismatch() or "").startswith("track #")
+
+    first_track = next(i for i, ln in enumerate(lines) if '"stream":"track"' in ln)
+    assert (replay(lines[:first_track] + lines[first_track + 1 :]).mismatch() or "").startswith(
+        "track"
+    )
+
+
+def test_r2_e2d5_tracker_config_rides_in_meta_and_shares_coast_cap() -> None:
+    """[R2], [P2a], [K4], E2-D5: meta.config carries the tracker the core ran,
+    with the id_base of its start, and reads back equal; a tracker whose
+    coast_cap differs from the mission's is refused, here and in meta.config;
+    a config without the tracker key is a core fed track packets."""
+    config = CoreConfig(mission=MissionConfig(coast_cap=7)).with_tracker(4_000)
+    assert config.tracker is not None and config.tracker.id_base == id_base_from_start(4_000)
+    obj = config.to_obj()
+    assert CoreConfig.from_obj(strict_json_loads(canonical_json(obj).decode("ascii"))) == config
+    assert CoreConfig.from_obj(CoreConfig().to_obj()).tracker is None
+    with pytest.raises(ValueError):
+        dataclasses.replace(config, tracker=dataclasses.replace(config.tracker, coast_cap=8))
+    with pytest.raises(ValueError):
+        CoreConfig.from_obj({**obj, "tracker": {**obj["tracker"], "coast_cap": 8}})
+    with pytest.raises(ValueError):
+        CoreConfig.from_obj({**obj, "tracker": {**obj["tracker"], "token": "x"}})
+
+
+def test_c10_e2d5_a_core_takes_one_route_detections_or_tracks() -> None:
+    """[C10], [R3], E2-D5: a core that runs the tracker refuses outside track
+    packets, and a core without one refuses detections, so a recording holds
+    one route and replay follows it."""
+    det = DetectionPacket(
+        t_cap=1_000, frame_seq=0, boxes=(Box(x=10.0, y=10.0, w=8.0, h=8.0, conf=1.0),)
+    )
+    trk = CompanionCore(CoreConfig().with_tracker(1_000))
+    (pkt,) = trk.on_detection(det, 1_010).tracks
+    with pytest.raises(ValueError):
+        trk.on_track(pkt, 1_020)
+    with pytest.raises(ValueError):
+        CompanionCore(CoreConfig()).on_detection(det, 1_010)
