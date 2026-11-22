@@ -23,7 +23,13 @@ from pathlib import Path
 from typing import Any
 
 from skyweave2.drone.harness.gate import RunEntry, aggregate
-from skyweave2.drone.harness.seeds import SeedSet, check_seed, gate_seeds, probe_seeds
+from skyweave2.drone.harness.seeds import (
+    SeedSet,
+    check_seed,
+    gate_seeds,
+    is_probe_scenario,
+    probe_seeds,
+)
 from skyweave2.drone.harness.sitl_loop import BACKEND, RunSpec, backend_obj, run_one
 from skyweave2.drone.packets import canonical_json
 from skyweave2.drone.sitl import PARM_SHA256, SITL_SHA256, SitlError, SitlPaths, free_instance
@@ -72,7 +78,10 @@ def versions() -> dict[str, str]:
 def plan_seeds(
     scenario: str, seed_set: SeedSet, explicit: Sequence[int] | None, probe_count: int
 ) -> list[int]:
-    """The seeds one scenario runs, each checked against its label ([S7])."""
+    """The seeds one scenario runs, each checked against its label ([S7]). A
+    probe scenario ([S9]) has no gate set."""
+    if seed_set is SeedSet.GATE and is_probe_scenario(scenario):
+        raise ValueError(f"{scenario} is a probe scenario; it has no gate seeds ([S9])")
     if explicit:
         seeds = list(dict.fromkeys(explicit))
     elif seed_set is SeedSet.GATE:

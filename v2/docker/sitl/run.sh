@@ -31,8 +31,17 @@ in_container() {
   local prep='uv sync --frozen --extra dev --no-install-project --quiet \
     && python -c "from skyweave2.drone.sitl import ensure_sitl; ensure_sitl()" \
     && exec "$@"'
+  # A git worktree keeps its git dir under the main checkout's .git, outside
+  # $REPO. Mount that common dir read-only so harness.batch.versions() can
+  # record `git rev-parse HEAD` in every scorecard.
+  local git_mount=()
+  local common
+  if common="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+    && [ -d "$common" ] && case "$common" in "$REPO"/*) false ;; *) true ;; esac; then
+    git_mount=(-v "$common:$common:ro")
+  fi
   docker run --rm --init ${tty[@]+"${tty[@]}"} --platform "$PLATFORM" \
-    -v "$REPO:$REPO" -w "$REPO/v2" \
+    -v "$REPO:$REPO" ${git_mount[@]+"${git_mount[@]}"} -w "$REPO/v2" \
     -v "$VENV_VOL:/opt/venv" -v "$CACHE_VOL:/cache" \
     -e PYTHONPATH="$REPO/v2/src" \
     -e SKYWEAVE_HARNESS_JOBS -e SKYWEAVE_HARNESS_SPEEDUP \

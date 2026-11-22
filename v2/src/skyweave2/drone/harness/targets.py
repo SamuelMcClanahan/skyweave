@@ -20,6 +20,15 @@ The four kinds follow the demo plan:
   glides; lift is not modelled (finding).
 - :class:`CrossingBird`: a straight constant-velocity distractor (S6).
 
+Probe-scenario kinds ([S9], V-F3; never in a gate scene):
+
+- :class:`TetheredBalloon`: a balloon on a string from a ground anchor,
+  blown down by the wind and swaying in it (V-D14).
+- :class:`WindKite`: a kite on a line, flying a figure-8 across the wind
+  window downwind of its anchor.
+- :class:`WanderingBird`: a bird circling at one height, a persistent
+  false box the detector calls a target (V-D16).
+
 Demo geometry keeps the target above the vehicle's horizon (brief 3.9).
 :func:`require_above_horizon` lets a scenario check that over its window.
 
@@ -291,3 +300,166 @@ def require_above_horizon(target: Trajectory, *, vehicle_alt_m: float, t_ms: Ite
                 f"{target.name} at t={t} ms is {alt:.3f} m above home, not above the "
                 f"vehicle's horizon at {vehicle_alt_m:.3f} m (brief 3.9)"
             )
+
+
+def _unit_heading(heading_rad: float) -> tuple[np.ndarray, np.ndarray]:
+    """Horizontal unit vector along ``heading_rad`` and the one 90 deg right of it."""
+    d = np.array([math.cos(heading_rad), math.sin(heading_rad), 0.0])
+    c = np.array([-math.sin(heading_rad), math.cos(heading_rad), 0.0])
+    return d, c
+
+
+@dataclass(frozen=True, kw_only=True)
+class TetheredBalloon:
+    """Balloon on a straight string of length ``tether_m`` from a ground anchor.
+
+    The string leans downwind by ``theta(t)`` from vertical and swings across
+    the wind by ``psi(t)``, with ``t`` in seconds::
+
+        theta(t) = lean_rad + lean_amp_rad * sin(2 pi t / lean_period_s + lean_phase_rad)
+        psi(t)   = swing_amp_rad * sin(2 pi t / swing_period_s + swing_phase_rad)
+        p(t)     = anchor + L sin(theta) (cos(psi) d + sin(psi) c) - L cos(theta) z
+
+    ``d`` is the downwind unit vector (``downwind_heading_rad``), ``c`` is 90
+    deg right of it, and ``z`` is NED down. The string is taken as straight
+    (no sag); the sway stands in for gust response and is not coupled to the
+    SITL turbulence (finding).
+    """
+
+    anchor_ned: Vec3
+    tether_m: float
+    downwind_heading_rad: float
+    lean_rad: float
+    lean_amp_rad: float = 0.0
+    lean_period_s: float = 6.0
+    lean_phase_rad: float = 0.0
+    swing_amp_rad: float = 0.0
+    swing_period_s: float = 8.0
+    swing_phase_rad: float = 0.0
+    name: str = "balloon"
+    width_m: float = 1.0
+    height_m: float = 1.0
+
+    def __post_init__(self) -> None:
+        _vec3(self.anchor_ned, "anchor_ned")
+        _positive(self.tether_m, "tether_m")
+        for f in ("downwind_heading_rad", "lean_phase_rad", "swing_phase_rad"):
+            _finite(getattr(self, f), f)
+        for f in ("lean_rad", "lean_amp_rad", "swing_amp_rad"):
+            _non_negative(getattr(self, f), f)
+        _positive(self.lean_period_s, "lean_period_s")
+        _positive(self.swing_period_s, "swing_period_s")
+        if self.lean_rad + self.lean_amp_rad >= math.pi / 2:
+            raise ValueError("lean_rad + lean_amp_rad must stay below 90 deg")
+        _check_size(self.name, self.width_m, self.height_m)
+
+    def position(self, t_ms: int) -> np.ndarray:
+        _int_ms(t_ms, "t_ms")
+        t_s = t_ms / 1000.0
+        theta = self.lean_rad + self.lean_amp_rad * math.sin(
+            2.0 * math.pi * t_s / self.lean_period_s + self.lean_phase_rad
+        )
+        psi = self.swing_amp_rad * math.sin(
+            2.0 * math.pi * t_s / self.swing_period_s + self.swing_phase_rad
+        )
+        d, c = _unit_heading(self.downwind_heading_rad)
+        horiz = self.tether_m * math.sin(theta) * (math.cos(psi) * d + math.sin(psi) * c)
+        up = np.array([0.0, 0.0, -self.tether_m * math.cos(theta)])
+        return np.asarray(self.anchor_ned, dtype=float) + horiz + up
+
+    def present(self, t_ms: int) -> bool:
+        return True
+
+
+@dataclass(frozen=True, kw_only=True)
+class WindKite:
+    """Kite on a straight line of length ``line_m`` from ``anchor_ned``.
+
+    It flies a figure-8 in the wind window downwind of the anchor: azimuth
+    ``phi`` across the wind at the pattern period, elevation ``eps`` at twice
+    that rate, with ``t`` in seconds::
+
+        phi(t) = sweep_amp_rad * sin(2 pi t / period_s + phase_rad)
+        eps(t) = elev_rad + elev_amp_rad * sin(4 pi t / period_s + 2 phase_rad)
+        p(t)   = anchor + L cos(eps) (cos(phi) d + sin(phi) c) - L sin(eps) z
+    """
+
+    anchor_ned: Vec3
+    line_m: float
+    downwind_heading_rad: float
+    elev_rad: float
+    sweep_amp_rad: float
+    elev_amp_rad: float = 0.0
+    period_s: float = 12.0
+    phase_rad: float = 0.0
+    name: str = "kite"
+    width_m: float = 1.0
+    height_m: float = 0.8
+
+    def __post_init__(self) -> None:
+        _vec3(self.anchor_ned, "anchor_ned")
+        _positive(self.line_m, "line_m")
+        _finite(self.downwind_heading_rad, "downwind_heading_rad")
+        _finite(self.phase_rad, "phase_rad")
+        for f in ("elev_rad", "sweep_amp_rad", "elev_amp_rad"):
+            _non_negative(getattr(self, f), f)
+        _positive(self.period_s, "period_s")
+        lo, hi = self.elev_rad - self.elev_amp_rad, self.elev_rad + self.elev_amp_rad
+        if not (0.0 < lo and hi < math.pi / 2):
+            raise ValueError("kite elevation must stay inside (0, 90) deg")
+        _check_size(self.name, self.width_m, self.height_m)
+
+    def position(self, t_ms: int) -> np.ndarray:
+        _int_ms(t_ms, "t_ms")
+        w = 2.0 * math.pi * (t_ms / 1000.0) / self.period_s
+        phi = self.sweep_amp_rad * math.sin(w + self.phase_rad)
+        eps = self.elev_rad + self.elev_amp_rad * math.sin(2.0 * w + 2.0 * self.phase_rad)
+        d, c = _unit_heading(self.downwind_heading_rad)
+        horiz = self.line_m * math.cos(eps) * (math.cos(phi) * d + math.sin(phi) * c)
+        up = np.array([0.0, 0.0, -self.line_m * math.sin(eps)])
+        return np.asarray(self.anchor_ned, dtype=float) + horiz + up
+
+    def present(self, t_ms: int) -> bool:
+        return True
+
+
+@dataclass(frozen=True, kw_only=True)
+class WanderingBird:
+    """A bird circling ``center_ned`` at radius ``radius_m`` and ``speed_mps``,
+    bobbing ``bob_m`` up and down over ``bob_period_s``. Present for the whole run:
+    a persistent false box (V-D16). ``t`` in seconds::
+
+        a(t) = phase_rad + (speed_mps / radius_m) t
+        p(t) = center + radius (cos a, sin a, 0) + (0, 0, bob_m sin(2 pi t / bob_period_s))
+    """
+
+    center_ned: Vec3
+    radius_m: float
+    speed_mps: float
+    phase_rad: float = 0.0
+    bob_m: float = 0.0
+    bob_period_s: float = 5.0
+    name: str = "bird"
+    width_m: float = 0.5
+    height_m: float = 0.2
+
+    def __post_init__(self) -> None:
+        _vec3(self.center_ned, "center_ned")
+        _positive(self.radius_m, "radius_m")
+        _finite(self.speed_mps, "speed_mps")
+        _finite(self.phase_rad, "phase_rad")
+        _non_negative(self.bob_m, "bob_m")
+        _positive(self.bob_period_s, "bob_period_s")
+        _check_size(self.name, self.width_m, self.height_m)
+
+    def position(self, t_ms: int) -> np.ndarray:
+        _int_ms(t_ms, "t_ms")
+        t_s = t_ms / 1000.0
+        a = self.phase_rad + self.speed_mps / self.radius_m * t_s
+        bob = self.bob_m * math.sin(2.0 * math.pi * t_s / self.bob_period_s)
+        return np.asarray(self.center_ned, dtype=float) + np.array(
+            [self.radius_m * math.cos(a), self.radius_m * math.sin(a), bob]
+        )
+
+    def present(self, t_ms: int) -> bool:
+        return True

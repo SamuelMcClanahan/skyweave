@@ -61,6 +61,7 @@ from skyweave2.drone.core import CompanionCore, CoreConfig, CoreOutput, replay
 from skyweave2.drone.fc_link import LOOPBACK_HOST, FcLink
 from skyweave2.drone.ground_ui import CommandReceiver
 from skyweave2.drone.harness.camera_sim import FrameTruth, Pose, SyntheticCamera
+from skyweave2.drone.harness.environment import sitl_params
 from skyweave2.drone.harness.scenarios import (
     APPROVE_IDLE_PWM,
     FLTMODE_PARAMS,
@@ -81,7 +82,7 @@ from skyweave2.drone.harness.scorecard import (
     score_run,
     scorecard_json,
 )
-from skyweave2.drone.harness.seeds import SeedSet, check_seed
+from skyweave2.drone.harness.seeds import SeedSet, check_seed, is_probe_scenario
 from skyweave2.drone.packets import CommandName, CommandPacket, encode
 from skyweave2.drone.recording import Recorder, read_records
 from skyweave2.drone.sitl import DEFAULT_HOME, SitlInstance, SitlPaths, instance_ports
@@ -489,7 +490,7 @@ class ClosedLoop:
         if self.camera is None:
             return None
         t_cap = self.camera.capture_time(self._frame_k)
-        return self.camera.deliver_time(t_cap), t_cap
+        return self.camera.deliver_time_of(self._frame_k), t_cap
 
     def _deliver_frame(self, t: int) -> None:
         assert self.camera is not None and self.tracker is not None
@@ -498,6 +499,9 @@ class ClosedLoop:
         t_cap = self.camera.capture_time(k)
         frame = self.camera.capture(k, self.truth.pose_at(t_cap), self.world.scene)
         self._frame_k += 1
+        if frame.dropped:  # [S11]: percepd skipped the frame; nothing downstream sees it
+            self.counters["frames_dropped"] = self.counters.get("frames_dropped", 0) + 1
+            return
         self.frame_truths.append(frame.truth)
         self.recorder.packet(t, frame.packet)  # E1-F10: the harness records detections
         self.counters["frames"] += 1
@@ -583,15 +587,27 @@ class ClosedLoop:
 
     # -- the run --------------------------------------------------------------
 
+    def sitl_instance(self) -> SitlInstance:
+        """The SITL this run flies: the world's airframe ([S12]) and, in the
+        defaults file only, the mode switch, the airframe's entries and the
+        wind ([S10]). A gate world adds nothing to the E1 launch."""
+        extra = dict(FLTMODE_PARAMS)
+        extra.update(sitl_params(self.world.airframe, self.world.wind))
+        return SitlInstance(
+            self.spec.sitl_paths,
+            instance=self.spec.instance,
+            speedup=self.spec.speedup,
+            model=self.world.airframe.model,
+            frame_file=self.world.airframe.frame_file,
+            extra_params=extra,
+        )
+
     def run(self) -> RunResult:
         spec = self.spec
         run_dir = spec.out_dir
         run_dir.mkdir(parents=True, exist_ok=True)
         rec_path = run_dir / "recording.jsonl"
-        extra = dict(FLTMODE_PARAMS)
-        sitl = SitlInstance(
-            spec.sitl_paths, instance=spec.instance, speedup=spec.speedup, extra_params=extra
-        )
+        sitl = self.sitl_instance()
         wall_limit = spec.sim_timeout_ms / 1000.0 / spec.speedup * 2.0 + 120.0
         self.relay = None  # type: ignore[assignment]
         self.recorder = Recorder(rec_path)
@@ -707,6 +723,8 @@ class ClosedLoop:
             thresholds=Thresholds(hold_tol_m=g.hold_tol_m, hold_time_s=g.hold_time_s),
             extra_checks=self.script.extra_checks(trace),
             fc_ids=self.fc_ids,
+            checks_as=self.world.checks_as,
+            world=self.world.to_obj() if is_probe_scenario(spec.scenario) else None,
         )
         card_path = spec.out_dir / "scorecard.json"
         card_path.write_bytes(scorecard_json(card) + b"\n")
