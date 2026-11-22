@@ -11,11 +11,16 @@ Work happens on the drone stack (`v2/src/skyweave2/drone/`). The ground
 detection line below (D8, C-004) is parked; do not start work on it. For
 drone work, read these instead of the detection list:
 
-1. `v2/docs/PHASE_E1_BRIEF.md`: the E1 brief (E1 merged as PR #1).
-2. `v2/docs/DRONE_CONTRACTS_D0.md`: the fenced drone contract. §11.1
-   holds the 2026-11-20 vetting decisions (`V-` IDs) that the next phase
-   implements. A clause changes only in a PR that cites its decision ID.
-3. `v2/docs/TESTING_DOCTRINE.md`: still applies.
+1. `v2/docs/PHASE_E2_BRIEF.md`: the current phase brief (E2, balloon
+   intercept; ratified by Samuel merging PR #4 on 2026-11-21). Part E2a
+   is sanctioned; E2b is an outline.
+2. `v2/docs/PHASE_E1_BRIEF.md`: the E1 brief (E1 merged as PR #1). Its §0
+   and §7 still hold.
+3. `v2/docs/DRONE_CONTRACTS_D0.md`: the fenced drone contract. §11.1
+   holds the 2026-11-20 vetting decisions (`V-` IDs) and §11.2 the
+   2026-11-21 E2 planning decisions (`E2-` IDs). A clause changes only in
+   a PR that cites its decision ID.
+4. `v2/docs/TESTING_DOCTRINE.md`: still applies.
 
 The drone fast tier runs from `v2/` with
 `uv run pytest tests/drone -m "not slow and not sitl"`. The SITL tier needs
