@@ -1,7 +1,8 @@
 # SkyWeave drone stack contracts (E1 / D0)
 
 **Revision:** 2026-10-08, amended 2026-11-20 (§11.1 vetting decisions; §8.1
-probe scenarios for V-F3, V-D15, V-D16, V-F2)
+probe scenarios for V-F3, V-D15, V-D16, V-F2); 2026-11-21 (§11.2 E2
+planning decisions)
 **Status:** §2 (JSON wire v1) is FROZEN per `PHASE_E1_BRIEF.md` 3.7. §1 and
 §3-§8 are behavior clauses written in phase E1, labeled clause by clause.
 Nothing in this document is Measured. Numbers marked Provisional are
@@ -849,3 +850,22 @@ lifts it.
 | V-F4 | No YOLO model exists yet, and the percepd v0 source is still missing (E1-F1, E1-F2). Detector-in-the-loop sim waits for a model. A 3D renderer can make labeled training images | Finding |
 | V-F6 | Airframe numbers from the Onshape assembly `Skyweave-000-ASM` (2026-11-20). CAD mass 0.527 kg (1.162 lb); Samuel estimates the real vehicle at CAD + 0.25 lb or a little more, so about 0.64 kg. Inertia about the center of mass from CAD: Ixx 2.24e-3, Iyy 2.22e-3, Izz 1.99e-3 kg m^2 (about 2.71e-3, 2.69e-3, 2.41e-3 scaled to 0.64 kg, assuming the added mass spreads like the rest). X frame: motor-to-motor diagonal about 210 mm (side 149 mm). Overall about 256 x 257 mm at the prop tips, 221 mm tall. The battery stands upright in the tower above the props, the nose electronics and camera sit on top, and the FC/ESC stack and feet sit below the props. The center of mass is about 19 mm above the prop plane and about 11 mm sideways from the motor center in CAD (check this on the vehicle). Motors T-Motor Velox V2207 1750KV (the CAD uses a stand-in motor model); props Gemfan Hurricane 51433 (5.1 in diameter, 3.3 in pitch, tri-blade; an `R` on the hub marks the reverse-rotation props; the CAD model shows a 51466); battery 6S 1300 mAh. Thrust is not measured (a thrust stand comes later): T-Motor lists about 740 g at 60 % throttle with a 5.1 in prop, and full throttle is likely 1.3-1.6 kg per motor, so thrust-to-weight is about 8-10 and hover throttle about 0.2. ArduCopter's hover-throttle learning gives a measured hover throttle from the first hover flight. The mesh measurements are from the STL export (inches). These numbers feed the SITL frame file (V-F2) and the 3D model. None is Measured | Provisional |
 | V-F5 | Open for Samuel: camera tilt (proposal: about 30 deg forward of the nose axis, wide axis along pitch; Samuel is weighing a yaw rotation of the wide axis between scan and pursuit); lens 100 deg vs 80-90 deg; the 3D sim design (proposal: render-only, with SITL keeping the physics); E1-F5, E1-F15, E1-F16, E1-F17 and E1-F23 stay open | Finding |
+
+### 11.2 E2 planning decisions (2026-11-21)
+
+Samuel worked through the blockers to phase E2 with Claude on 2026-11-21 and
+made the decisions below. `PHASE_E2_BRIEF.md` builds on them. As in §11.1,
+they authorize clause changes; the clauses above stay as written until the PR
+that implements a decision edits them and cites its ID. Numbers are
+Provisional; none is Measured. [F1] still holds.
+
+| ID | Item | Label |
+| --- | --- | --- |
+| E2-D1 | Gate policy for E2. E2 gets its own gate, frozen before any E2b tuning: the cone frame ([S12] `cone_x`), the E2-D2 mount and lens, touch trials only, seeds `sha256("E2-gate:<scene>:<i>")`. Its pass numbers are declared before its first run. The E1 gate (S1-S6, [S7] seeds) does not change and stays green on every E2 PR as a regression check. The configured mount (V-D1) lets it keep the [C3] forward camera | Chosen |
+| E2-D2 | Camera mount and lens for now (part of V-F5). The optical axis lies along the nose, which is the thrust axis, so the camera looks straight up at hover. The wide image axis (u) lies along body x: `R_body_cam = [[1,0,0],[0,-1,0],[0,0,-1]]` (mount name `cone_up`). Lens 100 deg HFOV, `f` about 806 px on 1920 px (V-F1), half-angles 50.0 deg along u and 36.7 deg along v. The 30 deg tilt proposal and the yaw rotation between scan and pursuit are set aside, not rejected. Samuel confirmed the wide axis along body x (fore-aft) on 2026-11-21 | Chosen (numbers Provisional) |
+| E2-D3 | E2 runs in two parts. E2a: camera and tracker geometry (V-D1, V-D9, V-D10, V-D11, E2-D5). E2b: the PN pass (V-D2 to V-D6, V-D12) and the E2 gate. PN needs E2a's world line-of-sight rate | Chosen |
+| E2-D4 | The `v_max` safety floor ([S8], E1-F15) is ignored in E2 for now. The E2 gate does not check it; its scorecards report peak commanded and peak true speed. The E1 gate keeps the floor. E1-F15 stays open. The [F6] hard limits still apply to every sent setpoint | Chosen |
+| E2-D5 | The tracker runs inside the companion process, so de-rotation (V-D10) has the companion's attitude history at hand. Detection packets go to the companion. The companion publishes track packets on the track port for external listeners, as it publishes mission_state. No new packet type. Changes [C10] | Chosen |
+| E2-D6 | Search from below. With E2-D2 a level vehicle sees only targets at least 40 deg above its horizon (the u half-angle); the yaw scan sweeps that edge around. With a height gap `dh` below the target, the target is visible within about `1.19 * dh` horizontally. The operator flies the search below the balloon. E2 probes and the E2 gate put targets 40-80 deg above the vehicle at search | Chosen |
+| E2-D7 | Standoff trials are out of E2. A standoff hold on a balloon is not practical for now; E2 focuses on intercept (touch trials). Kites and thrown planes are out of E2 too. Standoff code stays, and S1, S3 and S6 keep running in the E1 gate. E1-D3 (standoff geometry) and E1-F16 (the hold under dropout) stay open | Chosen |
+| E2-F1 | ArduCopter 4.7.0 acceleration setpoints, from a read of the source at tag Copter-4.7.0 (not yet run). `SET_POSITION_TARGET_LOCAL_NED` masks: acceleration plus yaw rate is 1087; velocity plus acceleration plus yaw rate is 1031. The force bit (512) must stay clear: with acceleration used, the handler then holds position instead. The acceleration is kinematic: ArduCopter adds gravity and turns it into lean and thrust, as V-D2 assumes. `GUID_TIMEOUT` defaults to 3 s; on timeout the velocity and acceleration targets go to zero. The position controller jerk-limits the acceleration input (`PSC_JERK_NE`), which adds lag. Acceleration-only mode skips the controller's speed limiting; velocity plus acceleration keeps it. The handler applies each message at once, with no rate limit. E2b proves each point on SITL before PN relies on it | Finding |
