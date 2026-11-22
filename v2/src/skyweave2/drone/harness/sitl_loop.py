@@ -2,8 +2,8 @@
 
 One run is one SITL process and one companion core::
 
-    truth objects --camera_sim--> detection --Tracker--> track --CompanionCore-->
-    requests + setpoints --FcLink (gate enabled)--> relay --> SITL SERIAL1
+    truth objects --camera_sim--> detection --CompanionCore (tracker inside,
+    E2-D5)--> requests + setpoints --FcLink (gate enabled)--> relay --> SITL SERIAL1
     SITL SERIAL0 (the harness's own link) --SIM_STATE--> vehicle truth --> camera
 
 Clock ([S0], [C1]). The injected board clock is SITL boot time: the newest
@@ -86,7 +86,6 @@ from skyweave2.drone.harness.seeds import SeedSet, check_seed, is_probe_scenario
 from skyweave2.drone.packets import CommandName, CommandPacket, encode
 from skyweave2.drone.recording import Recorder, read_records
 from skyweave2.drone.sitl import DEFAULT_HOME, SitlInstance, SitlPaths, instance_ports
-from skyweave2.drone.tracker import Tracker, TrackerConfig, id_base_from_start
 from skyweave2.drone.vehicle_state import LinkConfig
 
 BACKEND = "ardupilot-copter-4.7.0-sitl"
@@ -364,7 +363,6 @@ class ClosedLoop:
         self.truth_samples: list[TruthSample] = []
         self.frame_truths: list[FrameTruth] = []
         self.camera: SyntheticCamera | None = None
-        self.tracker: Tracker | None = None
         self._frame_k = 0
         self._dropouts_applied = 0
         self._switch = self.script.initial_switch
@@ -472,9 +470,6 @@ class ClosedLoop:
 
     def _start_camera(self, t: int) -> None:
         self.camera = SyntheticCamera(self.world.camera, seed=self.spec.seed, t0_ms=t)
-        self.tracker = Tracker(
-            TrackerConfig(id_base=id_base_from_start(t), coast_cap=self.config.mission.coast_cap)
-        )
         self._frame_k = 0
 
     def _apply_dropouts(self) -> None:
@@ -493,7 +488,7 @@ class ClosedLoop:
         return self.camera.deliver_time_of(self._frame_k), t_cap
 
     def _deliver_frame(self, t: int) -> None:
-        assert self.camera is not None and self.tracker is not None
+        assert self.camera is not None
         self._apply_dropouts()
         k = self._frame_k
         t_cap = self.camera.capture_time(k)
@@ -503,15 +498,16 @@ class ClosedLoop:
             self.counters["frames_dropped"] = self.counters.get("frames_dropped", 0) + 1
             return
         self.frame_truths.append(frame.truth)
-        self.recorder.packet(t, frame.packet)  # E1-F10: the harness records detections
         self.counters["frames"] += 1
-        for pkt in self.tracker.update(frame.packet):
-            self._apply(self.core.on_track(pkt, t), t)
+        # E2-D5: the core runs the tracker and records the detection and its tracks.
+        self._apply(self.core.on_detection(frame.packet, t), t)
 
     def _start_core(self) -> None:
         """The companion core on fc_link's vehicle state, and the UI's command
         receiver in front of it: the one path from a command's bytes to the core
-        ([P5b], [P5c]; contract §8 "through the command path")."""
+        ([P5b], [P5c]; contract §8 "through the command path"). The tracker
+        starts with the core, as in companiond (E2-D5, [K4])."""
+        self.config = self.config.with_tracker(self.now)
         self.core = CompanionCore(
             self.config, vehicle=self.fc.state, recorder=self.recorder, t_start_ms=self.now
         )

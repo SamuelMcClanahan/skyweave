@@ -1,18 +1,27 @@
 """The live companion process (DRONE_CONTRACTS_D0.md [C10]; brief work item 6).
 
-One process on the board holds mission, guidance, fc_link, the UI server, and
-the recorder ([C10]). It receives track packets (from the tracker process)
-and command packets on their UDP ports ([C8]), talks MAVLink2 to the FC
-through :class:`fc_link.FcLink`, serves the ground UI over HTTP
-(``ground_ui``), publishes ``mission_state`` and ``fc_link_health`` packets
-for external listeners, and records the whole flight ([R1], [R2]).
+One process on the board holds the tracker, mission, guidance, fc_link, the
+UI server, and the recorder ([C10], E2-D5). It receives detection packets
+(from percepd) and command packets on their UDP ports ([C8]), talks MAVLink2
+to the FC through :class:`fc_link.FcLink`, serves the ground UI over HTTP
+(``ground_ui``), publishes ``track``, ``mission_state`` and
+``fc_link_health`` packets for external listeners, and records the whole
+flight ([R1], [R2]).
+
+The tracker runs inside the companion core (E2-D5): the core turns each
+detection packet into that frame's track packets and feeds them to the
+mission and guidance, as the SITL harness does. The core records the
+detection and the track packets; this process publishes the track packets
+on the track port. Its ``id_base`` comes from the process start time ([K4]),
+so a restarted companion never reuses a track id.
 
 The loop: wait (``select``) for a socket to be readable or the next tick to
-fall due; then, holding the core lock, read the FC link, feed each track
+fall due; then, holding the core lock, read the FC link, feed each detection
 packet and each command to the core, and run the mission tick at ``tick_hz``
 (contract §9). fc_link publishes its health packet at about 1 Hz ([F4]).
-Every core output is forwarded the same way: mission state packets to their
-port, FC requests and then the setpoint through fc_link ([M12], [G11]).
+Every core output is forwarded the same way: track packets, then mission
+state packets, to their ports; then FC requests and the setpoint through
+fc_link ([M12], [G11]).
 The UI's request threads take the same lock, so the core is never called
 concurrently and input stamps never decrease ([M2]).
 
@@ -55,7 +64,7 @@ from typing import TypeVar
 from skyweave2.drone.core import CompanionCore, CoreConfig, CoreOutput
 from skyweave2.drone.fc_link import FcLink, check_endpoint
 from skyweave2.drone.ground_ui import GroundUiServer, GroundUiService, RecordTap, ViewBuilder
-from skyweave2.drone.packets import PacketKind, TrackPacket
+from skyweave2.drone.packets import DetectionPacket, PacketKind
 from skyweave2.drone.recording import Recorder
 from skyweave2.drone.types import Clock
 from skyweave2.drone.udp import DEFAULT_PORTS, LOOPBACK, Datagram, UdpReceiver, UdpSender
@@ -76,18 +85,19 @@ def live_clock() -> Clock:
 
 @dataclass(frozen=True, kw_only=True)
 class CompanionConfig:
-    """Process wiring. ``core`` is what the recording's ``meta.config`` holds;
-    the rest is local plumbing (ports per contract §9, Provisional). Never a
-    token."""
+    """Process wiring. ``core`` is what the recording's ``meta.config`` holds,
+    plus the tracker's ``id_base`` set at start ([K4], E2-D5); the rest is
+    local plumbing (ports per contract §9, Provisional). Never a token."""
 
     fc_endpoint: str
     recording: str | Path
     core: CoreConfig = field(default_factory=CoreConfig)
     tick_hz: float = 20.0  # contract §9 tick_hz (E1, Provisional)
-    bind_host: str = LOOPBACK  # track and command receivers ([C10]: one board)
-    track_port: int = DEFAULT_PORTS[PacketKind.TRACK]
+    bind_host: str = LOOPBACK  # detection and command receivers ([C10]: one board)
+    detection_port: int = DEFAULT_PORTS[PacketKind.DETECTION]
     command_port: int = DEFAULT_PORTS[PacketKind.COMMAND]
     publish_host: str = LOOPBACK
+    track_port: int = DEFAULT_PORTS[PacketKind.TRACK]  # published (E2-D5), not bound
     mission_state_port: int = DEFAULT_PORTS[PacketKind.MISSION_STATE]
     fc_link_health_port: int = DEFAULT_PORTS[PacketKind.FC_LINK_HEALTH]
     ui_host: str = LOOPBACK  # 0.0.0.0 serves the field laptop over the AP (E1-F14)
@@ -127,21 +137,23 @@ class Companion:
             )
             self._stack.callback(self.fc_link.close)
             # The core writes meta first; fc_link writes nothing before connect.
+            t_start = self.clock()
             self.core = CompanionCore(
-                config.core,
+                config.core.with_tracker(t_start),  # E2-D5: the tracker in process
                 vehicle=self.fc_link.state,
                 recorder=self.recorder,
-                t_start_ms=self.clock(),
+                t_start_ms=t_start,
             )
             self.ui = GroundUiService(
                 self.core, self.builder, self.clock, ui_token, forward=self._forward, lock=self.lock
             )
-            self.tracks = self._open(
-                UdpReceiver(PacketKind.TRACK, config.bind_host, config.track_port)
+            self.detections = self._open(
+                UdpReceiver(PacketKind.DETECTION, config.bind_host, config.detection_port)
             )
             self.commands = self._open(
                 UdpReceiver(PacketKind.COMMAND, config.bind_host, config.command_port)
             )
+            self.tracks = self._open(UdpSender(config.publish_host, config.track_port))
             self.mission_states = self._open(
                 UdpSender(config.publish_host, config.mission_state_port)
             )
@@ -197,7 +209,7 @@ class Companion:
     def run_once(self, timeout_s: float = 0.0) -> None:
         """One iteration: wait up to ``timeout_s`` for input, then serve it all."""
         if timeout_s > 0:
-            fds = [self.tracks.fileno(), self.commands.fileno()]
+            fds = [self.detections.fileno(), self.commands.fileno()]
             fc = self.fc_link.fileno()
             if fc is not None:
                 fds.append(fc)
@@ -210,10 +222,11 @@ class Companion:
         if not self.fc_link.connected and (self._next_connect is None or now >= self._next_connect):
             self._connect(now)
         self.fc_link.poll()  # records and ingests every FC frame ([F10])
-        for r in self.tracks.poll():
-            assert isinstance(r.packet, TrackPacket)
+        for r in self.detections.poll():
+            assert isinstance(r.packet, DetectionPacket)
             self._guarded(
-                "track", lambda p=r.packet: self._forward(self.core.on_track(p, self.clock()))
+                "detection",
+                lambda p=r.packet: self._forward(self.core.on_detection(p, self.clock())),
             )
         for dg in self.commands.poll_raw():
             self._guarded("command", lambda d=dg: self._command(d))
@@ -255,7 +268,10 @@ class Companion:
         log.info("FC link %s open (receive-only until the SITL proof)", self.config.fc_endpoint)
 
     def _forward(self, out: CoreOutput) -> None:
-        """What every core output does: publish, then requests, then the setpoint."""
+        """What every core output does: publish (tracks, then mission states),
+        then requests, then the setpoint."""
+        for trk in out.tracks:
+            self.tracks.send(trk)
         for pkt in out.mission_states:
             self.mission_states.send(pkt)
         for req in out.requests:

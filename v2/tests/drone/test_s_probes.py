@@ -259,7 +259,7 @@ def test_s11_dropped_frames_never_reach_the_tracker_or_the_recording(
         loop._deliver_frame(t_deliver)
     dets = [r for r in read_records(buf.getvalue().splitlines()) if r.stream is Stream.DETECTION]
     if drop_p:
-        assert dets == [] and loop.frame_truths == [] and loop.tracker.last_t_cap is None
+        assert dets == [] and loop.frame_truths == [] and loop.core.tracker.last_t_cap is None
         assert loop.counters["frames_dropped"] == 30
     else:
         assert len(dets) == 30 and len(loop.frame_truths) == 30
