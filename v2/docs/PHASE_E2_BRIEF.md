@@ -248,9 +248,10 @@ It flies closed loop in E2b, once a hold point below the target exists.
 - V-F5, rest: camera tilt and the yaw rotation between scan and pursuit;
   lens 100 deg vs 80-90 deg; the 3D sim design. (The wide image axis along
   body x, fore-aft, is confirmed: E2-D2.)
-- E1-D3 and E1-F16 (standoff geometry and the hold under dropout): parked
-  with standoff trials (E2-D7).
-- E1-F15 (the `v_max` floor): open; the E2 gate does not check it (E2-D4).
+- E1-D3 (standoff geometry): parked with standoff trials (E2-D7). E1-F16
+  (the hold under dropout) was closed on 2026-11-24 by E1-D14.
+- E1-F15 (the `v_max` floor): closed on 2026-11-24 by E1-D13 for velocity
+  commands. The E2 gate still does not check it (E2-D4).
 - V-F4: no YOLO model and no percepd v0 source. The sim supplies boxes.
 - V-S2: the cone frame's sim thrust-to-weight is 5, not the 8-10 V-F6
   estimates. The first real hover settles it.

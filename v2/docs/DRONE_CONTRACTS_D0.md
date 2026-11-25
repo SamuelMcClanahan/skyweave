@@ -3,7 +3,8 @@
 **Revision:** 2026-10-08, amended 2026-11-20 (§11.1 vetting decisions; §8.1
 probe scenarios for V-F3, V-D15, V-D16, V-F2); 2026-11-21 (§11.2 E2
 planning decisions; E2a-1 and E2a-2: [C2], [C3], [G1], [G2], [G4], [G6],
-[R2], [R4] and §9 for V-D1, E2-D2 and V-D11)
+[R2], [R4] and §9 for V-D1, E2-D2 and V-D11); 2026-11-24 (§11.3 E1
+leftover decisions; [P5], [M5], [M8], [G5], [G7], [G10], [G12], [U6], [U7])
 **Status:** §2 (JSON wire v1) is FROZEN per `PHASE_E1_BRIEF.md` 3.7. §1 and
 §3-§8 are behavior clauses written in phase E1, labeled clause by clause.
 Nothing in this document is Measured. Numbers marked Provisional are
@@ -217,7 +218,7 @@ command:
 | `cmd_id` | string, 1-64 chars of `[A-Za-z0-9._:-]` | - | Unique across all senders for the life of the mission process, including sender restarts and page reloads. The UI draws a fresh random id per command (for example `crypto.randomUUID()`); a counter is not allowed. The prefix `rc:` is reserved for radio approvals [F7] |
 | `token` | string, 1-256 chars of printable ASCII `[!-~]` | - | Shared token |
 | `command` | string | - | `prime`, `approve_engage`, `mark_complete`, or `abort` |
-| `params` | object | - | Required for `prime` (prime params, below). Ignored for the other three |
+| `params` | object | - | Required for `prime` (prime params, below). Optional for `approve_engage` (approve params, below). Ignored for the other two |
 
 prime params (validated by the mission; an invalid set is acked
 `rejected_params`, never partly applied):
@@ -237,6 +238,13 @@ prime params (validated by the mission; an invalid set is acked
 | `flight_time_cap_s` | float | s | (0, 1800] |
 | `battery_floor_pct` | float | % | [0, 100] |
 | `geofence_radius_m` | float | m | (0, 1000] |
+
+approve params (E1-D12; additive, so a v1 sender that sends none still
+works):
+
+| Field | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `track_id` | int, optional | - | The `track_id` of the candidate the sender saw. Checked by [M8]. A value that is not an int is acked `rejected_params` |
 
 ack (companion -> the command's sender):
 
@@ -391,7 +399,8 @@ Every transition the code makes is a row here; any other change is a defect.
 
 - **[M5] Command validity.** `prime`: unprimed, `PRIMED`, or `LAND`, each only
   while the vehicle is disarmed and on_ground. `approve_engage`: `ACQUIRING`
-  only, per [M8]. `mark_complete`: the T13 From states. `abort`: every state.
+  only, per [M8]; in `ACQUIRING`, approve params of the wrong type are
+  `rejected_params`. `mark_complete`: the T13 From states. `abort`: every state.
   While unprimed an `abort` is acked `rejected_state`: no state exists to
   abort, and the radio hard abort [M11] is the operator's exit (E1-F6).
   Anything else is `rejected_state` [P5b].
@@ -410,9 +419,13 @@ Every transition the code makes is a row here; any other change is a defect.
   T05, it changes only by its death (T06). `approve_engage` (UI or radio)
   engages the current candidate and is accepted only when that candidate has
   been the candidate for at least `approve_settle_ms` at the approve's stamp;
-  otherwise `rejected_state`. The wire cannot name the approved track; the
-  settle time narrows the race where a candidate changes between what the
-  human saw and the approve (E1-F5).
+  otherwise `rejected_state`. An approve may name the track it means in
+  `params.track_id` [P5]. When it does, it is accepted only if that id equals
+  the current candidate's `track_id` (and the settle time holds); a different
+  id is `rejected_state`, and nothing is engaged. This closes the race where
+  the candidate changes between what the human saw and the approve (E1-F5,
+  E1-D12). An approve with no `track_id` engages the current candidate as
+  before; the radio approve [F7] is such an approve.
 - **[M9]** Engaged-track death in `TOUCH`, `COMPLETE`, `MISS`, `RETURN`,
   `LAND`, or `ABORT` clears `engaged_track_id` and causes no transition.
 
@@ -514,7 +527,8 @@ Every transition the code makes is a row here; any other change is a defect.
   relative to the vehicle), closure speed `v_c = v_max` (trial cap). Fly
   `v_c * c / |c|` with yaw rate 0, open loop (no tracker input), for
   `|c| / v_c + t_overrun_s`; then brake (zero velocity, yaw rate 0) for
-  `t_brake_s`; then climb at `v_climb` (yaw rate 0) for `t_climb_s`; then
+  `t_brake_s`; then climb at `min(v_climb, v_max)` [G12] (yaw rate 0) for
+  `t_climb_s`; then
   emit `pass_done`. Phase boundaries are measured from the commit stamp on the
   injected clock; nothing pauses or extends them. The segment bypasses the
   [G3] limiter and ignores attitude degradation (the FC owns acceleration;
@@ -525,10 +539,15 @@ Every transition the code makes is a row here; any other change is a defect.
   [G2]. Emitted as the `miss:` event right after `commit:` (§4.6) when the
   mission accepts the commit; recomputable from the recording [R4]. It is the
   predicted miss of a pass flown along the boresight.
-- **[G7] Standoff hold.** In `ENGAGED`, standoff trials: `hold_complete` when
-  `|q| <= hold_tol_m` holds without a break for `hold_time_s`, evaluated on
-  engaged-track packets. A coasting packet or degraded attitude breaks the
-  hold.
+- **[G7] Standoff hold** (E1-D14). Standoff trials. The hold clock starts at
+  an engaged-track packet in `ENGAGED` with `|q| <= hold_tol_m`. It keeps
+  running while the engaged track coasts (state `COASTING`, at most
+  `coast_cap` frames [P2a]). It stops, and a later hold starts from zero,
+  when an engaged-track packet in `ENGAGED` has `|q| > hold_tol_m` (or `q`
+  not finite), when attitude is degraded [G1a], or when the state is neither
+  `ENGAGED` nor `COASTING`. `hold_complete` is emitted on the first
+  engaged-track packet in `ENGAGED` (never a coasting one) at which the clock
+  has run `hold_time_s`.
 - **[G8] Degraded attitude.** In `SEARCH`, `ACQUIRING`, `ENGAGED`, and
   `COASTING`, while degraded [G1a], guidance commands zero velocity and yaw
   rate 0, and the commit gate stays shut.
@@ -537,7 +556,8 @@ Every transition the code makes is a row here; any other change is a defect.
   yaw only). Every other packet is ignored [M7].
 - **[G10] Per-state output.** Every command carries an explicit yaw rate.
   `SEARCH`: `v_N = v_E = 0`, `v_D = clamp(K_alt * (rel_alt - search_alt),
-  +-v_alt_max)` (0 if `rel_alt` is unknown), yaw rate `search_yaw_rate`.
+  +-min(v_alt_max, v_max))` [G12] (0 if `rel_alt` is unknown), yaw rate
+  `search_yaw_rate`.
   `ACQUIRING`: the same altitude hold, yaw by the [G3] yaw law on the
   candidate. `ENGAGED`: [G3]. `COASTING`: zero velocity, yaw by the [G3] yaw
   law on the coasting prediction. `LOST`: zero velocity, yaw rate 0. `TOUCH`:
@@ -546,6 +566,12 @@ Every transition the code makes is a row here; any other change is a defect.
   Unprimed, `PRIMED`, `LAUNCH`: no setpoints.
 - **[G11] Cadence.** Guidance produces setpoints once per setpoint step: a
   tick at least `1000 / setpoint_hz` ms after the previous step.
+- **[G12] Trial speed cap** (E1-D13). No velocity command guidance outputs is
+  faster than the trial's `v_max`, in any direction (3D norm). The altitude
+  hold [G10] and the terminal climb [G5] obey it like the pursuit [G3]. So
+  the [S8] floor "no sent setpoint faster than `v_max`" holds for every
+  valid prime. The E2 acceleration setpoints are outside this clause
+  (E2-D4).
 
 ## 6. fc_link v1 (Chosen; numbers Provisional)
 
@@ -617,7 +643,17 @@ Every transition the code makes is a row here; any other change is a defect.
   gate state, ground link), plus the trial echo and recent events.
 - **[U5]** The page renders from a recorded packet stream: the same render
   function serves live state and a replayed recording.
-- **[U6]** Each page state poll is a ground heartbeat [R2].
+- **[U6]** (E1-D15) A page state poll is a ground heartbeat [R2] only when
+  it carries the shared token in the `X-Skyweave-Token` request header and
+  the token matches ([P5c] compare). The page sends the header once the
+  operator has typed the token. `GET /state` answers every poll with the
+  view; a poll with no token or a wrong one is not a heartbeat, writes no
+  `ground_hb` record, and is counted. The token never travels in a URL. After
+  a page reload the heartbeat stops until the token is typed again; in
+  flight, T18 then fires after `ground_link_timeout_ms`.
+- **[U7]** (E1-D12) The page sends `approve_engage` only with
+  `params.track_id` set to the candidate it displays. With no candidate
+  displayed it sends nothing.
 
 ## 8. Closed-loop harness and scorecard (Chosen)
 
@@ -826,7 +862,7 @@ Tracker clauses (Provisional reimplementation, brief §2 spec):
 | E1-F2 | percepd v0 and tracker v0 emit no `v` field; their packets are not v1 packets. percepd v1 adds it (brief work item 7) | Finding |
 | E1-F3 | AR0234 lens intrinsics are uncalibrated; `f`, `cx`, `cy` are placeholders. Boresight calibration from logged miss vectors is an open question (working doc §15) | Finding |
 | E1-F4 | The final track packet is not self-identifying; death detection depends on `coast_cap` being shared. Remedy if a mismatch shows up: an additive `final: bool` track field (Samuel decides; it extends the brief §4 field list) | Finding |
-| E1-F5 | The approve race is narrowed by `approve_settle_ms`, not closed: the wire cannot name the approved candidate. Remedy: an additive `params.track_id` on `approve_engage` (Samuel decides; it extends the brief §4 field list) | Finding |
+| E1-F5 | The approve race is narrowed by `approve_settle_ms`, not closed: the wire cannot name the approved candidate. Remedy: an additive `params.track_id` on `approve_engage` (Samuel decides; it extends the brief §4 field list). Closed 2026-11-24 by E1-D12 (§11.3) | Finding |
 | E1-F6 | A companion-process restart while airborne leaves the mission unprimed: prime is refused (not on the ground), the Wi-Fi abort is `rejected_state`, companion budgets and failsafes are off, and guidance sends nothing. The radio hard abort and the FC failsafes are the exits. Not built for in E1 | Finding |
 | E1-F7 | An RTL refused while GUIDED gives a zero-velocity hover with RTL requested every `exit_retry_ms`; the pilot takes over by radio. No escalation in E1 | Finding |
 | E1-F8 | Attitude receive time includes serial and scheduling latency; v1 does not model it or map `time_boot_ms` | Finding |
@@ -836,15 +872,15 @@ Tracker clauses (Provisional reimplementation, brief §2 spec):
 | E1-F12 | The commit gate can stay shut at the touch hold point (fill unreachable for the primed `W` and lens, a clipped box, persistent offset); the vehicle then holds until `mark_complete`, abort, or budget | Finding |
 | E1-F13 | The candidate choice among several confirmed tracks depends on the tracker's emission order | Finding |
 | E1-F14 | The UI token travels in clear over the Cubie Wi-Fi AP; acceptable for controlled demos only | Finding |
-| E1-F15 | The [S8] floor "no sent setpoint faster than `v_max`" conflicts with [G5] (climb at `v_climb` = 1.5 m/s) and [G10] (altitude hold up to `v_alt_max` = 1.0 m/s) when a trial is primed below those speeds. The E1 gate primes 2.5 m/s, so it does not trigger. Options for Samuel: cap climb and altitude hold at `v_max`; reject such primes; or scope the floor to closure (horizontal) speed, as brief 3.4 caps closure speed. Not changed in E1 | Finding |
-| E1-F16 | [G7] restarts the hold on any coasting packet, so a 10 s hold at 60 fps needs about 600 consecutive hits. With 2 % random detection dropout that is about (0.98)^600, 5.5e-6: S1 cannot pass. The E1 gate world therefore has no random dropout (declared before the first run); dropout is scripted in S3 only. Options for Samuel: let the hold tolerate coasting up to a count, or judge it on elapsed time inside tolerance | Finding |
-| E1-F17 | `GET /state` needs no token, yet each poll is a ground heartbeat ([U6]). Any device on the AP that polls keeps the T18 ground-link failsafe from firing. Remedy if wanted: count only token-bearing polls (a [U6] change) | Finding |
+| E1-F15 | The [S8] floor "no sent setpoint faster than `v_max`" conflicts with [G5] (climb at `v_climb` = 1.5 m/s) and [G10] (altitude hold up to `v_alt_max` = 1.0 m/s) when a trial is primed below those speeds. The E1 gate primes 2.5 m/s, so it does not trigger. Options for Samuel: cap climb and altitude hold at `v_max`; reject such primes; or scope the floor to closure (horizontal) speed, as brief 3.4 caps closure speed. Not changed in E1. Closed 2026-11-24 by E1-D13 (§11.3) | Finding |
+| E1-F16 | [G7] restarts the hold on any coasting packet, so a 10 s hold at 60 fps needs about 600 consecutive hits. With 2 % random detection dropout that is about (0.98)^600, 5.5e-6: S1 cannot pass. The E1 gate world therefore has no random dropout (declared before the first run); dropout is scripted in S3 only. Options for Samuel: let the hold tolerate coasting up to a count, or judge it on elapsed time inside tolerance. Closed 2026-11-24 by E1-D14 (§11.3) | Finding |
+| E1-F17 | `GET /state` needs no token, yet each poll is a ground heartbeat ([U6]). Any device on the AP that polls keeps the T18 ground-link failsafe from firing. Remedy if wanted: count only token-bearing polls (a [U6] change). Closed 2026-11-24 by E1-D15 (§11.3) | Finding |
 | E1-F18 | The core writes `ground_hb` records only for UI polls. An authenticated ground command is a heartbeat inside the mission but leaves no `ground_hb` record (its `command` record drives replay, so [R3] holds). A reader of `ground_hb` alone sees false gaps | Finding |
 | E1-F19 | [R3] replay models one SITL proof per recording. A live FC-link close and reconnect (companiond's reconnect path) resets the proof, so the setpoint comparison would diverge. The harness keeps the link open through a relay. Remedy: link connect/disconnect markers in §3 (a decision) | Finding |
 | E1-F20 | In the live companion a `mavlink` tx record is stamped when it is written, not with the causing input's stamp ([R2]). The two differ by processing time; in the harness they are equal | Finding |
 | E1-F21 | S4's blackout drops bytes both ways with the link open and starts at the commit stamp, so no terminal setpoint is sent. The riskier variant (blackout one setpoint after commit: ArduCopter keeps the last setpoint until `GUID_TIMEOUT`, 3 s, about 7.5 m at 2.5 m/s) is not tested | Finding |
 | E1-F22 | `SIM_STATE` (108) has no time field; the harness stamps each sample with the `time_boot_ms` of the `ATTITUDE` sent just before it (strict alternation verified on ArduCopter 4.7.0). In 4.7.0 its float lat/lon fields carry degE7 values; only `lat_int`/`lon_int` are used | Finding |
-| E1-F23 | Brief 3.11 names the switch positions MANUAL / GUIDED / RTL; ArduCopter has no MANUAL mode. The SITL harness uses STABILIZE for that position | Finding |
+| E1-F23 | Brief 3.11 names the switch positions MANUAL / GUIDED / RTL; ArduCopter has no MANUAL mode. The SITL harness uses STABILIZE for that position. Closed 2026-11-24 by E1-D16 (§11.3) | Finding |
 | E1-F24 | The [F7] radio approve path is covered by fast tests only; the closed-loop human approves through UI command packets (§8) | Finding |
 | E1-F25 | `POST /command` does not require a JSON content type, so a page in the operator's browser can post cross-site. The token still gates execution; unauthenticated posts are acked `rejected_auth` and logged | Finding |
 | E1-F26 | Radio approves are stamped at their RC sample, so each live driver must stamp its next core input no earlier than the frames fc_link already ingested (companiond, the UI, and the harness do) | Finding |
@@ -902,3 +938,18 @@ Provisional; none is Measured. [F1] still holds.
 | E2-D6 | Search from below. With E2-D2 a level vehicle sees only targets at least 40 deg above its horizon (the u half-angle); the yaw scan sweeps that edge around. With a height gap `dh` below the target, the target is visible within about `1.19 * dh` horizontally. The operator flies the search below the balloon. E2 probes and the E2 gate put targets 40-80 deg above the vehicle at search | Chosen |
 | E2-D7 | Standoff trials are out of E2. A standoff hold on a balloon is not practical for now; E2 focuses on intercept (touch trials). Kites and thrown planes are out of E2 too. Standoff code stays, and S1, S3 and S6 keep running in the E1 gate. E1-D3 (standoff geometry) and E1-F16 (the hold under dropout) stay open | Chosen |
 | E2-F1 | ArduCopter 4.7.0 acceleration setpoints, from a read of the source at tag Copter-4.7.0 (not yet run). `SET_POSITION_TARGET_LOCAL_NED` masks: acceleration plus yaw rate is 1087; velocity plus acceleration plus yaw rate is 1031. The force bit (512) must stay clear: with acceleration used, the handler then holds position instead. The acceleration is kinematic: ArduCopter adds gravity and turns it into lean and thrust, as V-D2 assumes. `GUID_TIMEOUT` defaults to 3 s; on timeout the velocity and acceleration targets go to zero. The position controller jerk-limits the acceleration input (`PSC_JERK_NE`), which adds lag. Acceleration-only mode skips the controller's speed limiting; velocity plus acceleration keeps it. The handler applies each message at once, with no rate limit. E2b proves each point on SITL before PN relies on it | Finding |
+
+### 11.3 E1 leftover decisions (2026-11-24)
+
+Samuel closed five open E1 findings with Claude on 2026-11-24, taking the
+recommendation for each. The PR that records these decisions also edits the
+clauses and the code. Gate scenes S1-S6 and their seeds do not change.
+Numbers are Provisional; none is Measured. [F1] still holds.
+
+| ID | Item | Label |
+| --- | --- | --- |
+| E1-D12 | Closes E1-F5. `approve_engage` may carry `params.track_id`. The mission accepts it only when that id is the current candidate; a different id is `rejected_state`. The UI page always sends the id of the candidate it displays, and sends no approve when it displays none. The radio approve carries no id and works as before. Additive in wire v1. Changes [P5], [M5], [M8]; adds [U7] | Chosen |
+| E1-D13 | Closes E1-F15. The trial `v_max` caps every velocity command in every direction: the altitude hold and the terminal climb obey it too. Adds [G12]; changes [G5], [G10]. The E1 gate primes 2.5 m/s, above `v_climb` and `v_alt_max`, so its commands do not change. E2-D4 still governs the E2 gate | Chosen |
+| E1-D14 | Closes E1-F16. The standoff hold clock keeps running through a short dropout (the track coasting, up to `coast_cap`). It restarts only when the vehicle leaves the tolerance, attitude is degraded, or the track is lost. `hold_complete` is still emitted only on a real (non-coasting) packet. Changes [G7]. Standoff trials stay out of E2 (E2-D7); this makes them testable with bad frames (V-D16) | Chosen |
+| E1-D15 | Closes E1-F17. Only a state poll that carries the right token is a ground heartbeat. Another device on the access point can still read the status page, but it no longer holds off the T18 ground-link failsafe. Accepted consequence: a page reload in flight stops the heartbeat until the operator types the token again, and T18 sends the vehicle to `RETURN` after `ground_link_timeout_ms`. The token now also travels in clear on each poll (E1-F14 already accepts clear text for controlled demos). Changes [U6] | Chosen |
+| E1-D16 | Closes E1-F23. The switch position that brief 3.11 calls MANUAL is `ALT_HOLD` on the vehicle: the FC holds height while the pilot steers, which is the easiest takeover by sight. `STABILIZE` is the fallback if `ALT_HOLD` behaves badly on the first manual flights. The operator sets the flight-mode parameters (V-D7). The SITL harness keeps `STABILIZE` for that position, because the mission asks only whether the mode is `GUIDED`. No code change | Chosen (Provisional until the first manual flights) |
