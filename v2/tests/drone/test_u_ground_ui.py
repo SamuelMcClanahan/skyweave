@@ -33,6 +33,8 @@ from skyweave2.drone.companiond import Companion, CompanionConfig
 from skyweave2.drone.core import CompanionCore, CoreConfig, CoreOutput, replay
 from skyweave2.drone.fc_link import EndpointRefused
 from skyweave2.drone.ground_ui import (
+    TOKEN_HEADER,
+    TOKEN_STORAGE_KEY,
     CommandReceiver,
     GroundUiServer,
     GroundUiService,
@@ -47,6 +49,7 @@ from skyweave2.drone.packets import (
     AckResult,
     Box,
     CommandName,
+    CommandPacket,
     DetectionPacket,
     FcLinkHealthPacket,
     MissionState,
@@ -119,6 +122,11 @@ def _body(
 PRIME_PARAMS = PrimeParams().to_obj()
 
 
+def _token_header(token: str | None) -> dict[str, str]:
+    """[U6]: the header a state poll carries its token in; none without one."""
+    return {} if token is None else {TOKEN_HEADER: token}
+
+
 class _Bench:
     """The UI as the companion serves it, minus the FC link: core, recorder
     (through the view tap), service, and a started HTTP server."""
@@ -140,19 +148,48 @@ class _Bench:
     def close(self) -> None:
         self.server.close()
 
-    def fc_tick(self, t: int) -> None:
-        """What the companion loop does at ``t``: FC frames in, then a tick."""
+    def fc_tick(self, t: int, frames: bytes | None = None) -> None:
+        """What the companion loop does at ``t``: FC frames in (default: the FC
+        on the ground in LOITER), then a tick."""
         self.clock.t = t
         with self.service.lock:
-            self.core.on_mavlink_rx(_fc_frames(t), t)
+            self.core.on_mavlink_rx(_fc_frames(t) if frames is None else frames, t)
             self.outputs.append(self.core.on_tick(t))
 
-    def http(self, method: str, path: str, body: bytes | None = None) -> tuple[int, bytes]:
+    def track(self, t: int, track_id: int) -> None:
+        """One confirmed track packet [P2] into the core at ``t`` (this bench's
+        core runs no tracker, so it takes track packets)."""
+        self.clock.t = t
+        pkt = TrackPacket(
+            t_cap=t - 20,
+            track_id=track_id,
+            state=TrackState.CONFIRMED,
+            u=960.0,
+            v_px=600.0,
+            du=0.0,
+            dv=0.0,
+            w=40.0,
+            h=40.0,
+            hits=3,
+            misses=0,
+            age_frames=3,
+        )
+        with self.service.lock:
+            self.outputs.append(self.core.on_track(pkt, t))
+
+    def http(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
         host, port = self.server.address
         conn = http.client.HTTPConnection(host, port, timeout=5)
         try:
-            headers = {"Content-Type": "application/json"} if body is not None else {}
-            conn.request(method, path, body=body, headers=headers)
+            send = {"Content-Type": "application/json"} if body is not None else {}
+            send.update(headers or {})
+            conn.request(method, path, body=body, headers=send)
             resp = conn.getresponse()
             return resp.status, resp.read()
         finally:
@@ -169,9 +206,13 @@ class _Bench:
         assert isinstance(ack, AckPacket)
         return ack
 
-    def poll(self, t: int) -> dict[str, Any]:
+    def poll(self, t: int, token: str | None = UI_TOKEN) -> dict[str, Any]:
+        """One ``GET /state`` as the page sends it once the operator has typed
+        the token ([U6]: the token in the ``X-Skyweave-Token`` header).
+        ``token=None`` is a poll with no token header (a page with no token
+        yet, or another device on the access point)."""
         self.clock.t = t
-        status, data = self.http("GET", "/state")
+        status, data = self.http("GET", "/state", headers=_token_header(token))
         assert status == 200
         return json.loads(data)
 
@@ -431,8 +472,10 @@ def test_p5c_configured_token_must_match_the_field_pattern() -> None:
 def test_u2_page_has_four_command_controls_and_two_endpoints(bench: _Bench) -> None:
     """[U2], [U1], [U3]: the page has exactly four command buttons, one per
     contract command; its script talks to /state and /command only; there is
-    no form (nothing can submit the token in a URL) and no browser storage.
-    The server answers no other endpoint."""
+    no form (nothing can submit the token in a URL), no storage that outlives
+    the tab, and no cookie ([U3] since E1-D15 allows the tab's sessionStorage;
+    ``test_u3_page_keeps_the_token_for_a_reload_in_session_storage_only``
+    covers it). The server answers no other endpoint."""
     page = bench.page(T0)
     doc = _Doc(page)
     assert len(doc.buttons) == 4
@@ -444,7 +487,7 @@ def test_u2_page_has_four_command_controls_and_two_endpoints(bench: _Bench) -> N
     ]
     assert sorted(fetches) == ['"/command"', '"/state"']
     assert doc.forms == 0
-    for api in ("localStorage", "sessionStorage", "document.cookie", "WebSocket", "XMLHttpRequest"):
+    for api in ("localStorage", "indexedDB", "document.cookie", "WebSocket", "XMLHttpRequest"):
         assert api not in page
     assert doc.attrs_by_id["ui-token"]["type"] == "password"
     assert bench.http("GET", "/joystick")[0] == 404
@@ -546,19 +589,265 @@ def test_u5_live_status_is_the_render_of_its_own_recording(bench: _Bench) -> Non
     assert live["view"]["ground_link"] == {"last_hb_t": T0 + 450, "up": True}
 
 
-def test_u6_each_state_poll_is_one_ground_hb_record(bench: _Bench) -> None:
-    """[U6], [R2], [U1]: every GET /state is one ground heartbeat, recorded
-    as a ground_hb record at the poll's stamp, including polls that arrive in
+def test_u6_each_token_bearing_state_poll_is_one_ground_hb_record(bench: _Bench) -> None:
+    """[U6], [R2], [U1], E1-D15: every GET /state that carries the right token
+    in its X-Skyweave-Token header is one ground heartbeat, recorded as a
+    ground_hb record at the poll's stamp, including polls that arrive in
     parallel (the request threads are serialized into the core by its lock)."""
     for k in range(3):
-        bench.poll(T0 + 100 * k)
+        assert bench.poll(T0 + 100 * k)["heartbeat"] is True
     bench.clock.t = T0 + 500
+    header = _token_header(UI_TOKEN)
     with ThreadPoolExecutor(max_workers=8) as pool:
-        statuses = [s for s, _ in pool.map(lambda _: bench.http("GET", "/state"), range(8))]
+        statuses = [
+            s for s, _ in pool.map(lambda _: bench.http("GET", "/state", headers=header), range(8))
+        ]
     assert statuses == [200] * 8
     hbs = [r.t_rx for r in bench.records(Stream.GROUND_HB)]
     assert hbs == [T0, T0 + 100, T0 + 200] + [T0 + 500] * 8
-    assert bench.service.polls == 11
+    assert (bench.service.polls, bench.service.polls_unauthenticated) == (11, 0)
+
+
+def _view_but_time_and_ground_link(state: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in state["view"].items() if k not in ("t", "ground_link")}
+
+
+@pytest.mark.parametrize(
+    "token",
+    [None, "", WRONG_TOKEN, UI_TOKEN[:-1], UI_TOKEN + "x", UI_TOKEN.upper(), "ui-töken"],
+    ids=["no_header", "empty", "wrong", "one_short", "one_long", "other_case", "not_ascii"],
+)
+def test_u6_e1_f17_poll_without_the_right_token_is_not_a_heartbeat(
+    bench: _Bench, token: str | None
+) -> None:
+    """[U6], [R2], [P5c], E1-D15 (closes finding E1-F17): GET /state answers a
+    poll with no token, or a wrong one, with the view, but that poll is not a
+    ground heartbeat: no ground_hb record, the ground link's newest heartbeat
+    stays the prime's, and the poll is counted. Near misses of the token (one
+    char short, one long, another case) are wrong tokens. Discrimination: the
+    same poll with the right token is one heartbeat at its stamp, and it gets
+    the same view."""
+    bench.fc_tick(T0)
+    assert bench.ack(T0 + 50, _body("ui-p1", "prime", params=PRIME_PARAMS)).result is (
+        AckResult.ACCEPTED
+    )
+    without = bench.poll(T0 + 100, token=token)
+    assert without["heartbeat"] is False
+    assert bench.records(Stream.GROUND_HB) == []
+    assert without["view"]["t"] == T0 + 100
+    assert without["view"]["mission_state"] == "PRIMED"
+    assert without["view"]["ground_link"] == {"last_hb_t": T0 + 50, "up": True}
+    assert without["html"] == render_status(view_from_recording(bench.lines(), until_t=T0 + 100))
+    assert (bench.service.polls, bench.service.polls_unauthenticated) == (1, 1)
+
+    with_token = bench.poll(T0 + 200)
+    assert with_token["heartbeat"] is True
+    assert [r.t_rx for r in bench.records(Stream.GROUND_HB)] == [T0 + 200]
+    assert with_token["view"]["ground_link"] == {"last_hb_t": T0 + 200, "up": True}
+    assert _view_but_time_and_ground_link(with_token) == _view_but_time_and_ground_link(without)
+    assert (bench.service.polls, bench.service.polls_unauthenticated) == (2, 1)
+
+
+def test_u6_token_in_the_url_is_not_a_heartbeat_and_the_header_name_is_case_free(
+    bench: _Bench,
+) -> None:
+    """[U6], [U3], E1-D15: the token never travels in a URL, so the server
+    takes it from the header only: a poll with the right token in its query
+    string and no header is answered with the view and is not a heartbeat.
+    The header's name is an HTTP field name (any letter case)."""
+    bench.clock.t = T0 + 100
+    status, data = bench.http("GET", f"/state?token={UI_TOKEN}")
+    assert status == 200 and json.loads(data)["heartbeat"] is False
+    assert json.loads(data)["view"]["t"] == T0 + 100
+    assert bench.records(Stream.GROUND_HB) == []
+    bench.clock.t = T0 + 200
+    status, data = bench.http("GET", "/state", headers={TOKEN_HEADER.lower(): UI_TOKEN})
+    assert status == 200 and json.loads(data)["heartbeat"] is True
+    assert [r.t_rx for r in bench.records(Stream.GROUND_HB)] == [T0 + 200]
+    assert (bench.service.polls, bench.service.polls_unauthenticated) == (2, 1)
+
+
+TRACK = 4242  # the candidate's track_id (fixture fact)
+
+
+def _to_search(bench: _Bench) -> int:
+    """Prime, the switch into GUIDED, takeoff: the mission in SEARCH. Returns
+    the stamp of the last tick. The prime (an authenticated ground command) at
+    T0 + 100 is the newest ground heartbeat."""
+    ground = {"armed": False, "landed": LandedState.ON_GROUND, "alt_m": 0.0}
+    flying = {"armed": True, "landed": LandedState.IN_AIR, "alt_m": 10.0}
+    bench.fc_tick(T0)
+    assert bench.ack(T0 + 100, _body("ui-p1", "prime", params=PRIME_PARAMS)).result is (
+        AckResult.ACCEPTED
+    )
+    bench.fc_tick(T0 + 150)  # LOITER seen after the prime (T03 edge, E1-D4)
+    bench.fc_tick(T0 + 200, _fc_flight(T0 + 200, mode=GUIDED_MODE, **ground))  # T03
+    bench.fc_tick(T0 + 250, _fc_flight(T0 + 250, mode=GUIDED_MODE, **flying))  # T04
+    assert bench.core.mission.state is MissionState.SEARCH
+    return T0 + 250
+
+
+@pytest.mark.parametrize(
+    ("token", "fires"),
+    [(None, True), (WRONG_TOKEN, True), (UI_TOKEN, False)],
+    ids=["no_token", "wrong_token", "right_token"],
+)
+def test_u6_e1_f17_only_token_bearing_polls_hold_off_the_ground_link_failsafe(
+    bench: _Bench, token: str | None, fires: bool
+) -> None:
+    """[U6], T18, E1-D15 (closes finding E1-F17): in flight, a device that
+    polls GET /state every 250 ms without the right token does not keep the
+    ground link alive: T18 fires (failsafe:ground_link, RETURN) once
+    ground_link_timeout_ms has passed since the last real heartbeat (the
+    prime). The same polls with the token are heartbeats, and the mission
+    stays in SEARCH."""
+    _to_search(bench)
+    last_hb = T0 + 100
+    timeout = bench.core.config.mission.ground_link_timeout_ms
+    flying = {"armed": True, "landed": LandedState.IN_AIR, "alt_m": 10.0}
+    t = T0 + 500
+    while t <= last_hb + timeout + 500:
+        assert bench.poll(t - 10, token=token)["heartbeat"] is (not fires)
+        bench.fc_tick(t, _fc_flight(t, mode=GUIDED_MODE, **flying))
+        t += 250
+    events = [
+        e.name
+        for r in bench.records(Stream.MISSION_STATE)
+        if isinstance(r.packet, MissionStatePacket)
+        for e in r.packet.events
+    ]
+    assert ("failsafe:ground_link" in events) is fires
+    assert ("T18" in bench.tids()) is fires
+    assert bench.core.mission.state is (MissionState.RETURN if fires else MissionState.SEARCH)
+    assert bench.service.polls_unauthenticated == (bench.service.polls if fires else 0)
+
+
+def test_u6_p5c_poll_tokens_never_recorded_or_logged(
+    bench: _Bench, caplog: pytest.LogCaptureFixture
+) -> None:
+    """[U6], [P5c], [R2], E1-D15: the token a state poll carries (right or
+    wrong) never reaches the recording (meta.config included), the /state
+    answer, or the process log, although the poll that was not a heartbeat is
+    logged."""
+    caplog.set_level(logging.DEBUG, logger="skyweave2")
+    bench.fc_tick(T0)
+    answers = [
+        bench.poll(T0 + 100),
+        bench.poll(T0 + 200, token=WRONG_TOKEN),
+        bench.poll(T0 + 300, token=None),
+    ]
+    assert [a["heartbeat"] for a in answers] == [True, False, False]
+    assert caplog.text.count("not a ground heartbeat") == 2
+    meta = bench.records(Stream.META)[0]
+    texts = [
+        bench.sink.getvalue(),
+        canonical_json(dict(meta.config or {})).decode("ascii"),
+        caplog.text,
+        *(json.dumps(a) for a in answers),
+    ]
+    assert all(UI_TOKEN not in text and WRONG_TOKEN not in text for text in texts)
+
+
+# -- [U3], [U6], [U7] the page's script (E1-D12, E1-D15) --------------------------
+
+
+def test_u3_page_keeps_the_token_for_a_reload_in_session_storage_only(bench: _Bench) -> None:
+    """[U3], [U6], E1-D15: the page keeps the token in memory and in the tab's
+    sessionStorage, and restores it on load before its first poll, so a reload
+    of the same tab keeps the heartbeat. It writes the token nowhere that
+    outlives the tab (no localStorage, no indexedDB, no cookie) and never into
+    a URL: it changes no location or history, and its only requests go to the
+    bare paths /state and /command. The server never renders the token into
+    the page."""
+    page = bench.page(T0)
+    script = _Doc(page).script
+    assert f'var TOKEN_KEY = "{TOKEN_STORAGE_KEY}";' in script
+    assert "tokenEl.value = kept" in script.split("function restoreToken()", 1)[1].split("}\n")[0]
+    assert "window.sessionStorage.getItem(TOKEN_KEY)" in script
+    assert "window.sessionStorage.setItem(TOKEN_KEY, tokenEl.value)" in script
+    assert 'tokenEl.addEventListener("input", keepToken)' in script
+    assert script.count("sessionStorage.setItem(") == 1  # the token is the only thing stored
+    assert script.rindex("restoreToken();") < script.rindex("poll();")
+    for api in ("localStorage", "indexedDB", "document.cookie", "location", "history"):
+        assert api not in page
+    assert UI_TOKEN not in page
+
+
+def test_u6_page_poll_sends_the_token_in_the_header_never_in_the_url(bench: _Bench) -> None:
+    """[U6], [U3], E1-D15: the page's poll puts the typed token in the
+    X-Skyweave-Token request header (only a value that fits the token
+    pattern), and fetches the bare /state path: the token is in no URL."""
+    script = _Doc(bench.page(T0)).script
+    poll = script.split("function poll() {", 1)[1].split("\n  }\n", 1)[0]
+    assert f'if (TOKEN_RE.test(tok)) opts.headers = {{"{TOKEN_HEADER}": tok}};' in poll
+    assert 'fetch("/state", opts)' in poll
+    assert poll.index("opts.headers") < poll.index('fetch("/state", opts)')
+    assert "var TOKEN_RE = /^[!-~]{1,256}$/;" in script  # [P5] the token pattern
+
+
+def test_u7_page_approve_sends_the_displayed_candidate_or_nothing(bench: _Bench) -> None:
+    """[U7], E1-D12: the page's approve reads the candidate the status block
+    displays (the ``candidate`` row's data-value), and sends it as
+    ``params.track_id``. With no candidate displayed it tells the operator and
+    returns before anything is sent. The row it reads holds null while no
+    candidate is displayed."""
+    doc = _Doc(bench.page(T0))
+    script = doc.script
+    shown = script.split("function shownCandidate() {", 1)[1].split("\n  }\n", 1)[0]
+    assert 'document.getElementById("candidate")' in shown
+    assert 'JSON.parse(el.getAttribute("data-value"))' in shown
+    send = script.split("function send(command) {", 1)[1].split("\n  }\n", 1)[0]
+    approve = send.split('if (command === "approve_engage") {', 1)[1]
+    assert approve.index("var cand = shownCandidate();") < approve.index("if (cand === null) {")
+    none_shown = approve.split("if (cand === null) {", 1)[1].split("}", 1)[0]
+    assert "not sent: no candidate is displayed" in none_shown
+    assert none_shown.rstrip().endswith("return;")
+    assert "attempt(" not in none_shown and "fetch(" not in none_shown
+    assert "params = {track_id: cand};" in approve
+    assert "if (params !== null) pkt.params = params;" in send
+    assert send.index("if (cand === null) {") < send.index("attempt(")
+    assert doc.value("candidate") is None
+
+
+def test_u7_m8_approve_naming_the_displayed_candidate_through_the_page_path(
+    bench: _Bench,
+) -> None:
+    """[U7], [M8], [M5], [P5] approve params, [R2], [R3], E1-D12: in ACQUIRING
+    the page's candidate row (the one its approve reads) holds the mission's
+    candidate id. Posted the way the page posts it, an approve naming another
+    id is acked rejected_state, one with a string id rejected_params, and the
+    one naming the displayed candidate is accepted (T07) and engages that
+    track. The command records keep ``params.track_id`` (never the token), and
+    the recording replays exactly."""
+    t = _to_search(bench)
+    bench.track(t + 50, TRACK)  # T05
+    t5 = t + 50
+    settle = bench.core.config.mission.approve_settle_ms
+    shown = _Doc(bench.page(t5 + 100)).value("candidate")
+    assert shown == TRACK == bench.core.mission.candidate_id
+    assert _Doc(bench.poll(t5 + 200)["html"]).value("candidate") == shown
+
+    at = t5 + settle
+    sent = [{"track_id": shown + 1}, {"track_id": str(shown)}, {"track_id": shown}]
+    results = [
+        bench.ack(at + 10 * i, _body(f"ui-a{i}", "approve_engage", params=params)).result
+        for i, params in enumerate(sent)
+    ]
+    assert results == [
+        AckResult.REJECTED_STATE,
+        AckResult.REJECTED_PARAMS,
+        AckResult.ACCEPTED,
+    ]
+    assert bench.tids()[-1] == "T07"
+    assert bench.core.mission.engaged_track_id == shown
+    approves = [
+        r.packet
+        for r in bench.records(Stream.COMMAND)
+        if isinstance(r.packet, CommandPacket) and r.packet.command is CommandName.APPROVE_ENGAGE
+    ]
+    assert [dict(p.params or {}) for p in approves] == sent
+    assert UI_TOKEN not in bench.sink.getvalue()
+    assert replay(bench.lines()).mismatch() is None
 
 
 # -- [C10] the companion process ----------------------------------------------------
@@ -653,7 +942,7 @@ def test_c10_companion_process_wires_udp_fc_ui_and_recording(tmp_path: Path) -> 
 
             host, port = comp.server.address
             conn = http.client.HTTPConnection(host, port, timeout=5)
-            conn.request("GET", "/state")
+            conn.request("GET", "/state", headers=_token_header(UI_TOKEN))  # [U6] a heartbeat
             view = json.loads(conn.getresponse().read())["view"]
             conn.close()
             assert view["mission_state"] == "PRIMED"

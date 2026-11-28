@@ -10,6 +10,7 @@ feeds it ([M2]); nothing is mocked.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections.abc import Callable
@@ -1065,6 +1066,169 @@ def test_m_approve_settle_boundary(from_ground: bool) -> None:
     assert r.state is S.ACQUIRING
     assert approve(t5 + settle) is ACC
     assert r.log[-1] == (t5 + settle, "T07", S.ACQUIRING, S.ENGAGED, Source.HUMAN)
+
+
+# ---------------------------------------------------------------------------
+# (6b) An approve names its track ([M8], [M5], [P5] approve params; E1-D12)
+# ---------------------------------------------------------------------------
+
+
+def test_m_approve_naming_the_candidate_engages_that_track() -> None:
+    """[M8], [P5] approve params, T07, E1-D12: an approve whose
+    ``params.track_id`` is the current candidate's id is accepted once the
+    settle time holds; the engaged id is that id."""
+    r = acquiring()
+    t5, settle = r.t, r.cfg.approve_settle_ms
+    assert r.m.candidate_id == 7
+    assert r.cmd("approve_engage", {"track_id": 7}, at=t5 + settle) is ACC
+    assert r.log[-1] == (t5 + settle, "T07", S.ACQUIRING, S.ENGAGED, Source.HUMAN)
+    assert r.m.engaged_track_id == 7
+    assert r.packets[-1].engaged_track_id == 7
+    assert Event(t=t5 + settle, name="engaged:7") in r.events()
+
+
+def test_m_approve_naming_another_track_is_rejected_state_and_engages_nothing() -> None:
+    """[M8], [P5b], E1-D12: an approve naming an id other than the current
+    candidate's is acked rejected_state after the settle time too, and is
+    logged; the mission stays in ACQUIRING with the same candidate and no
+    engaged track, even though the named track (8) is alive and confirmed.
+    Discrimination: the approve naming the candidate (7) is then accepted."""
+    r = acquiring()
+    t5, settle = r.t, r.cfg.approve_settle_ms
+    r.trk(8, w=300.0, hits=40, at=t5 + 100)
+    before = len(r.log)
+    assert r.cmd("approve_engage", {"track_id": 8}, at=t5 + settle) is REJ
+    t_rej = r.t
+    assert r.log[before:] == []
+    assert r.state is S.ACQUIRING and r.m.candidate_id == 7 and r.m.engaged_track_id is None
+    assert r.cmd("approve_engage", {"track_id": 7}) is ACC
+    assert r.m.engaged_track_id == 7
+    assert Event(t=t_rej, name="cmd:approve_engage:rejected_state") in r.events()
+    assert not [n for n in r.names() if n == "engaged:8"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [7.0, True, "7", None, [7], 2**53],
+    ids=["real", "bool", "string", "null", "array", "past_json_safe"],
+)
+def test_m_approve_track_id_of_the_wrong_type_is_rejected_params_in_acquiring(bad: Any) -> None:
+    """[M5], [P5] approve params, [C6], E1-D12: in ACQUIRING a ``track_id``
+    that is not a JSON int is acked rejected_params (before and after the
+    settle time), is logged, and engages nothing. A bool is not an int, and
+    7.0 is not 7 although 7 is the candidate. The well-typed approve is then
+    accepted."""
+    r = acquiring()
+    t5, settle = r.t, r.cfg.approve_settle_ms
+    before = len(r.log)
+    assert r.cmd("approve_engage", {"track_id": bad}, at=t5 + 1) is AckResult.REJECTED_PARAMS
+    assert r.cmd("approve_engage", {"track_id": bad}, at=t5 + settle) is AckResult.REJECTED_PARAMS
+    t_rej = r.t
+    assert r.log[before:] == []
+    assert r.state is S.ACQUIRING and r.m.candidate_id == 7 and r.m.engaged_track_id is None
+    assert r.cmd("approve_engage", {"track_id": 7}) is ACC
+    assert Event(t=t_rej, name="cmd:approve_engage:rejected_params") in r.events()
+
+
+@pytest.mark.parametrize("builder", [searching, engaged], ids=["SEARCH", "ENGAGED"])
+def test_m_approve_with_bad_params_outside_acquiring_is_rejected_state(
+    builder: Callable[[], Run],
+) -> None:
+    """[M5], E1-D12: outside ACQUIRING an approve is rejected_state whatever
+    its params hold, as before; rejected_params is reachable only in
+    ACQUIRING."""
+    r = builder()
+    state, eng = r.state, r.m.engaged_track_id
+    assert r.cmd("approve_engage", {"track_id": "7"}) is REJ
+    assert r.cmd("approve_engage", {"track_id": 7}) is REJ
+    assert r.state is state and r.m.engaged_track_id == eng
+
+
+@pytest.mark.parametrize(
+    "params",
+    [None, {}, {"seen_at": 123}, {"track_id": 7, "seen_at": 123}],
+    ids=["no_params", "empty", "unknown_key_only", "id_and_unknown_key"],
+)
+def test_m_approve_without_a_track_id_engages_the_candidate_as_before(params: Any) -> None:
+    """[M8], [P5], [C7], E1-D12 (additive): an approve that names no track
+    (no params, empty params, or only keys this receiver does not know)
+    engages the current candidate under the settle rule, exactly as before
+    E1-D12; an unknown key beside a matching ``track_id`` changes nothing."""
+    r = acquiring()
+    t5, settle = r.t, r.cfg.approve_settle_ms
+    assert r.cmd("approve_engage", params, at=t5 + settle - 1) is REJ
+    assert r.state is S.ACQUIRING
+    assert r.cmd("approve_engage", params, at=t5 + settle) is ACC
+    assert r.log[-1] == (t5 + settle, "T07", S.ACQUIRING, S.ENGAGED, Source.HUMAN)
+    assert r.m.engaged_track_id == 7
+
+
+def test_m_approve_naming_the_candidate_still_waits_for_the_settle_time() -> None:
+    """[M8], E1-D12: the id match does not replace the settle time. An approve
+    naming the candidate 1 ms before approve_settle_ms is rejected_state; at
+    approve_settle_ms it is accepted."""
+    r = acquiring()
+    t5, settle = r.t, r.cfg.approve_settle_ms
+    assert r.cmd("approve_engage", {"track_id": 7}, at=t5 + settle - 1) is REJ
+    assert r.state is S.ACQUIRING and r.m.engaged_track_id is None
+    assert r.cmd("approve_engage", {"track_id": 7}, at=t5 + settle) is ACC
+    assert r.m.engaged_track_id == 7
+
+
+def test_m_e1_f5_approve_for_a_dead_candidate_never_engages_its_successor() -> None:
+    """Finding E1-F5, closed by E1-D12; [M8], T06, T05: the stale-candidate
+    race. The human sees candidate 7 and approves it, naming it. Before the
+    approve arrives, 7 dies (T06) and 8 becomes the candidate (T05). The
+    approve arrives after 8's own settle time: it is rejected_state, the
+    mission stays in ACQUIRING with candidate 8, and nothing is engaged.
+    Discrimination: on a copy of the same mission at the same instant, the
+    same approve without a ``track_id`` is accepted and engages 8, the track
+    the human never saw (the race the settle time alone left open)."""
+    r = acquiring()
+    r.trk(7, "coasting", hits=0, misses=r.cfg.coast_cap + 1)
+    assert r.log[-1][1] == "T06" and r.state is S.SEARCH
+    r.trk(8)
+    assert r.log[-1][1] == "T05" and r.m.candidate_id == 8
+    late = r.t + r.cfg.approve_settle_ms + 500
+
+    unnamed = copy.deepcopy(r.m)
+    ack = unnamed.on_command(
+        CommandPacket(cmd_id="old-ui", token=UI_TOKEN, command=CommandName.APPROVE_ENGAGE),
+        True,
+        late,
+    )
+    assert ack.result is ACC and unnamed.engaged_track_id == 8
+
+    before = len(r.log)
+    assert r.cmd("approve_engage", {"track_id": 7}, at=late) is REJ
+    assert r.log[before:] == []
+    assert r.state is S.ACQUIRING and r.m.candidate_id == 8 and r.m.engaged_track_id is None
+    assert r.cmd("approve_engage", {"track_id": 8}) is ACC  # the human looks again
+    assert r.m.engaged_track_id == 8
+
+
+def test_m_p5a_approve_retry_and_a_changed_track_id_under_one_cmd_id() -> None:
+    """[P5a], [P5] approve params, E1-D12: the fingerprint covers the approve's
+    canonical params. The same cmd_id with the same ``track_id`` is a true
+    retry: the stored ack (here a rejection from before the settle time), and
+    nothing executes although the approve would now be valid. The same cmd_id
+    with another ``track_id``, or with none, is rejected_duplicate_id and
+    engages nothing. An accepted approve's retry returns accepted without a
+    second T07."""
+    r = acquiring()
+    t5, settle = r.t, r.cfg.approve_settle_ms
+    seven, eight = {"track_id": 7}, {"track_id": 8}
+    assert r.cmd("approve_engage", seven, cmd_id="ap-1", at=t5 + settle - 1) is REJ
+    assert r.cmd("approve_engage", seven, cmd_id="ap-1", at=t5 + settle) is REJ
+    dup = AckResult.REJECTED_DUPLICATE_ID
+    assert r.cmd("approve_engage", eight, cmd_id="ap-1") is dup
+    assert r.cmd("approve_engage", None, cmd_id="ap-1") is dup
+    assert r.state is S.ACQUIRING and r.m.engaged_track_id is None
+    assert r.cmd("approve_engage", seven, cmd_id="ap-2") is ACC
+    assert r.cmd("approve_engage", seven, cmd_id="ap-2") is ACC
+    assert r.cmd("approve_engage", eight, cmd_id="ap-2") is dup
+    assert [row[1] for row in r.log].count("T07") == 1
+    assert r.m.engaged_track_id == 7
 
 
 # ---------------------------------------------------------------------------

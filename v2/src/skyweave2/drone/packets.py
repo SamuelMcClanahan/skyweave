@@ -52,7 +52,8 @@ class UnsupportedVersion(PacketError):
 
 
 class InvalidParams(ValueError):
-    """Prime params outside the contract ranges ([P5]); acked rejected_params."""
+    """Prime params outside the contract ranges, or approve params of the
+    wrong type ([P5]); acked rejected_params."""
 
 
 class PacketKind(str, Enum):
@@ -211,8 +212,9 @@ class FcLinkHealthPacket:
 @dataclass(frozen=True, kw_only=True)
 class CommandPacket:
     """[P5] UI or radio -> mission. ``params`` is the raw object; only the
-    mission validates it (``PrimeParams.from_obj``), so an invalid set can be
-    acked ``rejected_params`` with this packet's ``cmd_id``."""
+    mission validates it (``PrimeParams.from_obj`` for ``prime``,
+    ``ApproveParams.from_obj`` for ``approve_engage``, E1-D12), so an invalid
+    set can be acked ``rejected_params`` with this packet's ``cmd_id``."""
 
     cmd_id: str
     token: str
@@ -315,6 +317,34 @@ class PrimeParams:
                 battery_floor_pct=_float(obj, "battery_floor_pct"),
                 geofence_radius_m=_float(obj, "geofence_radius_m"),
             )
+        except PacketError as exc:
+            raise InvalidParams(str(exc)) from exc
+
+
+@dataclass(frozen=True, kw_only=True)
+class ApproveParams:
+    """[P5] approve params (E1-D12). ``track_id`` is the candidate the sender
+    saw; ``None`` when the approve names none (a v1 sender without the field,
+    or the radio approve [F7]). The mission checks it against the current
+    candidate ([M8])."""
+
+    track_id: int | None = None
+
+    @classmethod
+    def from_obj(cls, obj: Any) -> ApproveParams:
+        """Parse; raises :class:`InvalidParams`, never coerces. No params, or
+        params without ``track_id``, name no track. Unknown keys are ignored
+        ([C7]). A ``track_id`` that is not an int per [C6] (a real, a bool, a
+        string, ``null``, or an integer outside the JSON-safe range) is
+        invalid."""
+        if obj is None:
+            return cls()
+        if not isinstance(obj, Mapping):
+            raise InvalidParams("approve params must be a JSON object")
+        if "track_id" not in obj:
+            return cls()
+        try:
+            return cls(track_id=_int(obj, "track_id"))
         except PacketError as exc:
             raise InvalidParams(str(exc)) from exc
 
@@ -536,6 +566,10 @@ def from_obj(kind: PacketKind, obj: Any) -> Packet:
         params: Mapping[str, Any] | None = None
         if command is CommandName.PRIME:
             params = dict(_obj(_get(o, "params"), "prime params"))
+        elif command is CommandName.APPROVE_ENGAGE and "params" in o:
+            # E1-D12: optional. The mission validates what is inside ([M5]:
+            # a wrong-typed track_id is acked rejected_params, not malformed).
+            params = dict(_obj(o["params"], "approve params"))
         return CommandPacket(
             cmd_id=_cmd_id(o),
             token=_token(o),

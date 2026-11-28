@@ -4,8 +4,13 @@
 browser is the client. Three endpoints and no others:
 
 - ``GET /``: the page.
-- ``GET /state``: the JSON view plus the server-rendered status block. Each
-  poll is one ground heartbeat into the core ([U6], [R2] ``ground_hb``).
+- ``GET /state``: the JSON view plus the server-rendered status block. Every
+  poll gets the view. A poll is one ground heartbeat into the core ([U6],
+  [R2] ``ground_hb``) only when it carries the shared token in the
+  ``X-Skyweave-Token`` request header and the token matches (E1-D15). A poll
+  with no token or a wrong one is counted and is not a heartbeat, so another
+  device on the access point can read the status but cannot hold off the T18
+  ground-link failsafe.
 - ``POST /command``: one command packet [P5]; the response is its ack.
 
 [U2] Exactly four commands, from four buttons: ``prime`` (with a parameter
@@ -13,14 +18,20 @@ form whose defaults are :class:`packets.PrimeParams`), ``approve_engage``,
 ``mark_complete``, ``abort``. No joystick, no manual velocity, no other
 command, ever: the page has no other control, the server no other endpoint,
 and any other command name fails decoding and is refused ([C7], [P5b]).
+[U7] (E1-D12) The approve button sends ``params.track_id``, the id of the
+candidate the status block displays at the click; with no candidate displayed
+it sends nothing and says so.
 
 [U3] The page draws a fresh random ``cmd_id`` per command
 (``crypto.randomUUID()``, or the same v4 UUID from ``crypto.getRandomValues``
 where the browser hides ``randomUUID`` outside a secure context, as it does on
 plain HTTP over the field AP) and matches the ack by id. A lost answer is
 re-sent with the same id and body, which [P5a] makes safe. The operator types
-the token; the page keeps it only in its own memory (no storage, no cookie, no
-URL, no form that could submit it).
+the token; the page keeps it in its own memory and in the tab's
+``sessionStorage`` (E1-D15), and restores it on load, so a reload of the same
+tab keeps it and the heartbeat resumes with the first poll. It never writes
+the token to ``localStorage``, a cookie, or a URL, and has no form that could
+submit it. Closing the tab drops it.
 
 [U4] The status block shows the state banner, the engaged track and the
 candidate awaiting approval, battery, link health (FC link, attitude age, RC,
@@ -39,8 +50,9 @@ decodes with the frozen decoder, compares the token in constant time over the
 ASCII bytes (``hmac.compare_digest``), and hands the core only the result. A
 body that fails decoding never reaches the mission: it is acked
 ``rejected_malformed`` when a ``cmd_id`` can be salvaged (the core records that
-ack) and is counted and logged in every case. The token is never logged,
-recorded, rendered, or put in ``meta.config``.
+ack) and is counted and logged in every case. A state poll's token goes
+through the same compare ([U6]). The token is never logged, recorded,
+rendered, or put in ``meta.config``; that holds for a wrong token too.
 
 Threading: the companion core is single threaded (one input order, [R3]).
 HTTP requests run on server threads, so every call into the core, fc_link, or
@@ -91,6 +103,13 @@ PAGE_PATH = "/"
 STATE_PATH = "/state"
 COMMAND_PATH = "/command"
 
+TOKEN_HEADER = "X-Skyweave-Token"
+"""[U6] (E1-D15): the request header that carries the shared token on a state
+poll. The token never travels in a URL."""
+
+TOKEN_STORAGE_KEY = "skyweave-ui-token"
+"""[U3] (E1-D15): the page's ``sessionStorage`` key for the token (per tab)."""
+
 POLL_MS = 500
 """Page state-poll period (Provisional, E1): ten heartbeats inside the 5 s
 ``ground_link_timeout_ms`` (T18)."""
@@ -136,8 +155,8 @@ class ViewModel:
     the first one, ``gate_state`` is the recording's configured gate. Battery,
     mode and armed come from the FC's own frames through
     :class:`vehicle_state.VehicleState` at ``t`` ([M2a]: unknown while the link
-    is down). The ground link is the newest ground heartbeat: a UI poll or an
-    authenticated ground command ([R2]).
+    is down). The ground link is the newest ground heartbeat: a UI poll that
+    carried the token ([U6]) or an authenticated ground command ([R2]).
     """
 
     t: int
@@ -581,6 +600,8 @@ _SCRIPT = """
   "use strict";
   var POLL_MS = @@POLL_MS@@;
   var RETRIES = 3;
+  var TOKEN_KEY = "@@TOKEN_KEY@@";
+  var TOKEN_RE = /^[!-~]{1,256}$/;  // [P5] the token field's pattern
   var statusEl = document.getElementById("status");
   var pollEl = document.getElementById("poll");
   var acksEl = document.getElementById("acks");
@@ -609,10 +630,34 @@ _SCRIPT = """
       h.slice(16, 20) + "-" + h.slice(20);
   }
 
-  // [U6] every poll is a ground heartbeat. [U5] the server renders the status
-  // block with the same function that renders a recording.
+  // [U3] (E1-D15) the token lives in this page's memory (the input) and in
+  // this tab's sessionStorage, so a reload of the same tab keeps it. It goes
+  // to no storage that outlives the tab, no cookie, and no URL. Where the
+  // browser refuses storage the page works from memory alone.
+  function restoreToken() {
+    try {
+      var kept = window.sessionStorage.getItem(TOKEN_KEY);
+      if (kept) tokenEl.value = kept;
+    } catch (e) { /* no storage: memory only */ }
+  }
+
+  function keepToken() {
+    try {
+      if (tokenEl.value) window.sessionStorage.setItem(TOKEN_KEY, tokenEl.value);
+      else window.sessionStorage.removeItem(TOKEN_KEY);
+    } catch (e) { /* no storage: memory only */ }
+  }
+
+  // [U6] (E1-D15) a poll is a ground heartbeat only when it carries the right
+  // token in its header; the companion answers every poll with the view and
+  // says which kind this one was. A value outside the token pattern cannot be
+  // the token and is not sent. [U5] the server renders the status block with
+  // the same function that renders a recording.
   function poll() {
-    fetch("/state", {cache: "no-store"})
+    var tok = tokenEl.value;
+    var opts = {cache: "no-store"};
+    if (TOKEN_RE.test(tok)) opts.headers = {"@@TOKEN_HEADER@@": tok};
+    fetch("/state", opts)
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
@@ -620,8 +665,16 @@ _SCRIPT = """
       .then(function (s) {
         statusEl.innerHTML = s.html;
         misses = 0;
-        pollEl.textContent = "companion answering";
-        pollEl.className = "ok";
+        if (s.heartbeat) {
+          pollEl.textContent = "companion answering; this page is the ground link";
+          pollEl.className = "ok";
+        } else if (!tok) {
+          pollEl.textContent = "companion answering; NOT the ground link: type the token";
+          pollEl.className = "warn";
+        } else {
+          pollEl.textContent = "companion answering; NOT the ground link: token not accepted";
+          pollEl.className = "bad";
+        }
       })
       .catch(function () {
         misses += 1;
@@ -691,16 +744,43 @@ _SCRIPT = """
       });
   }
 
+  // [U7] (E1-D12) the candidate this page displays now: the candidate row of
+  // the status block, as the companion rendered it. null when it shows none.
+  function shownCandidate() {
+    var el = document.getElementById("candidate");
+    if (!el) return null;
+    try {
+      var id = JSON.parse(el.getAttribute("data-value"));
+      return Number.isSafeInteger(id) ? id : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function send(command) {
     var id = freshId();
-    var res = ackRow(command, id);
-    var tok = tokenEl.value;  // [U3] page memory only
+    var params = null;
+    var label = command;
+    if (command === "prime") params = primeParams();
+    if (command === "approve_engage") {
+      // [U7] an approve always names the displayed candidate, so the companion
+      // refuses it if the candidate changed ([M8]). No candidate: nothing is sent.
+      var cand = shownCandidate();
+      if (cand === null) {
+        show(ackRow(command, id), "not sent: no candidate is displayed", "bad");
+        return;
+      }
+      params = {track_id: cand};
+      label = command + " #" + cand;
+    }
+    var res = ackRow(label, id);
+    var tok = tokenEl.value;  // [U3] page memory (kept across a reload by keepToken)
     if (!tok) {
       show(res, "not sent: type the token first", "bad");
       return;
     }
     var pkt = {v: 1, cmd_id: id, token: tok, command: command};
-    if (command === "prime") pkt.params = primeParams();
+    if (params !== null) pkt.params = params;
     attempt(JSON.stringify(pkt), id, res, 1);
   }
 
@@ -710,9 +790,21 @@ _SCRIPT = """
       send(ev.currentTarget.getAttribute("data-command"));
     });
   }
+  restoreToken();
+  tokenEl.addEventListener("input", keepToken);
+  tokenEl.addEventListener("change", keepToken);
   poll();
 })();
 """
+
+
+def _page_script(poll_ms: int) -> str:
+    """The page's script with its constants filled in."""
+    return (
+        _SCRIPT.replace("@@POLL_MS@@", str(int(poll_ms)))
+        .replace("@@TOKEN_KEY@@", TOKEN_STORAGE_KEY)
+        .replace("@@TOKEN_HEADER@@", TOKEN_HEADER)
+    )
 
 
 def render_page(view: ViewModel, *, poll_ms: int = POLL_MS) -> str:
@@ -737,11 +829,13 @@ def render_page(view: ViewModel, *, poll_ms: int = POLL_MS) -> str:
         '<section class="controls"><h2>Commands</h2>'
         '<label for="ui-token">Token</label> '
         '<input id="ui-token" type="password" autocomplete="off" spellcheck="false" size="24">'
-        '<p class="note">Kept in this page only; type it again after a reload.</p>'
+        '<p class="note">Kept in this tab until it closes; a reload keeps it. A new tab or a '
+        "browser restart needs it typed again. Without the right token this page is not the "
+        "ground link.</p>"
         f'<div class="cmds">{buttons}</div>'
         f'<h3>Prime</h3><div id="prime-params" class="params">{_param_inputs()}</div>{prime}'
         '<h3>Acks</h3><ol id="acks"></ol></section></main>'
-        f"<script>{_SCRIPT.replace('@@POLL_MS@@', str(int(poll_ms)))}</script>"
+        f"<script>{_page_script(poll_ms)}</script>"
         "</body></html>\n"
     )
 
@@ -784,6 +878,18 @@ class CommandReceiver:
         self.malformed = 0
         self.auth_failed = 0
 
+    def token_ok(self, token: str | None) -> bool:
+        """[P5c]: whether ``token`` is the configured one, compared in constant
+        time over the ASCII bytes. A missing token, or one that is not ASCII
+        (it cannot be the configured token), is not."""
+        if token is None:
+            return False
+        try:
+            given = token.encode("ascii")
+        except UnicodeEncodeError:
+            return False
+        return hmac.compare_digest(given, self._expected)
+
     def receive(self, data: bytes, t: int) -> AckPacket | None:
         """Decode, authenticate, and execute one command at stamp ``t``.
 
@@ -798,7 +904,7 @@ class CommandReceiver:
         assert isinstance(cmd, CommandPacket)
         if cmd.cmd_id.startswith(RC_PREFIX):
             return self._malformed(data, t, "reserved rc: cmd_id from the ground")
-        auth_ok = hmac.compare_digest(cmd.token.encode("ascii"), self._expected)  # [P5c]
+        auth_ok = self.token_ok(cmd.token)  # [P5c]
         if not auth_ok:
             self.auth_failed += 1
         out = self._core.on_command(cmd, auth_ok, t)
@@ -831,7 +937,11 @@ class GroundUiService:
     ``builder`` must be fed by the core's recorder (through a
     :class:`RecordTap`), so the view follows every record. ``forward`` takes
     each core output to fc_link and the publishers (the companion's job; a
-    UI poll can fire an AUTO row, so its output is forwarded too).
+    heartbeat poll can fire an AUTO row, so its output is forwarded too).
+
+    Counters: ``polls`` is every state poll answered; ``polls_unauthenticated``
+    is the polls among them that carried no token or a wrong one and so were
+    not ground heartbeats ([U6], E1-D15).
     """
 
     def __init__(
@@ -853,6 +963,7 @@ class GroundUiService:
         self._forward: Callable[[CoreOutput], None] = forward or (lambda out: None)
         self.receiver = CommandReceiver(core, ui_token, self._forward)
         self.polls = 0
+        self.polls_unauthenticated = 0
 
     def page(self) -> str:
         """``GET /``: the page at now. Fetching the page is not a state poll."""
@@ -860,14 +971,32 @@ class GroundUiService:
             view = self.builder.build(self.clock())
         return render_page(view, poll_ms=self.poll_ms)
 
-    def state(self) -> dict[str, Any]:
-        """``GET /state``: one ground heartbeat ([U6]), then the view after it."""
+    def state(self, token: str | None = None) -> dict[str, Any]:
+        """``GET /state``: the view at now, for every poll ([U6], E1-D15).
+
+        ``token`` is the poll's ``X-Skyweave-Token`` header value, or ``None``
+        when it sent none. Only a poll whose token matches ([P5c] compare) is
+        a ground heartbeat: it goes into the core (one ``ground_hb`` record)
+        before the view is built. Any other poll is counted, never reaches
+        the core, and writes no record. ``heartbeat`` tells the page which of
+        the two this poll was. The token value is never logged.
+        """
         with self.lock:
             t = self.clock()
-            self._forward(self.core.on_ground_heartbeat(t))
+            heartbeat = self.receiver.token_ok(token)
+            if heartbeat:
+                self._forward(self.core.on_ground_heartbeat(t))
+            else:
+                self.polls_unauthenticated += 1
+                log.debug(
+                    "state poll at t=%d with %s token: not a ground heartbeat (%d so far)",
+                    t,
+                    "no" if token is None else "a wrong",
+                    self.polls_unauthenticated,
+                )
             view = self.builder.build(t)
             self.polls += 1
-        return {"view": view.to_obj(), "html": render_status(view)}
+        return {"view": view.to_obj(), "html": render_status(view), "heartbeat": heartbeat}
 
     def command(self, body: bytes) -> AckPacket | None:
         """``POST /command``: one command packet; its ack ([U1], [U3])."""
@@ -895,7 +1024,8 @@ class _Handler(BaseHTTPRequestHandler):
         if path == PAGE_PATH:
             self._reply(200, _HTML, service.page().encode("utf-8"))
         elif path == STATE_PATH:
-            self._reply(200, _JSON, canonical_json(service.state()))
+            # [U6]: the token, when the page has one, comes in a header.
+            self._reply(200, _JSON, canonical_json(service.state(self.headers.get(TOKEN_HEADER))))
         else:
             self._reply(404, _JSON, canonical_json({"error": "not found"}))
 
@@ -930,7 +1060,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        # The request line never carries the token (it travels in POST bodies only).
+        # Only the request line and the status are logged. The token travels in
+        # POST bodies and in the X-Skyweave-Token header, never in the request
+        # line ([U3], [U6]), so it cannot reach this log.
         log.debug("ui %s " + fmt, self.address_string(), *args)
 
 

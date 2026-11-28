@@ -15,7 +15,8 @@ nowhere else:
   the mission view after that packet; then each guidance event goes to
   ``mission.on_guidance`` as its own GDE input ([M2]).
 - CMD (a command with its authentication result): ``mission.on_command``.
-- HB (a UI poll, [U6]): ``mission.on_ground_heartbeat``.
+- HB (a UI poll that carried the token, [U6], E1-D15):
+  ``mission.on_ground_heartbeat``.
 - TICK: the vehicle snapshot is taken (ticks only, [M2]); then
   ``mission.on_tick``; then, when a setpoint step is due ([G11]),
   ``guidance.step`` and its events as GDE inputs.
@@ -63,7 +64,12 @@ rx frame), so it predicts which setpoints became ``mavlink`` tx records.
 Ground heartbeats: an authenticated ground command already counts as a ground
 heartbeat inside the mission, so the core writes a ``ground_hb`` record only
 for UI polls; recording one per command as well would add a second input that
-live and replay would both have to feed.
+live and replay would both have to feed. Which polls are heartbeats is the UI
+server's decision ([U6], E1-D15: only a poll that carries the right token).
+The server holds the token; the core never sees it, and a poll that is not a
+heartbeat never reaches the core. The harness and replay call
+:meth:`CompanionCore.on_ground_heartbeat` directly: each call is a poll that
+was a heartbeat.
 """
 
 from __future__ import annotations
@@ -370,8 +376,8 @@ class CompanionCore:
         return out.freeze()
 
     def on_ground_heartbeat(self, t_rx: int) -> CoreOutput:
-        """HB: one UI state poll ([U6], [R2]). Pending radio approves are
-        processed first ([F7])."""
+        """HB: one UI state poll that carried the token ([U6], [R2], E1-D15).
+        Pending radio approves are processed first ([F7])."""
         out = _Out()
         self._drain_approves(out)
         t = self._input_stamp(t_rx)
