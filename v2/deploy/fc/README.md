@@ -10,7 +10,7 @@ V-F6 airframe numbers. It was not loaded on the real flight controller (FC).
 
 | File | Content |
 | --- | --- |
-| `skyweave_cone_x.param` | 127 parameters, `NAME,VALUE`, in 15 groups |
+| `skyweave_cone_x.param` | 130 parameters, `NAME,VALUE`, in 15 groups |
 | `README.md` | This file: the reason and the source of each value |
 | `check_params.py` | The checks: project rules, ArduPilot metadata, SITL read-back |
 
@@ -293,15 +293,18 @@ bidirectional DShot outputs (BOARD), so they have no use there.
 | `BATT_FS_LOW_ACT` | 2 | Low: RTL | MPCALC; Contract V-D13 |
 | `BATT_FS_CRT_ACT` | 1 | Critical: Land | MPCALC |
 
-### 3.6 Radio, ground station and EKF failsafes
+### 3.6 Radio, companion-loss and EKF failsafes
 
 | Parameter | Value | Why | Source |
 | --- | --- | --- | --- |
 | `FS_THR_ENABLE` | 1 | Radio loss: RTL always. Default, and the value in the SITL tests. With no position the FC lands | Contract V-D13, T20; FS-RC |
 | `FS_THR_VALUE` | 975 | Default. CRSF reports a lost link itself. The calibrated throttle minimum must stay above this value | FS-RC |
 | `RC_FS_TIMEOUT` | 1.0 | Radio failsafe 1 s after the last RC frame. Default | PARAM |
-| `FS_OPTIONS` | 0 | No failsafe continues in GUIDED or in a pilot mode. SITL shows 16 as the default, which changes only the ground station failsafe | PARAM; Contract T20 |
-| `FS_GCS_ENABLE` | 0 | Off. Default. No ground station flies with the vehicle. Section 9, point 4 | FS-GCS; Contract E1-F6 |
+| `FS_GCS_ENABLE` | 1 | Companion loss: RTL. This is ArduCopter's ground-station failsafe; `MAV_GCS_SYSID` makes it watch the companion. Values: 0 off, 1 RTL, 5 Land. Section 11 | Contract B-D5, V-D13; FS-GCS; PARAM |
+| `FS_GCS_TIMEOUT` | 3 | Seconds without a heartbeat before the failsafe. Range 2 to 120, default 5. The companion sends 1 Hz, so one lost heartbeat (a 2 s gap) does not trigger. 3 s is also `GUID_TIMEOUT`: the FC acts at the moment a dead companion's last setpoint ends | Contract B-D5, B-F32; PARAM |
+| `MAV_GCS_SYSID` | 1 | The MAVLink system ID that the failsafe watches. The companion sends its `HEARTBEAT` as system 1, component 191 (the vehicle's own system ID). The default is 255, a ground station's ID. Range 1 to 255. Old name: `SYSID_MYGCS` | Contract B-D5, B-F3, B-F32; PARAM |
+| `MAV_GCS_SYSID_HI` | 0 | Below `MAV_GCS_SYSID`, so the FC watches one ID only, not a range. Default | Contract B-F32; PARAM |
+| `FS_OPTIONS` | 16 | Bit 4 only: the companion-loss failsafe changes nothing in a pilot mode (ALT_HOLD). The firmware default (SITL shows 16). Bits 0 to 2 stay off: no failsafe continues in AUTO or GUIDED | Contract B-D5, B-F34, T20; PARAM |
 | `FS_EKF_ACTION` | 1 | Bad position estimate: land, in modes that need position. Default | FS-EKF |
 | `FS_EKF_THRESH` | 0.8 | Default | FS-EKF |
 | `FS_CRASH_CHECK` | 1 | Disarm after a crash. Default. A tether string can stop a propeller (V-D14) | CRASH; Contract V-D14 |
@@ -309,6 +312,12 @@ bidirectional DShot outputs (BOARD), so they have no use there.
 An FC failsafe changes the mode. The mission sees a mode that is not GUIDED
 and goes to `ABORT` (T20). The companion does not change the mode back
 ([M10]).
+
+With `MAV_GCS_SYSID` 1 the FC accepts `RC_CHANNELS_OVERRIDE` and
+`MANUAL_CONTROL` only from system 1. A ground station (system 255) cannot
+override RC channels. The companion never sends an override ([F7]). Do not
+set `MAV_OPTIONS` bit 0: the FC would then refuse all MAVLink from Mission
+Planner. `check_params.py lint` refuses `MAV_OPTIONS` in the file.
 
 ### 3.7 Fence
 
@@ -479,7 +488,8 @@ It differs on purpose here:
 | `WP_SPD_UP`, `WP_SPD_DN` | 2.5, 1.5 m/s | 1.5, 1.0 m/s | First-flight limit for RTL and landing. The effect on the time of a GUIDED takeoff to 10 m was not measured |
 | Fence | Off (radius 150 m) | On, 80 m, 50 m high | The FC fence is not in the SITL tests |
 | Battery failsafes | Off | On | Not in the SITL tests |
-| `FS_OPTIONS` | 16 | 0 | Changes the ground station failsafe only, which is off |
+| `FS_GCS_ENABLE`, `FS_GCS_TIMEOUT` | 0, 5 s | 1, 3 s | Companion loss gives RTL (B-D5). In SITL mode the companion sends no heartbeat, so the harness never starts this failsafe (section 11) |
+| `MAV_GCS_SYSID` | 255 | 1 | The FC watches the companion. With 1, the FC ignores the harness's RC override of the mode switch, which comes from system 255 (section 11) |
 | `MOT_THST_EXPO` | 0.65 | 0.49 | The SITL frame file models 0.65. The real thrust curve is not measured |
 | `MOT_THST_HOVER` | 0.21 (learned in SITL) | 0.2 | Start value; the FC learns it |
 | `PSC_D_ACC_P`, `PSC_D_ACC_I` | 0.05, 0.1 | 0.02, 0.04 | Low hover throttle |
@@ -502,7 +512,7 @@ own 5-column format and skip every line of this file. Neither was tried
 here. With QGroundControl, continue only if the comparison shows the
 parameters of this file.
 
-The file holds 127 of about 1300 parameters. A parameter that is not in the
+The file holds 130 of about 1300 parameters. A parameter that is not in the
 file stays as it is on the FC. Thus start from a clean FC.
 
 1. Connect the FC with USB. No battery.
@@ -563,7 +573,8 @@ the motors**, until step 9. Step 9 is optional, and the owner decides it.
    companion must show the FC link up and a fresh attitude. Turn the
    vehicle by hand and make sure that the attitude follows. Ask for a tone
    ([F8]): this needs a buzzer on the FC. After each FC reboot, start the
-   companion again (section 9, point 3).
+   companion again (section 9, point 3). Then do the companion-loss check
+   of section 11.3.
 9. **Motor test. Only with the propellers off. Only when the owner chooses
    to power the motors.** In Mission Planner: SETUP, Optional Hardware,
    Motor Test. Start with a low throttle percent. Motor A is the front
@@ -613,11 +624,11 @@ the motors**, until step 9. Step 9 is optional, and the owner decides it.
    until the companion asks again. On the bench, start the companion again
    after each FC reboot. An alternative is to set the `MAV2_*` stream rates
    in this file.
-4. **Companion loss in GUIDED.** If the companion stops, the vehicle stops
-   after `GUID_TIMEOUT` and hovers in GUIDED. The pilot's switch and the
-   battery failsafe are the exits (E1-F6). The ground station failsafe
-   (`FS_GCS_ENABLE`) with the companion's heartbeat is a possible FC-side
-   exit. It is off here. Decide it before autonomy.
+4. **Companion loss in GUIDED.** Decided on 2026-11-28 (contract B-D5):
+   the FC goes to RTL 3 s after the companion's last heartbeat. Section 11
+   has the behaviour, the SITL results and the open points: a companion
+   that starts again in less than 3 s, a companion that stopped before the
+   pilot selected GUIDED, and a vehicle in LAND.
 5. **`GUID_TIMEOUT`.** 3 s is the tested value. At 2.5 m/s the vehicle
    moves 7.5 m in that time (E1-F21). A shorter value is possible after a
    SITL run.
@@ -630,7 +641,7 @@ the motors**, until step 9. Step 9 is optional, and the owner decides it.
 
 | Check | What it proves | Needs |
 | --- | --- | --- |
-| `lint` | The file parses, has no duplicate, holds the 18 project rules (each names its contract clause), and has no calibration, tuning or simulator name | Python 3.10, nothing else |
+| `lint` | The file parses, has no duplicate, holds the 20 project rules (each names its contract clause), and has no calibration, tuning or simulator name | Python 3.10, nothing else |
 | `meta` | Each name is in ArduPilot's parameter metadata for Copter stable-4.7.0 (`apm.pdef.xml`), and each value is in the documented range, is a documented value, or sets only documented bits | The metadata file in `<repo>/_local/ardupilot-pdef/` (git-excluded); `--download` gets it from `autotest.ardupilot.org` |
 | `sitl` | The pinned SITL starts with the file as a defaults file, and each parameter reads back with the file's value | Linux x86-64: `v2/docker/sitl/run.sh shell -c "python deploy/fc/check_params.py sitl"` |
 
@@ -649,6 +660,16 @@ Results on 2026-11-27 (git revision of this file's commit):
 - `sitl`, pinned ArduCopter 4.7.0: 125 parameters read back equal, 0
   differ. 2 are not in SITL and were checked by the metadata only:
   `BRD_ALT_CONFIG`, `BRD_SER1_RTSCTS`.
+
+Results on 2026-11-28, after the companion-loss lines (B-D5, section 11):
+
+- `lint`: 130 parameters, 20 rules, 0 failed.
+- `meta`, stable-4.7.0 (the same file hash): 130 names found, 0 failed. 56
+  values checked against a range, 51 against a value list, 15 against a bit
+  list, 8 by name only. The same check against stable-4.7.1: 0 failed.
+- `sitl`: not run again for the 130-parameter file. The five companion-loss
+  lines were in the defaults file of every SITL run of section 11.2, and
+  SITL acted on them; the read-back of the whole file is still to do.
 
 What these checks do not prove: that a value is right for this vehicle.
 SITL accepts a value that is out of range, and the metadata file lists some
@@ -691,3 +712,170 @@ Two earlier tries of the baseline flight got no telemetry after one stream
 request, when the flight was the second SITL instance of one process. A
 repeated request fixed it. The cause was not isolated. It is a property of
 the scratch script, not a known property of the baseline.
+
+## 11. Companion-loss failsafe (contract B-D5)
+
+Decision B-D5 (2026-11-28): when the companion stops in autonomous flight,
+the FC goes to RTL by itself. Decision B-D6 gives the rule behind it: the FC
+owns the failsafes, and no safety function depends on the Cubie. The five
+lines are in section 3.6. All of this section is from the ArduCopter 4.7.0
+source and from the pinned SITL. Nothing here is Measured on the vehicle.
+
+### 11.1 What the FC does
+
+The companion sends one MAVLink `HEARTBEAT` each second to the FC (system 1,
+component 191, type "onboard controller"; contract [F1] (c), B-F3). The FC
+uses ArduCopter's ground-station failsafe to watch it.
+
+Facts from the 4.7.0 source (`GCS_MAVLINK::handle_heartbeat`,
+`GCS::sysid_is_gcs`, `Copter::failsafe_gcs_check`,
+`Copter::failsafe_gcs_on_event`, `AP_Arming_Copter::gcs_failsafe_check`):
+
+- The FC counts a `HEARTBEAT` by its source system ID only. The ID must be
+  `MAV_GCS_SYSID`. The MAVLink type and the component ID are not used. An
+  `RC_CHANNELS_OVERRIDE` from that system ID counts too.
+- The failsafe is not active until the FC gets a first heartbeat from that
+  system ID after power-on.
+- The failsafe starts when the time since the last heartbeat is more than
+  `FS_GCS_TIMEOUT`. In SITL the FC acted 3.0 to 3.3 s after the last one.
+- The action depends on the state. `FS_OPTIONS` bit 4 keeps a pilot mode
+  out of it.
+
+| State when the heartbeat stops | What the FC does | Message |
+| --- | --- | --- |
+| Disarmed | No action. It then refuses to arm until the heartbeat comes back | `GCS Failsafe`, then `PreArm: GCS failsafe on` |
+| Armed on the ground | Disarms | `GCS Failsafe - Disarming` |
+| GUIDED in flight | RTL. With no position: Land (source; not tested) | `GCS Failsafe` |
+| ALT_HOLD in flight (the pilot flies) | No mode change. The pilot keeps control | `GCS Failsafe - Continuing Pilot Control` |
+| LAND in flight | RTL: the vehicle stops the landing (point 3 of 11.5) | `GCS Failsafe` |
+| RTL | Stays in RTL | `GCS Failsafe` |
+
+When the heartbeat comes back, the FC sends `GCS Failsafe Cleared`. It does
+not change the mode back. The mission sees a mode that is not GUIDED and
+goes to `ABORT` (T20).
+
+The radio failsafe (`FS_THR_ENABLE`) is a separate check. Each failsafe acts
+when it starts. Neither one stops the other. A radio loss gives RTL also in
+ALT_HOLD, with or without the companion.
+
+A ground station (Mission Planner, system 255) does not count. It cannot
+start the failsafe and it cannot hold it off.
+
+### 11.2 SITL results (simulated, Provisional)
+
+Pinned SITL 4.7.0, `copter.parm`, the default quad, speedup 1, 2026-11-28.
+The defaults file had the five companion-loss lines and these baseline
+lines: `FS_THR_ENABLE`, `FS_THR_VALUE`, `RC_FS_TIMEOUT`, `FLTMODE_CH`,
+`FLTMODE1` to `FLTMODE6`, `RC5_OPTION`, `RC6_OPTION`, `RC8_OPTION`,
+`ARMING_RUDDER`, `GUID_TIMEOUT`, `GUID_OPTIONS`, `ARMING_SKIPCHK`, the six
+RTL and LAND lines, `PILOT_SPD_UP` and `PILOT_SPD_DN`. The full baseline was
+not loaded: the battery, fence, sensor and tuning lines change how SITL
+itself runs (section 10). The radio was SITL's RC input port (sticks, and
+the mode switch on channel 6). The "stand-in" is a MAVLink client on SERIAL1
+that sends the same heartbeat as fc_link, from system 1, component 191. The
+scratch script is not in the repo; `test_f_companion_loss.py` keeps the
+GUIDED case as a SITL test, with fc_link's own heartbeat. Times are from the
+last heartbeat that was sent.
+
+| Case | Runs | Result |
+| --- | --- | --- |
+| GUIDED hover at 10 m, the stand-in stops (heartbeat and 10 Hz setpoints) | 5 | RTL after 3.0 to 3.1 s, armed, `GCS Failsafe`. One run continued to the end: landed and disarmed in RTL |
+| The same with the real `companiond --real-fc` on SERIAL1, killed with SIGKILL | 2 | RTL 3.2 and 3.3 s after its last heartbeat. Its heartbeat period was 0.98 to 1.03 s |
+| The same (stand-in) with a ground station heartbeat (system 255) at 1 Hz on SERIAL0 | 2 | The same: RTL after 3.0 and 3.3 s. The ground station does not hold the failsafe off |
+| Control: `MAV_GCS_SYSID` not set (255), ground station connected, the stand-in stops | 1 | No failsafe, GUIDED for 12 s. RTL only after the ground station also stopped. So the line `MAV_GCS_SYSID` 1 is necessary |
+| The heartbeat comes back 12 s after the failsafe (stand-in 2 runs, a second `companiond` start 1 run) | 3 | `GCS Failsafe Cleared`. The FC stayed in RTL |
+| The real `companiond` killed and started again at once | 1 | Its next heartbeat came 2.0 s after the last one. No failsafe. The vehicle stayed in GUIDED (point 1 of 11.5) |
+| ALT_HOLD hover at 5 m flown with the sticks, the stand-in stops, `FS_OPTIONS` 16 | 4 | `GCS Failsafe - Continuing Pilot Control` after 3.0 to 3.3 s. No mode change |
+| The same with `FS_OPTIONS` 0 | 2 | RTL after 3.0 and 3.3 s. The FC takes the vehicle from the pilot. This is why the file holds 16 |
+| After that ALT_HOLD case: the pilot selects GUIDED, the companion is still stopped | 2 | GUIDED accepted. The vehicle held its position for 12 s. No RTL (point 2 of 11.5). After the heartbeat came back and stopped again: RTL after 3.2 and 3.3 s |
+| After that ALT_HOLD case: radio failsafe (throttle below `FS_THR_VALUE`) | 2 | `Radio Failsafe`, RTL |
+| GUIDED hover: radio failsafe first, then the stand-in stops, then the radio comes back | 2 | RTL at the radio failsafe. `GCS Failsafe` 3.1 and 3.3 s after the last heartbeat, still RTL. `Radio Failsafe Cleared`, still RTL |
+| GUIDED hover: the stand-in stops, then radio failsafe | 1 | RTL after 3.1 s. Then `Radio Failsafe`, still RTL |
+| LAND at 9 m (asked by the ground station), the stand-in stops | 1 | RTL after 3.1 s |
+| On the ground, disarmed: the stand-in stops | 2 | `GCS Failsafe` after 3.1 and 3.3 s, no mode change. Arming refused for the yaw stick and for a MAVLink command (`PreArm: GCS failsafe on`). After the heartbeat came back: `GCS Failsafe Cleared`, and the yaw stick armed |
+| Armed on the ground in ALT_HOLD: the stand-in stops | 2 | `GCS Failsafe - Disarming` after 3.2 s |
+| No heartbeat from system 1 since power-on (nothing on SERIAL1) | 2 | No failsafe and no pre-arm message. The pilot armed with the yaw stick in ALT_HOLD, climbed, hovered, landed and disarmed. In GUIDED the yaw stick did not arm (`Arm: Guided mode not armable`), but a MAVLink arm and takeoff from the ground station (system 255) did; the vehicle then hovered in GUIDED with no failsafe |
+| An `RC_CHANNELS_OVERRIDE` of channel 6 from system 255 | 2 | Ignored: channel 6 and the mode did not change. There was no control run with the default `MAV_GCS_SYSID` |
+
+The plan was 2 runs for each case. The session ended first, so six cases
+have 1 run: the control, the fast restart, the second `companiond` start,
+"stand-in stops, then radio failsafe", LAND, and (see the table) the
+`companiond` kill has 2 of the 4 planned. Not run at all: the SITL test in
+`test_f_companion_loss.py` (it is skipped, with the reason), the
+`check_params.py sitl` read-back of the 130-parameter file, the failsafe
+with no position estimate, and a gate or harness run with these lines.
+
+### 11.3 Bench check (propellers off)
+
+Do this after step 8 of section 7. Mission Planner is on USB, and its
+Messages tab is open.
+
+1. Read the five parameters back: `FS_GCS_ENABLE` 1, `FS_GCS_TIMEOUT` 3,
+   `MAV_GCS_SYSID` 1, `MAV_GCS_SYSID_HI` 0, `FS_OPTIONS` 16.
+2. Start the companion in its bench mode. No failsafe message must show.
+3. Stop the companion (`systemctl stop skyweave-companion`). After about
+   3 s Mission Planner must show `GCS Failsafe`. Mission Planner stays
+   connected during this step. If the message does not show, Mission
+   Planner or a different device sends heartbeats as system 1: find it.
+4. Look at the pre-arm messages: `PreArm: GCS failsafe on` must be there.
+5. Start the companion again. Mission Planner must show
+   `GCS Failsafe Cleared`.
+6. Pull the companion's UART plug while it runs. The result must be the
+   same as in step 3. Connect it again.
+7. Stop the companion with `kill -9` and let systemd start it again. Record
+   the time between the last log line of the old process and the first of
+   the new one. Compare it with point 1 of 11.5.
+8. Power the FC off and on with the Cubie off. No failsafe message and no
+   `GCS failsafe on` pre-arm message must show.
+
+SITL cannot show these, so the bench is the first evidence: the real UART
+at 921600 baud, the heartbeat timing of the Cubie under CPU load (percepd),
+the system ID that the owner's Mission Planner uses, and the time the
+Cubie needs to start.
+
+### 11.4 A bench session or a manual flight with no Cubie
+
+- If the Cubie is off or disconnected from power-on of the FC, do nothing.
+  The failsafe is not active before the first heartbeat, and the FC arms.
+- If the companion ran and then stopped, the FC refuses to arm
+  (`PreArm: GCS failsafe on`). Start the companion again, or power the FC
+  off and on with the Cubie off.
+- To switch the failsafe off: set `FS_GCS_ENABLE` 0 in Mission Planner,
+  then power the FC off and on. From the source: with 0 the FC stops the
+  check, so a failsafe that is already active does not clear without the
+  restart. This was not tested, because parameters reach SITL only through
+  its defaults file. Set `FS_GCS_ENABLE` back to 1 before an autonomous
+  flight. "Compare Params" (section 6) shows the difference.
+- A manual flight in ALT_HOLD with the Cubie on board needs no change. If
+  the companion stops, the pilot keeps control.
+
+### 11.5 Open points for the owner
+
+1. **A companion that starts again in less than 3 s.** The FC then sees no
+   loss. The new companion process is not primed and sends no setpoint
+   (E1-F6), so the vehicle stops and holds its position in GUIDED. The
+   pilot's switch is the exit. The service file has `RestartSec=1`. In the
+   SITL container the gap was 2.0 s. The gap on the Cubie is not known.
+   A fix on the Cubie side: a restart delay above `FS_GCS_TIMEOUT`.
+2. **A companion that stopped before the pilot selected GUIDED.** The
+   failsafe acts one time, when it starts. In ALT_HOLD it does nothing.
+   When the pilot then selects GUIDED, the vehicle holds its position and
+   the FC does not go to RTL. The mission cannot launch with no companion,
+   so this needs a switch move into GUIDED with a dead companion.
+3. **LAND.** If the vehicle is in LAND and the companion stops, the FC goes
+   to RTL. `FS_OPTIONS` bit 3 (value 8, "continue if landing") stops that,
+   but it also changes the radio and battery failsafes. It is not set.
+4. **Before the first heartbeat there is no protection.** A vehicle that
+   never heard the companion flies as before B-D5. A ground station can
+   arm and take off in GUIDED with no companion.
+5. **System ID 1 belongs to the vehicle.** Do not set a ground station to
+   system ID 1. Do not add a second MAVLink device that sends heartbeats as
+   system 1 (an OSD or a telemetry bridge): it would hold the failsafe off.
+6. **A false start.** If the companion sends nothing for more than 3 s
+   (a stall, a UART fault), the FC goes to RTL and the mission goes to
+   `ABORT`. One lost heartbeat (a 2 s gap) does not start it.
+7. **The SITL harness does not exercise this failsafe.** In SITL mode
+   fc_link sends no heartbeat (only the `real_fc` mode does), so the FC
+   never gets a first one. Also, with `MAV_GCS_SYSID` 1 the FC ignores the
+   harness's RC override of the mode switch. A gate run with the baseline
+   as a defaults file (section 5) needs both points solved first.
