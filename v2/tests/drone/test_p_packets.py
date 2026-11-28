@@ -130,6 +130,16 @@ FIXTURES: dict[str, tuple[P.PacketKind, P.Packet]] = {
             command=P.CommandName.ABORT,
         ),
     ),
+    # [P5] approve params (E1-D12): the approve names the candidate it means.
+    "command_approve": (
+        P.PacketKind.COMMAND,
+        P.CommandPacket(
+            cmd_id="ui-0004",
+            token="fixture-token-not-a-secret",
+            command=P.CommandName.APPROVE_ENGAGE,
+            params={"track_id": 1_000_001},
+        ),
+    ),
     "ack": (
         P.PacketKind.ACK,
         P.AckPacket(cmd_id="ui-0001", result=P.AckResult.ACCEPTED),
@@ -411,7 +421,9 @@ def test_p_not_json_is_rejected() -> None:
 
 
 def test_p_prime_requires_params_and_other_commands_ignore_them() -> None:
-    """[P5]: params is required for prime and ignored for the other three."""
+    """[P5]: params is required for prime and ignored for mark_complete and
+    abort (approve_engage keeps its optional params since E1-D12; see the
+    approve tests below)."""
     obj = _obj("command_abort")
     obj["command"] = "prime"
     with pytest.raises(P.PacketError):
@@ -419,6 +431,65 @@ def test_p_prime_requires_params_and_other_commands_ignore_them() -> None:
     obj = _obj("command_abort")
     obj["params"] = {"v_max": 99}
     assert _decode_obj(P.PacketKind.COMMAND, obj) == FIXTURES["command_abort"][1]
+    obj["command"] = "mark_complete"
+    assert _decode_obj(P.PacketKind.COMMAND, obj).params is None
+
+
+def test_p5_approve_params_are_optional_and_old_approves_still_decode() -> None:
+    """[P5] approve params, [C7], E1-D12 (additive in wire v1): an approve with
+    no params (every v1 sender before E1-D12, and the radio approve [F7])
+    decodes with params None and re-encodes to the same bytes without a params
+    key; an approve with empty params decodes too; an unknown key beside
+    ``track_id`` is kept for the mission to ignore. ``params`` itself is an
+    object field: any other JSON type is rejected by the decoder ([C7])."""
+    old = _obj("command_approve")
+    del old["params"]
+    pkt = _decode_obj(P.PacketKind.COMMAND, old)
+    assert pkt == P.CommandPacket(
+        cmd_id="ui-0004", token="fixture-token-not-a-secret", command=P.CommandName.APPROVE_ENGAGE
+    )
+    assert json.loads(P.encode(pkt)) == old
+    assert P.ApproveParams.from_obj(pkt.params) == P.ApproveParams(track_id=None)
+
+    empty = {**old, "params": {}}
+    pkt = _decode_obj(P.PacketKind.COMMAND, empty)
+    assert pkt.params == {}
+    assert P.ApproveParams.from_obj(pkt.params) == P.ApproveParams(track_id=None)
+
+    extra = {**old, "params": {"track_id": 1_000_001, "seen_at": 123}}
+    pkt = _decode_obj(P.PacketKind.COMMAND, extra)
+    assert P.ApproveParams.from_obj(pkt.params) == P.ApproveParams(track_id=1_000_001)
+
+    for not_an_object in (None, 7, "7", [7], True):
+        with pytest.raises(P.PacketError):
+            _decode_obj(P.PacketKind.COMMAND, {**old, "params": not_an_object})
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [7.0, 1e3, True, False, "7", None, [7], {"id": 7}, 2**53, -(2**53)],
+    ids=repr,
+)
+def test_p5_approve_track_id_of_the_wrong_type_decodes_then_fails_validation(bad: object) -> None:
+    """[P5] approve params, [C6], [M5], E1-D12: a ``track_id`` that is not an
+    int (a real, a bool, a string, null, a container, or an integer outside
+    the JSON-safe range) still decodes as a command packet, so the mission can
+    ack it rejected_params under its cmd_id; the approve-params parser then
+    refuses it with InvalidParams and never coerces (7.0 is not 7)."""
+    obj = _obj("command_approve")
+    obj["params"]["track_id"] = bad
+    pkt = _decode_obj(P.PacketKind.COMMAND, obj)
+    assert isinstance(pkt, P.CommandPacket) and pkt.command is P.CommandName.APPROVE_ENGAGE
+    with pytest.raises(P.InvalidParams):
+        P.ApproveParams.from_obj(pkt.params)
+
+
+def test_p5_approve_track_id_takes_any_json_safe_int() -> None:
+    """[P5] approve params, [C6]: the field is an int with no range of its own;
+    the largest JSON-safe integer parses, and so does an id no track can have
+    (0, negative), which [M8] then refuses as not the candidate."""
+    for track_id in (1, P.JSON_SAFE_INT, 0, -3):
+        assert P.ApproveParams.from_obj({"track_id": track_id}).track_id == track_id
 
 
 def test_p_salvage_cmd_id_from_malformed_command() -> None:

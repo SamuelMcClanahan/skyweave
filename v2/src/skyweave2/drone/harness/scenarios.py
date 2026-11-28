@@ -25,18 +25,19 @@ never tuned on gate seeds):
 - Camera error model: :data:`NOMINAL_CAMERA` is ``camera_sim.PROVISIONAL_NOISE``
   (1 px center jitter, 3 % log-normal size jitter, 0.5 deg pitch and yaw
   boresight error) with its random per-frame dropout set to zero. Dropout is
-  the fault S3 injects on a script; it is not part of a "nominal" world. A
-  random dropout also makes S1 unreachable by construction: [G7] restarts the
-  hold on any coasting packet, so a hold of ``hold_time_s`` at 60 fps needs
-  600 consecutive hits, which at the preset's 2 % per-frame rate happens with
-  probability 0.98^600 (about 5e-6). That interaction is a finding, not a
-  harness setting to hide.
+  the fault S3 injects on a script; it is not part of a "nominal" world. When
+  the gate world was declared, a random dropout also made S1 unreachable: the
+  old [G7] restarted the hold on any coasting packet (E1-F16). E1-D14 changed
+  [G7] so the hold clock runs through a coast, but the gate world is frozen
+  and keeps zero random dropout.
 - Geometry: the target is ahead within +-90 deg of the initial heading (north)
   at 11-26 m and 1-5 m above the search altitude, so it is above the drone's
   horizon during search (brief 3.9) and inside the 60 m geofence.
 - The human approves ``approve_settle_ms + HUMAN_REACTION_MS`` after the
   candidate appears in a mission state packet ([M8], contract §8: "waiting at
-  least approve_settle_ms after the candidate appears").
+  least approve_settle_ms after the candidate appears"). The approve names
+  that candidate in ``params.track_id``, as the page's approve does ([U7],
+  E1-D12).
 - The pilot holds the mode switch in MANUAL until the human's prime is
   accepted, then moves it to GUIDED (T03 is edge-gated, E1-D4).
 """
@@ -512,9 +513,14 @@ class Script:
         sc = self.world.scenario
         if name.startswith("candidate:"):
             # [M8], §8: no sooner than approve_settle_ms after the candidate appears.
+            # [U7], E1-D12: the approve names the candidate the human saw, as the
+            # page's approve does.
             self._cancel("approve")
             self._command(
-                t + self.settle_ms + HUMAN_REACTION_MS, CommandName.APPROVE_ENGAGE, key="approve"
+                t + self.settle_ms + HUMAN_REACTION_MS,
+                CommandName.APPROVE_ENGAGE,
+                key="approve",
+                params={"track_id": int(name.partition(":")[2])},
             )
         elif name.startswith("transition:ACQUIRING->"):
             self._cancel("approve")  # the candidate is gone (T06) or engaged (T07)

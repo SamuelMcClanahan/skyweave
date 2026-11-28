@@ -673,6 +673,61 @@ def test_cc1_f7_m8_radio_approve_judged_at_its_sample_stamp(
     assert replayed.mission_states == replayed.recorded_mission_states
 
 
+# -- E1-D12: an approve that names its track is recorded and replayed -----------
+
+
+def test_r3_e1_d12_approve_track_id_is_recorded_and_drives_replay(
+    committed: list[str], committed_replay: ReplayResult
+) -> None:
+    """[R3], [R2], [M8], [P5] approve params, E1-D12: the committed flight is
+    fed to a fresh core up to the settle time in ACQUIRING. Two UI approves
+    follow: one naming another track (rejected_state), one naming the
+    candidate (accepted, T07). Their command records keep ``params.track_id``
+    and no token, and replay of what the core recorded reproduces its acks
+    and mission states. Discrimination: with the accepted approve's recorded
+    ``track_id`` changed to the other track, replay no longer matches, so
+    replay judges the approve by the id in the record."""
+    t05 = next(t for t, n in _events(committed_replay) if n == "transition:SEARCH->ACQUIRING")
+    t_cmd = t05 + committed_replay.config.mission.approve_settle_ms
+    buf = io.StringIO()
+    core = CompanionCore(committed_replay.config, recorder=Recorder(buf), t_start_ms=T0)
+    _feed(core, (r for r in read_records(committed) if r.t_rx < t_cmd))
+    assert core.mission.state is S.ACQUIRING and core.mission.candidate_id == TRACK_ID
+    other = TRACK_ID + 1
+    results = []
+    for i, track_id in enumerate((other, TRACK_ID)):
+        cmd = CommandPacket(
+            cmd_id=f"ui-d12-{i}",
+            token=UI_TOKEN,
+            command=CommandName.APPROVE_ENGAGE,
+            params={"track_id": track_id},
+        )
+        results.append(core.on_command(cmd, _auth(cmd), t_cmd + i).acks[0].result)
+    assert results == [AckResult.REJECTED_STATE, AckResult.ACCEPTED]
+    assert core.mission.state is S.ENGAGED and core.mission.engaged_track_id == TRACK_ID
+
+    named = [o for o in _recorded(buf, "command") if o["pkt"]["cmd_id"].startswith("ui-d12-")]
+    assert [o["pkt"]["params"] for o in named] == [{"track_id": other}, {"track_id": TRACK_ID}]
+    assert all("token" not in o["pkt"] and o["auth_ok"] is True for o in named)
+    lines = buf.getvalue().splitlines()
+    replayed = replay(lines)
+    assert replayed.acks == replayed.recorded_acks
+    assert replayed.mission_states == replayed.recorded_mission_states
+    assert (t_cmd + 1, AckPacket(cmd_id="ui-d12-1", result=AckResult.ACCEPTED)) in replayed.acks
+
+    changed = []
+    for line in lines:
+        o = json.loads(line)
+        if o["stream"] == "command" and o["pkt"]["cmd_id"] == "ui-d12-1":
+            o["pkt"]["params"]["track_id"] = other
+            line = canonical_json(o).decode("ascii")
+        changed.append(line)
+    assert changed != lines
+    rerun = replay(changed)
+    assert rerun.acks != rerun.recorded_acks
+    assert (t_cmd + 1, AckPacket(cmd_id="ui-d12-1", result=AckResult.REJECTED_STATE)) in rerun.acks
+
+
 # -- [P5c] / [R2] the token -----------------------------------------------------
 
 

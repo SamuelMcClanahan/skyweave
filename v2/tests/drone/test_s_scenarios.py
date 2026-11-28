@@ -313,6 +313,7 @@ def test_s8_scripted_human_approves_after_the_settle_time() -> None:
     assert script.pop_due(t_approve - 1) == []
     acts = _execute(m, script, t_approve)
     assert [a.command for a in acts] == [CommandName.APPROVE_ENGAGE]
+    assert acts[0].params == {"track_id": 7}  # [U7], E1-D12: the approve names the candidate
     assert m.state is S.ENGAGED and m.engaged_track_id == 7
 
 

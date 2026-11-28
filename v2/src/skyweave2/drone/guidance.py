@@ -12,8 +12,10 @@ and three events (``commit``, ``pass_done``, ``hold_complete``):
 - [G3] the pluggable law (v1: pure pursuit to a standoff point level with the
   target), plus the yaw law ``yaw_rate = clamp(K_yaw * az)``.
 - [G4] the image-space commit gate (touch trials), [G5] the open-loop terminal
-  segment, [G6] the miss vector logged at commit, [G7] the standoff hold.
+  segment, [G6] the miss vector logged at commit, [G7] the standoff hold
+  (its clock runs on through a short dropout, E1-D14).
 - [G8]-[G11] degraded attitude, the lock, per-state outputs, cadence.
+- [G12] the trial ``v_max`` caps every velocity command (E1-D13).
 
 Time ([M2], [R3]): guidance's "now" is the stamp of the input it processes,
 the record ``t_rx`` of a track packet or the stamp of a setpoint step.
@@ -61,6 +63,8 @@ ZERO_COMMAND = VelocityCommand(vn=0.0, ve=0.0, vd=0.0, yaw_rate=0.0)
 """Zero velocity with an explicit zero yaw rate ([G10], [F6])."""
 
 _NO_SETPOINT_STATES = (None, MissionState.PRIMED, MissionState.LAUNCH)
+_HOLD_STATES = frozenset({MissionState.ENGAGED, MissionState.COASTING})
+"""[G7] (E1-D14): the hold clock runs only in these states."""
 _EXIT_STATES = frozenset(
     {
         MissionState.ABORT,
@@ -117,7 +121,7 @@ class GuidanceConfig:
     K_yaw: float = 1.5  # 1/s, [G3]
     yaw_rate_max: float = math.radians(90.0)  # [G3]
     K_alt: float = 0.5  # 1/s, [G10]
-    v_alt_max: float = 1.0  # m/s, [G10]
+    v_alt_max: float = 1.0  # m/s, [G10]; the trial v_max caps it too [G12]
     search_yaw_rate: float = math.radians(45.0)  # [G10], brief §6
     w_min_px: float = 4.0  # [G2]
     r_assume: float = 15.0  # [G2]
@@ -127,7 +131,7 @@ class GuidanceConfig:
     nose_clearance_m: float = 0.3  # [G3] s_touch
     t_overrun_s: float = 0.5  # [G5]
     t_brake_s: float = 1.0  # [G5]
-    v_climb: float = 1.5  # m/s, [G5]
+    v_climb: float = 1.5  # m/s, [G5]; the trial v_max caps it too [G12]
     t_climb_s: float = 2.0  # [G5]
     hold_tol_m: float = 1.0  # [G7]
     hold_time_s: float = 10.0  # [G7]
@@ -492,6 +496,7 @@ class _Terminal:
 
     t0_ms: int
     v_ned: tuple[float, float, float]
+    climb_mps: float  # min(v_climb, trial v_max), [G12]
     fly_end_s: float
     brake_end_s: float
     climb_end_s: float
@@ -537,7 +542,8 @@ class Guidance:
             raise ValueError(f"mission view in {state} carries no trial")
         if state is not MissionState.ENGAGED:
             self.law.reset()  # T07 / T09 enter ENGAGED with v_(k-1) = 0 [G3]
-            self._hold_start = None  # [G7] the hold is evaluated in ENGAGED only
+        if state not in _HOLD_STATES:
+            self._hold_start = None  # [G7]: the clock stops outside ENGAGED and COASTING
         if state is not MissionState.TOUCH:
             self._terminal = None  # [G5] resets outside TOUCH
         keep = {view.engaged_track_id, view.candidate_id}
@@ -572,12 +578,14 @@ class Guidance:
         ):
             att_cap = None  # [G1a]: unusable geometry counts as a degraded packet
         self._seen[pkt.track_id] = _Seen(pkt=pkt, t_ms=t_ms, att_cap=att_cap)
-        if state is not MissionState.ENGAGED:
+        if state is MissionState.ACQUIRING:
             return []
         att_now = att.attitude_at(t_ms)
         if att_cap is None or att_now is None:  # [G1a] at this input's stamp
-            self._hold_start = None
+            self._hold_start = None  # [G7]: degraded attitude stops the clock, coasting or not
             return []
+        if state is not MissionState.ENGAGED:
+            return []  # COASTING: the [G7] clock runs on; no event on a coasting packet
         if trial.trial_type is TrialType.TOUCH:
             return self._commit_gate(pkt, t_ms, trial, att_cap)
         return self._hold(pkt, t_ms, trial, att_cap, att_now.yaw)
@@ -604,6 +612,7 @@ class Guidance:
         self._terminal = _Terminal(
             t0_ms=t_ms,
             v_ned=(float(v_c * los[0]), float(v_c * los[1]), float(v_c * los[2])),
+            climb_mps=min(cfg.v_climb, trial.v_max),
             fly_end_s=fly_end,
             brake_end_s=fly_end + cfg.t_brake_s,
             climb_end_s=fly_end + cfg.t_brake_s + cfg.t_climb_s,
@@ -636,12 +645,21 @@ class Guidance:
     def _hold(
         self, pkt: TrackPacket, t_ms: int, trial: PrimeParams, att_cap: Attitude, yaw_now: float
     ) -> list[GuidanceEvent]:
-        """[G7]: ``|q| <= hold_tol_m`` without a break for ``hold_time_s``."""
+        """[G7] (E1-D14) on an engaged-track packet in ``ENGAGED``; the caller
+        checked attitude ([G1a]).
+
+        The clock starts at a packet with ``|q| <= hold_tol_m`` and stops at one
+        with ``|q| > hold_tol_m`` (or ``q`` not finite). It runs on while the
+        track coasts: nothing resets it in ``COASTING`` (:meth:`_observe`), and
+        a coasting packet seen in ``ENGAGED`` is a prediction, not a
+        measurement, so it does not start, stop or complete the hold.
+        ``hold_complete`` comes on the first real packet at which the clock has
+        run ``hold_time_s``.
+        """
         cfg = self.config
         if self._hold_done:
             return []
         if pkt.state is TrackState.COASTING:
-            self._hold_start = None
             return []
         obs = make_observation(pkt, self.cam, att_cap, yaw_now, trial.target_width_m, cfg, t_ms)
         q = standoff_offset(obs.p_ned(), trial.d_s, yaw_now)
@@ -726,17 +744,20 @@ class Guidance:
         return VelocityCommand(vn=0.0, ve=0.0, vd=vd, yaw_rate=yaw_rate)
 
     def _altitude_hold(self, snap: VehicleSnapshot, trial: PrimeParams) -> float:
-        """[G10]: ``v_D = clamp(K_alt (rel_alt - search_alt), +-v_alt_max)``; 0 when
-        ``rel_alt`` is unknown (never seen, or the FC link is down, [M2a])."""
+        """[G10], [G12]: ``v_D = clamp(K_alt (rel_alt - search_alt),
+        +-min(v_alt_max, v_max))``; 0 when ``rel_alt`` is unknown (never seen, or
+        the FC link is down, [M2a])."""
         cfg = self.config
         if not snap.fc_link_up or snap.rel_alt_m is None:
             return 0.0
         vd = cfg.K_alt * (snap.rel_alt_m - trial.search_alt)
-        return max(-cfg.v_alt_max, min(cfg.v_alt_max, vd))
+        v_lim = min(cfg.v_alt_max, trial.v_max)
+        return max(-v_lim, min(v_lim, vd))
 
     def _terminal_step(self, t_ms: int) -> tuple[VelocityCommand, list[GuidanceEvent]]:
-        """[G5]: fly, brake, climb, then ``pass_done`` once. Yaw rate 0 throughout;
-        no limiter, no tracker input, attitude degradation ignored."""
+        """[G5]: fly, brake, climb at ``min(v_climb, v_max)`` ([G12]), then
+        ``pass_done`` once. Yaw rate 0 throughout; no limiter, no tracker input,
+        attitude degradation ignored."""
         term = self._terminal
         if term is None:
             return ZERO_COMMAND, []
@@ -747,7 +768,7 @@ class Guidance:
         if elapsed < term.brake_end_s:
             return ZERO_COMMAND, []
         if elapsed < term.climb_end_s:
-            return VelocityCommand(vn=0.0, ve=0.0, vd=-self.config.v_climb, yaw_rate=0.0), []
+            return VelocityCommand(vn=0.0, ve=0.0, vd=-term.climb_mps, yaw_rate=0.0), []
         if term.done:
             return ZERO_COMMAND, []
         term.done = True

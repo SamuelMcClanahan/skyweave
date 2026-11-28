@@ -21,7 +21,10 @@ Why the shape:
 - Lock stickiness ([M7]-[M9], brief 3.2): the candidate and the engaged id
   are written only by the rows the contract names (T05, T06, T07, T10, the
   prime rows) and by the [M9] death clear. No size, hit count, or recency of
-  another track is ever compared.
+  another track is ever compared. An approve may name its track
+  (``params.track_id``, E1-D12); it then engages only when that id is the
+  current candidate, so a candidate that changed after the human looked is
+  never engaged by a late approve ([M8]).
 - Exits are requests ([M10], [M11]): RTL / LAND go to the FC only while the
   newest snapshot says link up and GUIDED, and stop for the rest of that state
   once the pilot or an FC failsafe picked another mode.
@@ -42,6 +45,7 @@ from typing import Any
 from skyweave2.drone.packets import (
     AckPacket,
     AckResult,
+    ApproveParams,
     CommandName,
     CommandPacket,
     Event,
@@ -295,10 +299,15 @@ def _fmt_m(x: float) -> str:
     return "0.000" if out == "-0.000" else out  # §4.6: -0.000 is written 0.000
 
 
+_PARAM_COMMANDS = (CommandName.PRIME, CommandName.APPROVE_ENGAGE)
+
+
 def _fingerprint(cmd: CommandPacket) -> tuple[str, str | None]:
     """[P5a]: the command and its canonical params, never the token. Params
-    count only for ``prime``; the other three ignore them ([P5])."""
-    if cmd.command is not CommandName.PRIME or cmd.params is None:
+    count for ``prime`` and ``approve_engage`` (E1-D12: the same ``cmd_id``
+    naming another ``track_id`` is not a retry); the other two ignore them
+    ([P5])."""
+    if cmd.command not in _PARAM_COMMANDS or cmd.params is None:
         return (cmd.command.value, None)
     params = dict(cmd.params) if isinstance(cmd.params, Mapping) else cmd.params
     return (cmd.command.value, canonical_json(params).decode("ascii"))
@@ -431,7 +440,8 @@ class Mission:
         self._run(_Input(kind=GDE, t=ev.t_ms, first=first, gde=ev))
 
     def on_ground_heartbeat(self, t_ms: int) -> None:
-        """HB input: a UI state poll ([U6]). It matches only "any" rows."""
+        """HB input: a UI state poll that carried the token ([U6], E1-D15).
+        It matches only "any" rows."""
         first = self._begin(HB)
         self._last_ground_hb = t_ms
         self._run(_Input(kind=HB, t=t_ms, first=first))
@@ -539,6 +549,15 @@ class Mission:
             except InvalidParams:
                 return AckResult.REJECTED_PARAMS, None  # never partly applied
         if cmd.command is CommandName.APPROVE_ENGAGE:
+            try:
+                approve = ApproveParams.from_obj(cmd.params)
+            except InvalidParams:
+                return AckResult.REJECTED_PARAMS, None  # [M5]: reached only in ACQUIRING
+            if approve.track_id is not None and approve.track_id != self._candidate:
+                # [M8], E1-D12: the approve names a track that is not the
+                # current candidate (the candidate changed after the human
+                # looked). Nothing is engaged.
+                return AckResult.REJECTED_STATE, None
             since = self._candidate_since
             if since is None or t - since < self._cfg.approve_settle_ms:
                 return AckResult.REJECTED_STATE, None  # [M8]
