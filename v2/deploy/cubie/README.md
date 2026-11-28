@@ -442,7 +442,7 @@ To remove those also (this deletes all recordings on the board), use the
 sudo skyweave-cubie-bundle-<commit>/deploy/install.sh --uninstall --purge
 ```
 
-The install does not remove the OS packages of section 3.
+The uninstall does not remove the OS packages of section 3.
 
 ## 11. Design choices
 
@@ -477,6 +477,7 @@ Tested without the board (2026-11-27):
   the UI address, the UI on the configured address only, no token in the
   log, the recordings or the percepd environment, and `skyweave-run replay`.
   A stand-in for percepd was used, because this revision has no percepd.
+- The clock check, with a false clock (`faketime`) in the container.
 
 NOT tested:
 
@@ -485,4 +486,5 @@ NOT tested:
   work in parallel; the container used a TCP endpoint with no FC).
 - The camera, the udev rule with a real device, and the real percepd.
 - The access point and the UI from a laptop over Wi-Fi.
-- A wrong board clock during a real install.
+- `apt` on the board with a wrong clock.
+- The size of a recording for each hour with a real FC and camera.
