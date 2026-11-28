@@ -30,8 +30,8 @@ readonly UNITS=(skyweave-companion.service skyweave-percepd.service)
 readonly PYTHON_SERIES=3.10
 readonly SITE_DIR=$PREFIX/venv/lib/python$PYTHON_SERIES/site-packages
 # OS packages. None is necessary for the Python environment itself.
-# iproute2 and udev: used by skyweave-run and the camera rule.
-# v4l-utils and rsync: used by the README procedures.
+# udev: the camera rule. iproute2, v4l-utils and rsync: used by the README
+# procedures (ip, v4l2-ctl, rsync).
 readonly APT_PACKAGES=(ca-certificates iproute2 udev v4l-utils rsync)
 # The board has no real-time clock. A clock before this time is wrong
 # (2026-11-01 00:00 UTC). A bundle gives a later value (its build time).
@@ -306,8 +306,8 @@ install_os_packages() {
     return 0
   fi
   warn "apt could not install: ${missing[*]}."
-  warn "The install continues. These packages are for the README procedures and for"
-  warn "the checks in skyweave-run. Install them when the board has internet:"
+  warn "The install continues. These packages are for the camera rule (udev) and for"
+  warn "the README procedures. Install them when the board has internet:"
   warn "  apt-get install ${missing[*]}"
 }
 
@@ -438,6 +438,10 @@ install_files() {
   done
   run install -m 0755 -o root -g root "$SCRIPT_DIR/skyweave-run" "$PREFIX/bin/skyweave-run"
   run install -m 0644 -o root -g root "$SCRIPT_DIR/README.md" "$PREFIX/README.md"
+  # A copy of this script stays on the board for --uninstall.
+  if [ "$SCRIPT_DIR" != "$PREFIX" ]; then
+    run install -m 0755 -o root -g root "$SCRIPT_DIR/install.sh" "$PREFIX/install.sh"
+  fi
   for f in "${UNITS[@]}"; do
     run install -m 0644 -o root -g root "$SCRIPT_DIR/$f" "$UNIT_DIR/$f"
   done
