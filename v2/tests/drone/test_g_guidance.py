@@ -11,7 +11,10 @@ production attitude source go through the real ``Guidance``: a
 ``VehicleState`` fed pymavlink-encoded FC ``ATTITUDE`` frames through
 ``ingest``, the way fc_link and replay feed it (finding DT-2). ``ATTITUDE``
 carries its angles as float32, so attitude-derived values match the hand
-numbers to 1e-6. Nothing we own is mocked.
+numbers to 1e-6. Nothing we own is mocked. One [G7] test (E1-D14) runs the
+real ``CompanionCore`` (tracker, mission, guidance) on detection frames, so
+the hold is checked with the states and coasting packets that the tracker
+and the mission really produce.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import pytest
 from pymavlink.dialects.v20 import ardupilotmega as mavlink2
 
 from skyweave2.drone.camera import CameraModel
+from skyweave2.drone.core import CompanionCore, CoreConfig
 from skyweave2.drone.guidance import (
     LAWS,
     Guidance,
@@ -40,6 +44,10 @@ from skyweave2.drone.guidance import (
 )
 from skyweave2.drone.mission import MissionView
 from skyweave2.drone.packets import (
+    Box,
+    CommandName,
+    CommandPacket,
+    DetectionPacket,
     MissionState,
     PrimeParams,
     TrackPacket,
@@ -645,44 +653,223 @@ def test_g5_terminal_resets_outside_touch() -> None:
 def _hold_events(
     d_s: float,
     *,
-    coast_at: int | None = None,
+    coast: tuple[int, ...] = (),
     coast_state: MissionState = S.COASTING,
+    far: tuple[int, ...] = (),
+    no_attitude: tuple[int, int] | None = None,
+    dead_at: int | None = None,
     until: int = 16_000,
 ) -> list[tuple[GuidanceEventKind, int]]:
-    """Packets every 100 ms (input stamp t, t_cap t - 20) of a level target
-    5 m north (principal point, w = 200, W = 1); one coasting packet at
-    ``coast_at``, seen with the mission in ``coast_state``."""
+    """Engaged-track packets every 100 ms (input stamp t, t_cap t - 20) of a
+    level target 5 m north (principal point, w = 200, W = 1), seen in ENGAGED.
+
+    - ``coast``: the packets at these stamps are coasting, seen with the
+      mission in ``coast_state``.
+    - ``far``: the packets at these stamps show the target 10 m north (w = 100).
+    - ``no_attitude``: the FC sends no ATTITUDE frame strictly between these
+      two stamps ([F3]).
+    - ``dead_at``: the packet at this stamp is the track's final one ([P2a],
+      misses = coast_cap + 1 = 21), seen after T10 (``LOST``, no engaged id).
+    """
     trial = PrimeParams(trial_type=TrialType.STANDOFF, d_s=d_s)
-    g, fc = _guidance(), _steady(-100, until)
+    g = _guidance()
+    gap = no_attitude or (0, 0)
+    fc = _Fc(*(_att(t) for t in range(-100, until + 1, 20) if not gap[0] < t < gap[1]))
     eng, coasting = _view(S.ENGAGED, trial, engaged=ID), _view(coast_state, trial, engaged=ID)
     out = []
     for t in range(0, until + 1, 100):
-        if t == coast_at:
+        if t == dead_at:
+            pkt = _pkt(t_cap=t - 20, w=200.0, state=TrackState.COASTING, hits=0, misses=21)
+            view = _view(S.LOST, trial)
+        elif t in coast:
             pkt = _pkt(t_cap=t - 20, w=200.0, state=TrackState.COASTING, hits=0, misses=1)
-            out += [(e.kind, e.t_ms) for e in g.on_track(pkt, t, coasting, fc(t))]
+            view = coasting
         else:
-            pkt = _pkt(t_cap=t - 20, w=200.0)
-            out += [(e.kind, e.t_ms) for e in g.on_track(pkt, t, eng, fc(t))]
+            pkt, view = _pkt(t_cap=t - 20, w=100.0 if t in far else 200.0), eng
+        out += [(e.kind, e.t_ms) for e in g.on_track(pkt, t, view, fc(t))]
     return out
 
 
-def test_g7_hold_complete_after_hold_time_reset_by_coasting() -> None:
-    """[G7]: hold_complete once |q| <= hold_tol_m held without a break for
-    hold_time_s, on engaged-track input stamps; a coasting packet breaks it.
+def test_g7_hold_complete_after_hold_time_and_tolerance_boundary() -> None:
+    """[G7]: hold_complete once the clock, started at an engaged-track packet
+    in ENGAGED with |q| <= hold_tol_m, has run hold_time_s; no dropout here.
 
     Hand: target 5 m north, d_s 4.5 -> |q| = 0.5 <= 1: first in-tolerance
     packet at 0 -> hold_complete at 10000 (not 9900), exactly once.
-    Coasting at 5000, confirmed again at 5100 -> hold_complete at 15100.
     Tolerance boundary: d_s 4.0 -> |q| = 1.0 holds (event at 10000);
     d_s 3.99 -> |q| = 1.01 never holds.
     """
     hold = GuidanceEventKind.HOLD_COMPLETE
     assert _hold_events(4.5) == [(hold, 10_000)]
-    assert _hold_events(4.5, coast_at=5_000) == [(hold, 15_100)]
-    # the packet itself breaks the hold, whatever the view says
-    assert _hold_events(4.5, coast_at=5_000, coast_state=S.ENGAGED) == [(hold, 15_100)]
     assert _hold_events(4.0, until=11_000) == [(hold, 10_000)]
     assert _hold_events(3.99, until=11_000) == []
+
+
+def test_g7_e1d14_hold_clock_runs_through_coasting() -> None:
+    """[G7], E1-D14 (closes E1-F16): the hold clock keeps running while the
+    engaged track coasts, and hold_complete comes only on a real (non-coasting)
+    engaged-track packet in ENGAGED.
+
+    Hand (target 5 m north, d_s 4.5, |q| = 0.5; the clock starts at 0, so it
+    has run hold_time_s = 10 s at 10000):
+    - coasting packets at 5000..5300 (mission COASTING), confirmed again at
+      5400: hold_complete at 10000, the same stamp as with no dropout (the
+      clause before E1-D14 restarted the clock: 15400).
+    - coasting packets at 9900..10200: the time has run at 10000, but no
+      coasting packet completes the hold; the next real packet, 10300, does.
+    - a coasting packet seen with the mission still in ENGAGED (T07 fired on
+      it, so T08 could not, [M4]) neither stops nor completes the hold: one at
+      5000 -> 10000; one at 10000 -> 10100.
+    """
+    hold = GuidanceEventKind.HOLD_COMPLETE
+    assert _hold_events(4.5, coast=(5_000, 5_100, 5_200, 5_300)) == [(hold, 10_000)]
+    assert _hold_events(4.5, coast=(9_900, 10_000, 10_100, 10_200)) == [(hold, 10_300)]
+    assert _hold_events(4.5, coast=(5_000,), coast_state=S.ENGAGED) == [(hold, 10_000)]
+    assert _hold_events(4.5, coast=(10_000,), coast_state=S.ENGAGED) == [(hold, 10_100)]
+
+
+def test_g7_e1d14_hold_clock_restarts_on_tolerance_attitude_and_loss() -> None:
+    """[G7], E1-D14, [G1a]: the clock stops, and a later hold starts from zero,
+    when an engaged-track packet in ENGAGED has |q| > hold_tol_m, when attitude
+    is degraded, or when the state is neither ENGAGED nor COASTING.
+
+    Hand (target 5 m north, d_s 4.5; clock from 0; each break is at 5000 and
+    the next good packet, 5100, restarts the clock -> hold_complete at 15100):
+    - tolerance: the packet at 5000 has w = 100 -> Z = 10 m, |q| = 5.5 > 1.
+    - attitude, in ENGAGED: no ATTITUDE frame between 4800 and 5100. At 4900
+      the newest sample is 100 ms old (not "more than" attitude_bound_ms); at
+      5000 it is 200 ms old: degraded. At 5100 a fresh sample is in.
+    - attitude, while coasting: the same gap with a coasting packet at 5000
+      (mission COASTING). Without the gap that packet leaves the clock running
+      (test above); with it the clock stops.
+    - LOST: the packet at 5000 is the track's final one; the mission is in
+      LOST when guidance sees it (T10).
+    """
+    hold = GuidanceEventKind.HOLD_COMPLETE
+    assert _hold_events(4.5, far=(5_000,)) == [(hold, 15_100)]
+    assert _hold_events(4.5, no_attitude=(4_800, 5_100)) == [(hold, 15_100)]
+    assert _hold_events(4.5, no_attitude=(4_800, 5_100), coast=(5_000,)) == [(hold, 15_100)]
+    assert _hold_events(4.5, dead_at=5_000) == [(hold, 15_100)]
+
+
+_HOLD_BOX = Box(x=CX - 100.0, y=CY - 100.0, w=200.0, h=200.0, conf=0.9)
+"""A level target 5 m north of a level, north-facing vehicle (W = 1 m)."""
+
+
+def _closed_loop_hold(dropout: range) -> list[tuple[int, str]]:
+    """One standoff trial (d_s 4.5 m) through the real core: tracker, mission
+    and guidance wired as in production ([R3], E2-D5). Returns the mission's
+    events as ``(stamp, name)``, read from the mission state packets.
+
+    Inputs on a 10 ms grid from board ms 1000: FC frames every 20 ms (ATTITUDE;
+    every 200 ms also HEARTBEAT, EXTENDED_SYS_STATE and GLOBAL_POSITION_INT),
+    a UI poll every 1000 ms, a tick every 50 ms. The pilot's switch is in
+    STABILIZE until 2000, then GUIDED (T03). The vehicle "takes off" at once:
+    armed, in the air at 10 m, as soon as the mission has left PRIMED. It never
+    moves and the target never moves, so every detection is ``_HOLD_BOX``.
+    Detection frames: t_cap every 20 ms from 3000, received 10 ms later;
+    frames with t_cap in ``dropout`` have no box. The human approves 1100 ms
+    after each ``candidate:`` event ([M8]: settle 1000 ms).
+    """
+    core = CompanionCore(CoreConfig().with_tracker(1_000))
+    trial = PrimeParams(trial_type=TrialType.STANDOFF, d_s=4.5)
+    events: list[tuple[int, str]] = []
+    approve_at: list[int] = []
+
+    def take(out: Any) -> None:
+        for pkt in out.mission_states:
+            for ev in pkt.events:
+                events.append((ev.t, ev.name))
+                if ev.name.startswith("candidate:"):
+                    approve_at.append(ev.t + 1_100)
+
+    def command(t: int, name: CommandName, params: Any = None) -> None:
+        cmd = CommandPacket(cmd_id=f"ui-{t}", token="test-token", command=name, params=params)
+        take(core.on_command(cmd, True, t))
+
+    for t in range(1_000, 20_500, 10):
+        if t % 20 == 0:
+            flying = core.mission.state not in (None, S.PRIMED)
+            msgs = [FC.attitude_encode(t + FC_BOOT_MS, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)]
+            if t % 200 == 0:
+                base = mavlink2.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+                if flying:
+                    base |= mavlink2.MAV_MODE_FLAG_SAFETY_ARMED
+                landed = LandedState.IN_AIR if flying else LandedState.ON_GROUND
+                rel_alt_mm = 10_000 if flying else 0
+                msgs += [
+                    FC.heartbeat_encode(
+                        mavlink2.MAV_TYPE_QUADROTOR,
+                        mavlink2.MAV_AUTOPILOT_ARDUPILOTMEGA,
+                        base,
+                        4 if t >= 2_000 else 0,  # GUIDED, STABILIZE
+                        mavlink2.MAV_STATE_ACTIVE,
+                    ),
+                    FC.extended_sys_state_encode(0, int(landed)),
+                    FC.global_position_int_encode(
+                        t + FC_BOOT_MS, 0, 0, rel_alt_mm, rel_alt_mm, 0, 0, 0, 0
+                    ),
+                ]
+            core.on_mavlink_rx(b"".join(bytes(m.pack(FC)) for m in msgs), t)
+        if t % 1_000 == 0:
+            take(core.on_ground_heartbeat(t))
+        if t == 1_300:
+            command(t, CommandName.PRIME, trial.to_obj())
+        if t in approve_at:
+            command(t, CommandName.APPROVE_ENGAGE)
+        if t % 20 == 10 and t >= 3_010:
+            t_cap = t - 10
+            boxes = () if t_cap in dropout else (_HOLD_BOX,)
+            det = DetectionPacket(t_cap=t_cap, frame_seq=t_cap // 20, boxes=boxes)
+            take(core.on_detection(det, t))
+        if t % 50 == 0:
+            take(core.on_tick(t))
+    return events
+
+
+def test_g7_e1d14_closed_loop_hold_survives_a_short_dropout_and_restarts_after_lost() -> None:
+    """[G7], E1-D14, with T08/T09/T10 and [P2a] through the real tracker,
+    mission and guidance: a detection dropout shorter than coast_cap does not
+    restart the hold clock; one longer than coast_cap (LOST) does.
+
+    Hand: the track confirms on its third frame (t_cap 3040, received 3050):
+    candidate at 3050, approve and T07 at 4150. The detection received at 4150
+    (after the approve) gives the first engaged-track packet in ENGAGED, in
+    tolerance (|q| = 0.5 m): the clock starts at 4150 and has run 10 s at
+    14150, where a frame arrives.
+    - no dropout: hold_complete, then T12, at 14150.
+    - 10 frames without a box (t_cap 8000..8180, coast_cap 20): T08 at 8010,
+      T09 at 8210 (t_cap 8200), and hold_complete still at 14150 (the clause
+      before E1-D14: 18210).
+    - 30 frames without a box (t_cap 8000..8580): the 21st miss (t_cap 8400)
+      is the final packet, T10 at 8410. Frames resume at t_cap 8600; the new
+      track confirms at 8650, approve and T07 at 9750, the clock starts from
+      zero at the packet received at 9750: hold_complete at 19750.
+    """
+    keep = (
+        "transition:ENGAGED->COASTING",
+        "transition:COASTING->ENGAGED",
+        "transition:COASTING->LOST",
+        "hold_complete",
+        "transition:ENGAGED->COMPLETE",
+    )
+
+    def run(dropout: range) -> list[tuple[int, str]]:
+        return [(t, name) for t, name in _closed_loop_hold(dropout) if name in keep]
+
+    done = [(14_150, "hold_complete"), (14_150, "transition:ENGAGED->COMPLETE")]
+    assert run(range(0)) == done
+    assert run(range(8_000, 8_200, 20)) == [
+        (8_010, "transition:ENGAGED->COASTING"),
+        (8_210, "transition:COASTING->ENGAGED"),
+        *done,
+    ]
+    assert run(range(8_000, 8_600, 20)) == [
+        (8_010, "transition:ENGAGED->COASTING"),
+        (8_410, "transition:COASTING->LOST"),
+        (19_750, "hold_complete"),
+        (19_750, "transition:ENGAGED->COMPLETE"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +989,125 @@ def test_g11_setpoint_cadence() -> None:
     g.step(1000, _view(S.LOST), fc(1000), _snap(1000))
     assert not g.step_due(1050) and not g.step_due(1099)
     assert g.step_due(1100)
+
+
+# ---------------------------------------------------------------------------
+# [G12] trial speed cap (E1-D13)
+# ---------------------------------------------------------------------------
+
+
+def test_g12_e1d13_trial_v_max_caps_altitude_hold_and_terminal_climb() -> None:
+    """[G12], [G10], [G5], E1-D13 (closes E1-F15): the altitude hold clamps at
+    +-min(v_alt_max, v_max) and the terminal climb flies min(v_climb, v_max).
+
+    Hand (search_alt 10, K_alt 0.5, v_alt_max 1.0, v_climb 1.5):
+    - v_max 0.5: both capped at 0.5. v_max 1.2: altitude hold 1.0, climb 1.2.
+      v_max 2.5 (the §9 default, the E1 gate's prime): 1.0 and 1.5, the values
+      before E1-D13.
+    - SEARCH: rel_alt 14 -> K_alt * 4 = 2.0 -> +cap; rel_alt 7 -> -1.5 -> -cap;
+      rel_alt 10.6 -> 0.3, under every cap; yaw rate 45 deg/s.
+    - ACQUIRING, candidate at the principal point, rel_alt 14: (0, 0, +cap, 0).
+    - Terminal: touch trial alpha 0.2, centered w = 400 -> r = 2.5 m north,
+      commit stamp 10000. Fly (v_max, 0, 0) for 2.5 / v_max + 0.5 s, brake 1 s,
+      climb 2 s. v_max 0.5: climb over 6.5..8.5 s, sampled at 17000; v_max
+      1.2: 3.583..5.583 s, sampled at 14000; v_max 2.5: 2.5..4.5 s, at 13000.
+    """
+    for v_max, alt_cap, climb, t_climb in (
+        (0.5, 0.5, 0.5, 17_000),
+        (1.2, 1.0, 1.2, 14_000),
+        (2.5, 1.0, 1.5, 13_000),
+    ):
+        standoff = PrimeParams(trial_type=TrialType.STANDOFF, v_max=v_max)
+        at_1100 = _steady(0, 2000)(1100)
+        search = _view(S.SEARCH, standoff)
+        for rel_alt, vd in ((14.0, alt_cap), (7.0, -alt_cap), (10.6, 0.3)):
+            cmd, _ = _guidance().step(1100, search, at_1100, _snap(1100, rel_alt=rel_alt))
+            _approx(_cmd(cmd), (0.0, 0.0, vd, math.pi / 4))
+        acq = _view(S.ACQUIRING, standoff, candidate=ID)
+        g, fc = _guidance(), _steady(0, 2000)
+        g.on_track(_pkt(t_cap=1000), 1010, acq, fc(1010))
+        cmd, _ = g.step(1100, acq, fc(1100), _snap(1100, rel_alt=14.0))
+        _approx(_cmd(cmd), (0.0, 0.0, alt_cap, 0.0))
+
+        touch = PrimeParams(trial_type=TrialType.TOUCH, alpha=0.2, v_max=v_max)
+        g, fc = _guidance(), _steady(9000, 10_100)
+        eng, tch = _view(S.ENGAGED, touch, engaged=ID), _view(S.TOUCH, touch, engaged=ID)
+        (ev,) = g.on_track(_pkt(t_cap=9950, w=400.0, hits=5), 10_000, eng, fc(10_000))
+        assert ev.kind is GuidanceEventKind.COMMIT
+        _approx(_cmd(g.step(10_100, tch, fc(10_100), _snap(10_100))[0]), (v_max, 0.0, 0.0, 0.0))
+        cmd, events = g.step(t_climb, tch, fc(t_climb), _snap(t_climb))
+        _approx(_cmd(cmd), (0.0, 0.0, -climb, 0.0))
+        assert events == []
+
+
+def _speeds_by_state(trial: PrimeParams) -> dict[MissionState, list[float]]:
+    """One touch trial through every mission state that sends setpoints; the
+    3D speed of each command guidance outputs, by state.
+
+    The target is 10 m north and 5 m up (v = cy - 500, w = 100), so the
+    pursuit command has a vertical part: Kp q = 0.8 (10 - 1.002, 0, -5), about
+    8.2 m/s before the clamp. The altitude is far off (30 m, then 0 m, against
+    search_alt 10). ENGAGED steps are 1 s apart (a_max 2 m/s^2), so the
+    limiter lets the command reach any v_max up to 5 m/s within four steps.
+    The commit packet is centered with w = 800 (r = 1.25 m); TOUCH steps every
+    100 ms cover fly, brake, climb and pass_done for every v_max >= 0.3.
+    """
+    g = _guidance()
+    fc = _Fc(*(_att(t) for t in range(0, 20_001, 50)))
+    out: dict[MissionState, list[float]] = {}
+
+    def step(t: int, state: MissionState, *, rel_alt: float | None = 10.0, **ids: int) -> list:
+        cmd, events = g.step(t, _view(state, trial, **ids), fc(t), _snap(t, rel_alt=rel_alt))
+        assert cmd is not None
+        out.setdefault(state, []).append(math.sqrt(cmd.vn**2 + cmd.ve**2 + cmd.vd**2))
+        return events
+
+    for t, rel_alt in ((1000, 30.0), (1100, 0.0), (1200, None)):
+        step(t, S.SEARCH, rel_alt=rel_alt)
+    far = {"v": CY - 500.0, "w": 100.0}
+    acq, eng = _view(S.ACQUIRING, trial, candidate=ID), _view(S.ENGAGED, trial, engaged=ID)
+    g.on_track(_pkt(t_cap=1200, **far), 1250, acq, fc(1250))
+    for t, rel_alt in ((1300, 30.0), (1400, 0.0)):
+        step(t, S.ACQUIRING, rel_alt=rel_alt, candidate=ID)
+    assert g.on_track(_pkt(t_cap=1400, **far), 1450, eng, fc(1450)) == []
+    for t in (2000, 3000, 4000, 5000):
+        step(t, S.ENGAGED, engaged=ID)
+    coast = _pkt(t_cap=5000, state=TrackState.COASTING, hits=0, misses=1, **far)
+    g.on_track(coast, 5050, _view(S.COASTING, trial, engaged=ID), fc(5050))
+    step(5100, S.COASTING, engaged=ID)
+    (commit,) = g.on_track(_pkt(t_cap=5150, w=800.0, hits=5), 5200, eng, fc(5200))
+    assert commit.kind is GuidanceEventKind.COMMIT
+    done = []
+    for t in range(5300, 13_600, 100):
+        done += step(t, S.TOUCH, engaged=ID)
+    assert [e.kind for e in done] == [GuidanceEventKind.PASS_DONE]
+    for i, state in enumerate((S.MISS, S.COMPLETE, S.ABORT, S.RETURN, S.LAND, S.LOST)):
+        step(13_600 + 100 * i, state)
+    return out
+
+
+def test_g12_e1d13_no_command_is_faster_than_the_trial_v_max() -> None:
+    """[G12], E1-D13, the [S8] setpoint floor: in every state, no velocity
+    command guidance outputs has a 3D norm above the trial's v_max.
+
+    Hand (peaks per state; v_alt_max 1.0, v_climb 1.5):
+    - SEARCH, ACQUIRING: the altitude hold saturates, min(1.0, v_max).
+    - ENGAGED: the pursuit clamp, v_max, pointing up and north.
+    - TOUCH: the fly phase, v_max.
+    - COASTING, LOST and the exit states: zero.
+    The norm of a clamped vector is v_max to float rounding (1e-12 relative
+    here; the [S8] floor allows 1e-6 for the float32 wire).
+    """
+    for v_max in (0.3, 0.5, 1.0, 1.2, 2.5, 5.0):
+        speeds = _speeds_by_state(PrimeParams(trial_type=TrialType.TOUCH, v_max=v_max))
+        peak = {state: max(vals) for state, vals in speeds.items()}
+        assert max(peak.values()) <= v_max * (1.0 + 1e-12), (v_max, peak)
+        assert peak[S.SEARCH] == pytest.approx(min(1.0, v_max), abs=1e-9)
+        assert peak[S.ACQUIRING] == pytest.approx(min(1.0, v_max), abs=1e-9)
+        assert peak[S.ENGAGED] == pytest.approx(v_max, abs=1e-9)
+        assert peak[S.TOUCH] == pytest.approx(v_max, abs=1e-9)
+        zero = (S.COASTING, S.LOST, S.MISS, S.COMPLETE, S.ABORT, S.RETURN, S.LAND)
+        assert [peak[state] for state in zero] == [0.0] * len(zero)
 
 
 # ---------------------------------------------------------------------------
