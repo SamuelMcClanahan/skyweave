@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+# skyweave-run: start one SkyWeave drone process on the Cubie (contract B-D3).
+#
+#   skyweave-run companion   started by skyweave-companion.service
+#   skyweave-run percepd     started by skyweave-percepd.service
+#   skyweave-run check       run by the operator (as root): test the
+#                            configuration, start nothing
+#
+# The configuration comes from the environment. systemd loads it from
+# /etc/skyweave/skyweave.env (EnvironmentFile=). This script builds the two
+# command lines from the *_CMD templates in that file, tests them, and then
+# replaces itself with the process (exec).
+#
+# Exit codes: 78 = configuration error. systemd does NOT start the service
+#                  again (RestartPreventExitStatus=78). Fix the file first.
+#             1  = not ready (for example the UI address is not up yet).
+#                  systemd starts the service again after a delay.
+#
+# This script never prints the UI token.
+set -euo pipefail
+export LC_ALL=C
+
+PREFIX="${SKYWEAVE_PREFIX:-/opt/skyweave}"
+ENV_FILE="${SKYWEAVE_ENV_FILE:-/etc/skyweave/skyweave.env}"
+SERVICE_USER=skyweave
+EX_CONFIG=78
+PLACEHOLDER=CHANGE_ME
+
+say() { printf 'skyweave-run: %s\n' "$*" >&2; }
+
+config_error() {
+  say "CONFIG ERROR: $*"
+  say "Edit $ENV_FILE (compare with $ENV_FILE.template). Then restart the service."
+  exit "$EX_CONFIG"
+}
+
+not_ready() {
+  say "NOT READY: $*"
+  exit 1
+}
+
+# need NAME: the variable NAME is set, is not empty, and is not a placeholder.
+need() {
+  local name=$1
+  local value=${!name-}
+  [ -n "$value" ] || config_error "$name is empty or not set."
+  case "$value" in
+    *"$PLACEHOLDER"*) config_error "$name still contains the placeholder $PLACEHOLDER." ;;
+  esac
+}
+
+# need_int NAME MIN MAX: NAME is a decimal integer in [MIN, MAX].
+need_int() {
+  local name=$1 min=$2 max=$3
+  need "$name"
+  local value=${!name}
+  case "$value" in
+    *[!0-9]*) config_error "$name must be a whole number (digits only)." ;;
+  esac
+  if [ "${#value}" -gt 9 ] || [ "$((10#$value))" -lt "$min" ] || [ "$((10#$value))" -gt "$max" ]; then
+    config_error "$name must be from $min to $max."
+  fi
+}
+
+uses() { case "$1" in *"{$2}"*) return 0 ;; *) return 1 ;; esac; }
+
+# fill TEMPLATE NAME VALUE [NAME VALUE]...: replace each {NAME} with VALUE.
+fill() {
+  local text=$1
+  shift
+  while [ $# -ge 2 ]; do
+    text=${text//"{$1}"/$2}
+    shift 2
+  done
+  printf '%s' "$text"
+}
+
+no_field_left() {
+  case "$2" in
+    *"{"*"}"*) config_error "$1 contains a {field} that skyweave-run does not know." ;;
+  esac
+}
+
+# module_exists VARIABLE COMMAND...: the module after "-m" is in the installed code.
+module_exists() {
+  local name=$1 prev="" word module=""
+  shift
+  for word in "$@"; do
+    if [ "$prev" = "-m" ]; then
+      module=$word
+      break
+    fi
+    prev=$word
+  done
+  [ -n "$module" ] || return 0
+  if ! python - "$module" <<'PY' >/dev/null 2>&1; then
+import importlib.util
+import sys
+
+sys.exit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)
+PY
+    config_error "$name starts the module $module, but the installed code does not" \
+      "have it (see $PREFIX/app/REVISION). Install a source that has it."
+  fi
+}
+
+ipv4_on_board() {
+  local addresses
+  command -v ip >/dev/null 2>&1 || return 0
+  addresses=$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1) || return 0
+  printf '%s\n' "$addresses" | grep -qxF -- "$1"
+}
+
+free_mb() { df -Pk "$1" | awk 'NR == 2 { print int($4 / 1024) }'; }
+
+# --- companion ---------------------------------------------------------------
+
+# Tests with no side effects. Sets COMPANION_TEMPLATE (all fields but {record}).
+companion_checks() {
+  need SKYWEAVE_COMPANION_CMD
+  local cmd=$SKYWEAVE_COMPANION_CMD
+
+  # [P5c] the token. Tested, never printed.
+  local token=${SKYWEAVE_UI_TOKEN-}
+  [ -n "$token" ] || config_error "SKYWEAVE_UI_TOKEN is empty. Set the ground UI token."
+  case "$token" in
+    *[!A-Za-z0-9._-]*)
+      config_error "SKYWEAVE_UI_TOKEN has a character that is not permitted." \
+        "Use letters, digits, '.', '_' and '-' only."
+      ;;
+  esac
+  if [ "${#token}" -lt 8 ] || [ "${#token}" -gt 256 ]; then
+    config_error "SKYWEAVE_UI_TOKEN must have 8 to 256 characters."
+  fi
+
+  # B-D1: no setpoints on the bench.
+  case " $cmd " in
+    *" --enable-setpoints"*)
+      config_error "SKYWEAVE_COMPANION_CMD contains --enable-setpoints." \
+        "The bench decision B-D1 does not permit setpoints to a real FC."
+      ;;
+  esac
+
+  if uses "$cmd" fc_device; then
+    need SKYWEAVE_FC_DEVICE
+    if [ ! -c "$SKYWEAVE_FC_DEVICE" ]; then
+      say "WARNING: FC device $SKYWEAVE_FC_DEVICE does not exist. The companion starts" \
+        "and tries the FC link again and again. The UI shows 'FC link down'."
+    elif [ ! -r "$SKYWEAVE_FC_DEVICE" ] || [ ! -w "$SKYWEAVE_FC_DEVICE" ]; then
+      say "WARNING: user $(id -un) cannot read and write $SKYWEAVE_FC_DEVICE." \
+        "Do 'ls -l $SKYWEAVE_FC_DEVICE' and put the user in the group of the device" \
+        "(usually dialout)."
+    fi
+  fi
+  if uses "$cmd" fc_baud; then need_int SKYWEAVE_FC_BAUD 1200 4000000; fi
+  if uses "$cmd" ui_port; then need_int SKYWEAVE_UI_PORT 1 65535; fi
+  if uses "$cmd" ui_host; then
+    need SKYWEAVE_UI_HOST
+    if ! [[ $SKYWEAVE_UI_HOST =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      config_error "SKYWEAVE_UI_HOST must be an IPv4 address (for example the" \
+        "access-point address of the Cubie), not a name."
+    fi
+    case "$SKYWEAVE_UI_HOST" in
+      0.0.0.0 | 127.0.0.1) ;;
+      *)
+        ipv4_on_board "$SKYWEAVE_UI_HOST" || not_ready "the UI address" \
+          "$SKYWEAVE_UI_HOST is not on a network interface of this board. Is the" \
+          "access point up? Do 'ip -4 addr'. No recording file was made."
+        ;;
+    esac
+  fi
+  if uses "$cmd" record; then
+    need SKYWEAVE_RECORD_DIR
+    need_int SKYWEAVE_RECORD_MAX_MB 1 10000000
+    need_int SKYWEAVE_RECORD_MIN_FREE_MB 0 10000000
+    if [ ! -d "$SKYWEAVE_RECORD_DIR" ] || [ ! -w "$SKYWEAVE_RECORD_DIR" ]; then
+      config_error "user $(id -un) cannot write to the recordings directory" \
+        "$SKYWEAVE_RECORD_DIR."
+    fi
+  fi
+
+  COMPANION_TEMPLATE=$(fill "$cmd" \
+    fc_device "${SKYWEAVE_FC_DEVICE-}" fc_baud "${SKYWEAVE_FC_BAUD-}" \
+    ui_host "${SKYWEAVE_UI_HOST-}" ui_port "${SKYWEAVE_UI_PORT-}")
+  no_field_left SKYWEAVE_COMPANION_CMD "$(fill "$COMPANION_TEMPLATE" record x)"
+  local words
+  read -r -a words <<<"$COMPANION_TEMPLATE"
+  module_exists SKYWEAVE_COMPANION_CMD "${words[@]}"
+}
+
+# Disk safety: delete the oldest recordings until the directory is below the
+# limit. The newest recording always stays. Names sort in start order.
+prune_recordings() {
+  local dir=$1 limit_kb=$(($2 * 1024))
+  local files used_kb
+  while :; do
+    files=("$dir"/rec-*.jsonl)
+    [ -e "${files[0]}" ] || return 0
+    [ "${#files[@]}" -gt 1 ] || return 0
+    used_kb=$(du -sk "$dir" | cut -f1)
+    [ "$used_kb" -gt "$limit_kb" ] || return 0
+    say "recordings use $((used_kb / 1024)) MB, the limit is $2 MB:" \
+      "delete the oldest one, ${files[0]}"
+    rm -f -- "${files[0]}"
+  done
+}
+
+# The next recording name: rec-<sequence>-<boot id>-<UTC time>.jsonl.
+# The sequence number gives the order. The board has no real-time clock, so
+# the UTC time in the name can be wrong.
+next_recording() {
+  local dir=$1 max=0 f n boot stamp path
+  for f in "$dir"/rec-*.jsonl; do
+    [ -e "$f" ] || continue
+    n=${f##*/rec-}
+    n=${n%%-*}
+    case "$n" in '' | *[!0-9]*) continue ;; esac
+    if [ "$((10#$n))" -gt "$max" ]; then max=$((10#$n)); fi
+  done
+  boot=$(tr -d '-' </proc/sys/kernel/random/boot_id 2>/dev/null | cut -c1-8) || boot=""
+  [ -n "$boot" ] || boot=noboot00
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  n=$((max + 1))
+  while :; do
+    path=$(printf '%s/rec-%06d-%s-%s.jsonl' "$dir" "$n" "$boot" "$stamp")
+    [ -e "$path" ] || break
+    n=$((n + 1))
+  done
+  printf '%s' "$path"
+}
+
+run_companion() {
+  companion_checks
+  local cmd=$COMPANION_TEMPLATE record="" free
+  if uses "$cmd" record; then
+    prune_recordings "$SKYWEAVE_RECORD_DIR" "$SKYWEAVE_RECORD_MAX_MB"
+    free=$(free_mb "$SKYWEAVE_RECORD_DIR")
+    if [ "$free" -lt "$SKYWEAVE_RECORD_MIN_FREE_MB" ]; then
+      not_ready "only $free MB free for recordings in $SKYWEAVE_RECORD_DIR" \
+        "(SKYWEAVE_RECORD_MIN_FREE_MB is $SKYWEAVE_RECORD_MIN_FREE_MB)." \
+        "Copy recordings off the board and delete them."
+    fi
+    record=$(next_recording "$SKYWEAVE_RECORD_DIR")
+    say "recording: $record"
+  fi
+  cmd=$(fill "$cmd" record "$record")
+  local words
+  read -r -a words <<<"$cmd"
+  say "start: $cmd"
+  exec "${words[@]}"
+}
+
+# --- percepd -----------------------------------------------------------------
+
+# Tests with no side effects. Sets PERCEPD_COMMAND.
+percepd_checks() {
+  need SKYWEAVE_PERCEPD_CMD
+  local cmd=$SKYWEAVE_PERCEPD_CMD
+  if uses "$cmd" dest; then need SKYWEAVE_DETECTION_DEST; fi
+  if uses "$cmd" camera; then
+    need SKYWEAVE_CAMERA
+    if [ ! -e "$SKYWEAVE_CAMERA" ]; then
+      say "WARNING: camera $SKYWEAVE_CAMERA does not exist. Is the camera connected?" \
+        "If percepd stops, systemd starts it again after a delay."
+    elif [ ! -r "$SKYWEAVE_CAMERA" ] || [ ! -w "$SKYWEAVE_CAMERA" ]; then
+      say "WARNING: user $(id -un) cannot read and write $SKYWEAVE_CAMERA." \
+        "Put the user in the group of the device (usually video)."
+    fi
+  fi
+  if uses "$cmd" model; then
+    need SKYWEAVE_MODEL
+    [ -r "$SKYWEAVE_MODEL" ] || not_ready "user $(id -un) cannot read the model file" \
+      "$SKYWEAVE_MODEL. Copy the model to the board."
+  fi
+  PERCEPD_COMMAND=$(fill "$cmd" camera "${SKYWEAVE_CAMERA-}" \
+    model "${SKYWEAVE_MODEL-}" dest "${SKYWEAVE_DETECTION_DEST-}")
+  no_field_left SKYWEAVE_PERCEPD_CMD "$PERCEPD_COMMAND"
+  local words
+  read -r -a words <<<"$PERCEPD_COMMAND"
+  module_exists SKYWEAVE_PERCEPD_CMD "${words[@]}"
+}
+
+run_percepd() {
+  unset SKYWEAVE_UI_TOKEN # percepd does not need the token
+  percepd_checks
+  local words
+  read -r -a words <<<"$PERCEPD_COMMAND"
+  say "start: $PERCEPD_COMMAND"
+  exec "${words[@]}"
+}
+
+# --- check ---------------------------------------------------------------------
+
+run_check() {
+  if [ -z "${SKYWEAVE_RUN_INNER-}" ]; then
+    # Started by the operator. Load the file the way the services do, as the
+    # service user, so that the file and the permissions get a true test.
+    [ "$(id -u)" -eq 0 ] || {
+      say "run this as root: sudo $0 check"
+      exit 2
+    }
+    [ -f "$ENV_FILE" ] || {
+      say "$ENV_FILE does not exist. Run install.sh first."
+      exit 2
+    }
+    command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ] || {
+      say "systemd is not running here, so 'check' cannot load $ENV_FILE."
+      exit 2
+    }
+    exec systemd-run --quiet --pipe --wait --collect \
+      -p User="$SERVICE_USER" -p EnvironmentFile="$ENV_FILE" \
+      -E SKYWEAVE_RUN_INNER=1 -E SKYWEAVE_PREFIX="$PREFIX" -E SKYWEAVE_ENV_FILE="$ENV_FILE" \
+      "$0" check
+  fi
+  local failed=0 status
+  set +e
+  (
+    set -e
+    companion_checks
+    say "companion command: $(fill "$COMPANION_TEMPLATE" record '<new recording>')"
+    if uses "$SKYWEAVE_COMPANION_CMD" record; then
+      say "recordings: $(free_mb "$SKYWEAVE_RECORD_DIR") MB free, limit" \
+        "$SKYWEAVE_RECORD_MAX_MB MB, minimum free $SKYWEAVE_RECORD_MIN_FREE_MB MB"
+    fi
+  )
+  status=$?
+  if [ "$status" -eq 0 ]; then say "companion: OK"; else
+    say "companion: FAIL"
+    failed=1
+  fi
+  (
+    set -e
+    percepd_checks
+    say "percepd command: $PERCEPD_COMMAND"
+  )
+  status=$?
+  if [ "$status" -eq 0 ]; then say "percepd: OK"; else
+    say "percepd: FAIL"
+    failed=1
+  fi
+  set -e
+  exit "$failed"
+}
+
+# --- main ----------------------------------------------------------------------
+
+export PATH="$PREFIX/venv/bin:$PATH"
+[ -x "$PREFIX/venv/bin/python" ] || {
+  say "CONFIG ERROR: $PREFIX/venv/bin/python does not exist. Run install.sh."
+  exit "$EX_CONFIG"
+}
+
+case "${1-}" in
+  companion) run_companion ;;
+  percepd) run_percepd ;;
+  check) run_check ;;
+  *)
+    say "usage: skyweave-run companion|percepd|check"
+    exit 2
+    ;;
+esac
