@@ -1110,3 +1110,62 @@ def test_c10_e2d5_companion_runs_the_tracker_publishes_tracks_and_replays(
     result = replay(rec)  # [R3]: the tracker re-runs from the detection records
     assert result.mismatch() is None
     assert [p for _, p in result.recorded_tracks] == tracks
+
+
+def test_k1_vd10_companion_without_fc_attitude_makes_no_tracks_and_says_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """[K1], [C10], V-D10 (finding E2a4-F3): the tracker needs the attitude at
+    each frame's t_cap. A companion whose FC is not there (nothing listens on
+    its endpoint) receives detection frames: each is recorded, none becomes a
+    track packet, the tracker counts each as dropped, and the process log
+    says why, at most once per 5 s."""
+    closed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    closed.bind(("127.0.0.1", 0))
+    fc_port = closed.getsockname()[1]
+    closed.close()  # nothing listens here: the FC link never opens
+    tracks_rx, states_rx, health_rx, sender = _udp(), _udp(), _udp(), _udp()
+    clock = _Clock(T0)
+    rec = tmp_path / "bench.jsonl"
+    config = CompanionConfig(
+        fc_endpoint=f"tcp:127.0.0.1:{fc_port}",
+        recording=rec,
+        detection_port=0,
+        command_port=0,
+        track_port=tracks_rx.getsockname()[1],
+        mission_state_port=states_rx.getsockname()[1],
+        fc_link_health_port=health_rx.getsockname()[1],
+        ui_port=0,
+        fc_connect_timeout_s=0.2,
+    )
+
+    def frame(i: int) -> None:
+        det = DetectionPacket(
+            t_cap=clock.t, frame_seq=i, boxes=(Box(x=890.0, y=490.0, w=20.0, h=20.0, conf=0.9),)
+        )
+        sender.sendto(encode(det), comp.detections.address)
+        assert select.select([comp.detections.fileno()], [], [], 2.0)[0]
+        clock.t += 10
+        comp.run_once()
+
+    def warnings() -> list[str]:
+        return [r.getMessage() for r in caplog.records if "no FC attitude" in r.getMessage()]
+
+    try:
+        with caplog.at_level("WARNING"), Companion(config, UI_TOKEN, clock=clock) as comp:
+            comp.start()
+            frame(0)
+            frame(1)
+            assert comp.core.tracker is not None
+            assert comp.core.tracker.degraded_dropped == 2
+            assert len(warnings()) == 1 and "1 detection frames" in warnings()[0]
+            clock.t += 5_000
+            frame(2)
+            assert len(warnings()) == 2 and "3 detection frames" in warnings()[1]
+            assert _drain(tracks_rx, PacketKind.TRACK) == []
+    finally:
+        for s in (tracks_rx, states_rx, health_rx, sender):
+            s.close()
+    records = list(read_records(rec.read_text(encoding="ascii").splitlines()))
+    assert sum(1 for r in records if r.stream is Stream.DETECTION) == 3
+    assert not any(r.stream is Stream.TRACK for r in records)
