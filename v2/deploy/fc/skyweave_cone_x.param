@@ -1,0 +1,180 @@
+# SkyWeave cone X quad: ArduCopter 4.7.x parameter baseline (contract B-D4).
+# Board: Matek H743-SLIM, firmware target MatekH743. Built 2026-11-27.
+# Every value is Provisional. No value is Measured. README.md gives the
+# reason and the source of each value, and the list to check before power-on.
+# Format: NAME,VALUE (Mission Planner, MAVProxy). A line that starts with #
+# is a comment. Do not put a comment after a value.
+# This file holds only the parameters we set on purpose. Calibration
+# results, PID gains and the notch filter are not here (README.md).
+
+# --- 1. Frame and motor outputs (CHECK motor order and spin direction) ---
+FRAME_CLASS,1
+FRAME_TYPE,1
+SERVO1_FUNCTION,33
+SERVO2_FUNCTION,34
+SERVO3_FUNCTION,35
+SERVO4_FUNCTION,36
+
+# --- 2. Serial ports (CHECK the wiring of GPS and receiver) ---
+# SERIAL1 = UART7: companion computer, MAVLink2, 921600 baud, no flow control.
+SERIAL1_PROTOCOL,2
+SERIAL1_BAUD,921
+SERIAL1_OPTIONS,0
+BRD_SER1_RTSCTS,0
+# SERIAL3 = USART2: GPS (u-blox NEO-M9N).
+SERIAL3_PROTOCOL,5
+SERIAL3_BAUD,230
+# SERIAL7 = USART6 (pads TX6, RX6): ExpressLRS receiver, CRSF.
+# BRD_ALT_CONFIG 1 makes pad RX6 a UART input on the MatekH743 firmware.
+BRD_ALT_CONFIG,1
+SERIAL7_PROTOCOL,23
+SERIAL7_OPTIONS,0
+
+# --- 3. Radio: ExpressLRS (CRSF), channels and switches ---
+# RC_PROTOCOLS 512 = CRSF only. RC_OPTIONS 8736 = bits 5, 9 and 13.
+RC_PROTOCOLS,512
+RC_OPTIONS,8736
+RSSI_TYPE,3
+RCMAP_ROLL,1
+RCMAP_PITCH,2
+RCMAP_THROTTLE,3
+RCMAP_YAW,4
+# Channel 6 = the 3-position mode switch: ALT_HOLD / GUIDED / RTL.
+# GUIDED is only on the centre slot (1491 to 1620 us).
+FLTMODE_CH,6
+FLTMODE1,2
+FLTMODE2,2
+FLTMODE3,2
+FLTMODE4,4
+FLTMODE5,6
+FLTMODE6,6
+# Channel 5 = the ExpressLRS arm channel: no function in the FC.
+# Channel 6 = mode switch: no other function.
+# Channel 7 = guarded momentary switch: Motor Emergency Stop.
+# Channel 8 = approve switch: a plain channel, read by the companion.
+RC5_OPTION,0
+RC6_OPTION,0
+RC7_OPTION,31
+RC8_OPTION,0
+ARMING_RUDDER,2
+
+# --- 4. ESC and motors: AM32, DShot300, no bidirectional DShot ---
+MOT_PWM_TYPE,5
+MOT_PWM_MIN,1000
+MOT_PWM_MAX,2000
+# CHECK with the motor test: MOT_SPIN_ARM and MOT_SPIN_MIN.
+MOT_SPIN_ARM,0.10
+MOT_SPIN_MIN,0.15
+MOT_SPIN_MAX,0.95
+MOT_THST_EXPO,0.49
+MOT_THST_HOVER,0.2
+MOT_HOVER_LEARN,2
+# 6S LiPo: 4.2 V and 3.3 V for each cell.
+MOT_BAT_VOLT_MAX,25.2
+MOT_BAT_VOLT_MIN,19.8
+
+# --- 5. Battery monitor and battery failsafe: 6S 1300 mAh ---
+# CHECK the voltage with a multimeter. CHECK the current scale of the ESC.
+BATT_MONITOR,4
+BATT_VOLT_PIN,10
+BATT_CURR_PIN,11
+BATT_VOLT_MULT,11.0
+BATT_AMP_PERVLT,40.0
+BATT_CAPACITY,1300
+BATT_ARM_VOLT,22.1
+BATT_LOW_VOLT,21.6
+BATT_CRT_VOLT,21.0
+BATT_LOW_MAH,260
+BATT_CRT_MAH,130
+BATT_LOW_TIMER,10
+BATT_FS_VOLTSRC,0
+BATT_FS_LOW_ACT,2
+BATT_FS_CRT_ACT,1
+
+# --- 6. Radio, ground station and EKF failsafes ---
+FS_THR_ENABLE,1
+FS_THR_VALUE,975
+RC_FS_TIMEOUT,1.0
+FS_OPTIONS,0
+FS_GCS_ENABLE,0
+FS_EKF_ACTION,1
+FS_EKF_THRESH,0.8
+FS_CRASH_CHECK,1
+
+# --- 7. Fence: cylinder around home, outside the mission's 60 m geofence ---
+FENCE_ENABLE,1
+FENCE_TYPE,3
+FENCE_ACTION,1
+FENCE_RADIUS,80
+FENCE_ALT_MAX,50
+FENCE_MARGIN,2
+
+# --- 8. RTL and LAND ---
+RTL_ALT_M,15
+RTL_CLIMB_MIN_M,0
+RTL_SPEED_MS,5
+RTL_LOIT_TIME,5000
+RTL_ALT_FINAL_M,0
+LAND_SPD_MS,0.5
+
+# --- 9. GUIDED mode ---
+GUID_TIMEOUT,3
+GUID_OPTIONS,0
+
+# --- 10. Arming checks: all on ---
+ARMING_SKIPCHK,0
+
+# --- 11. Compass and EKF sources (CHECK the compass orientation) ---
+COMPASS_ENABLE,1
+COMPASS_USE,1
+COMPASS_EXTERNAL,1
+COMPASS_ORIENT,0
+COMPASS_AUTO_ROT,2
+COMPASS_AUTODEC,1
+COMPASS_LEARN,0
+EK3_SRC1_POSXY,3
+EK3_SRC1_VELXY,3
+EK3_SRC1_POSZ,1
+EK3_SRC1_VELZ,3
+EK3_SRC1_YAW,1
+EK3_GSF_RUN_MASK,3
+EK3_GSF_USE_MASK,3
+
+# --- 12. GPS: u-blox NEO-M9N ---
+GPS1_TYPE,2
+GPS1_GNSS_MODE,0
+GPS_AUTO_CONFIG,1
+
+# --- 13. Start tune for a 5.1 inch propeller (not a tuning result) ---
+INS_GYRO_FILTER,74
+INS_ACCEL_FILTER,10
+ATC_RAT_RLL_FLTD,37
+ATC_RAT_RLL_FLTT,37
+ATC_RAT_PIT_FLTD,37
+ATC_RAT_PIT_FLTT,37
+ATC_RAT_YAW_FLTT,37
+ATC_ACC_R_MAX,1674
+ATC_ACC_P_MAX,1674
+ATC_ACC_Y_MAX,314
+ATC_THR_MIX_MAN,0.1
+ATC_ANGLE_MAX,30
+# CHECK after the first hover: 0.1 and 0.2 times the learned MOT_THST_HOVER.
+PSC_D_ACC_P,0.02
+PSC_D_ACC_I,0.04
+
+# --- 14. Speed limits for the first flights ---
+PILOT_SPD_UP,1.5
+PILOT_SPD_DN,1.0
+LOIT_SPEED_MS,5
+WP_SPD,5
+WP_SPD_UP,1.5
+WP_SPD_DN,1.0
+WP_ACC,2.5
+
+# --- 15. Logging for tuning. The harmonic notch stays off. ---
+LOG_BACKEND_TYPE,1
+LOG_BITMASK,180223
+LOG_DISARMED,0
+INS_LOG_BAT_MASK,1
+INS_LOG_BAT_OPT,4
+INS_HNTCH_ENABLE,0
