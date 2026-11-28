@@ -25,12 +25,11 @@ never tuned on gate seeds):
 - Camera error model: :data:`NOMINAL_CAMERA` is ``camera_sim.PROVISIONAL_NOISE``
   (1 px center jitter, 3 % log-normal size jitter, 0.5 deg pitch and yaw
   boresight error) with its random per-frame dropout set to zero. Dropout is
-  the fault S3 injects on a script; it is not part of a "nominal" world. A
-  random dropout also makes S1 unreachable by construction: [G7] restarts the
-  hold on any coasting packet, so a hold of ``hold_time_s`` at 60 fps needs
-  600 consecutive hits, which at the preset's 2 % per-frame rate happens with
-  probability 0.98^600 (about 5e-6). That interaction is a finding, not a
-  harness setting to hide.
+  the fault S3 injects on a script; it is not part of a "nominal" world. When
+  the gate world was declared, a random dropout also made S1 unreachable: the
+  old [G7] restarted the hold on any coasting packet (E1-F16). E1-D14 changed
+  [G7] so the hold clock runs through a coast, but the gate world is frozen
+  and keeps zero random dropout.
 - Geometry: the target is ahead within +-90 deg of the initial heading (north)
   at 11-26 m and 1-5 m above the search altitude, so it is above the drone's
   horizon during search (brief 3.9) and inside the 60 m geofence.
