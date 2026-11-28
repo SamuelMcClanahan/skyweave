@@ -646,6 +646,27 @@ def test_k_vd10_packet_pixels_are_the_line_of_sight_at_t_cap(cam: CameraModel) -
     assert n > 100
 
 
+def test_k_vd10_absurd_box_positions_never_break_the_tracker() -> None:
+    """[P1], [C7], E1-D11, V-D10: the wire bounds a box position only to a
+    finite number. A box centered absurdly far out of frame must not break
+    the de-rotation: at 1e300 px it has no finite ray and is ignored
+    (counted); at 1e100 px its ray lies along the image plane, 90 deg off the
+    optical axis, and it becomes a track like any other box. A real box in
+    the same frames is tracked as if the others were not there, and every
+    packet passes the wire."""
+    trk, ctl = _tracker(), _tracker()
+    for i in range(6):
+        wild = [
+            Box(x=1e300, y=0.0, w=10.0, h=10.0, conf=0.5),
+            Box(x=-1e100, y=5e99, w=10.0, h=10.0, conf=0.5),
+            Box(x=1e100, y=0.0, w=10.0, h=10.0, conf=0.5),
+        ]
+        got = _feed(trk, _det(i, _box(500.0, 400.0), *wild))
+        (want,) = _feed(ctl, _det(i, _box(500.0, 400.0)))
+        assert got[0] == want
+    assert trk.boxes_unusable == 6 and want.state is C
+
+
 def test_k_vd10_pixels_hold_when_the_line_of_sight_has_no_image() -> None:
     """[P2], V-D10 (finding E2a4-F5): a coasting track's line of sight can
     leave the camera's forward half-space. It then has no pixel. ``u`` and
