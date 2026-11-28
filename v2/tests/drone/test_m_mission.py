@@ -797,32 +797,32 @@ def test_m_rejected_command_is_stored_like_any_other() -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode_rtl", "ground_lost", "battery_low", "tid", "event"),
+    ("prime", "vehicle", "tid", "event"),
     [
-        (True, True, True, "T20", "failsafe:mode"),
-        (False, True, True, "T18", "failsafe:ground_link"),
-        (False, False, True, "T17", "budget:battery"),
-        (False, False, False, "T10", "track_dead:7"),
+        ({}, {"mode": "RTL", "battery_pct": 10.0}, "T20", "failsafe:mode"),
+        ({"flight_time_cap_s": 2.0}, {"fc_link_up": False}, "T18", "failsafe:fc_link"),
+        ({}, {"battery_pct": 10.0}, "T17", "budget:battery"),
+        ({}, {}, "T10", "track_dead:7"),
     ],
+    ids=["T20", "T18", "T17", "T10"],
 )
 def test_m_tick_precedence_ladder(
-    mode_rtl: bool, ground_lost: bool, battery_low: bool, tid: str, event: str
+    prime: dict[str, Any], vehicle: dict[str, Any], tid: str, event: str
 ) -> None:
-    """[M4]: T20 > T18 > T17 > T10 on one tick where all their triggers hold
-    (the engaged track has timed out on every rung)."""
-    r = engaged()
-    t_hb = r.t
-    limit = t_hb + r.cfg.ground_link_timeout_ms
-    if not ground_lost:
-        r.hb(at=limit)
-    r.tick(
-        at=limit + 1,
-        mode="RTL" if mode_rtl else "GUIDED",
-        battery_pct=10.0 if battery_low else 80.0,
-    )
+    """[M4], B-D7: T20 > T17 > T10 and T18 > T17 > T10 on one tick where the
+    lower rows' triggers hold too (the engaged track has timed out on every
+    rung; on the T18 rung the flight-time budget is spent, the one T17
+    condition that needs no FC link). T20 needs the FC link up and T18 needs
+    it down, so no tick holds both. On every rung the ground heartbeat has
+    been silent for more than ground_link_timeout_ms: it is no trigger, and
+    the rung's own row fires."""
+    r = engaged(**prime)
+    t = r.t + r.cfg.ground_link_timeout_ms + 1  # the approve was the last ground heartbeat
+    r.tick(at=t, **vehicle)
     assert r.log[-1][1] == tid
-    assert len([row for row in r.log if row[0] == limit + 1]) == 1
+    assert len([row for row in r.log if row[0] == t]) == 1
     assert event in r.names()
+    assert "failsafe:ground_link" not in r.names()
 
 
 @pytest.mark.parametrize(
@@ -831,25 +831,21 @@ def test_m_tick_precedence_ladder(
         (True, {"battery_pct": 10.0, "home_dist_m": 99.0}, "budget:flight_time"),
         (False, {"battery_pct": 10.0, "home_dist_m": 99.0}, "budget:battery"),
         (False, {"home_dist_m": 99.0}, "budget:geofence"),
-        (False, {"fc_link_up": False}, "failsafe:fc_link"),
     ],
 )
 def test_m_event_names_the_first_condition(late: bool, vehicle: dict[str, Any], event: str) -> None:
-    """[M4]: several T17 (T18) conditions name the first of flight_time,
-    battery, geofence, reacquire (fc_link, ground_link)."""
+    """[M4]: several T17 conditions name the first of flight_time, battery,
+    geofence, reacquire. (B-D7: T18 has one condition, FC link down; the
+    precedence ladder above has its case.)"""
     r = searching(flight_time_cap_s=2.0)
     t_launch = next(row[0] for row in r.log if row[1] == "T03")
     t = t_launch + (2001 if late else 1000)
-    if vehicle.get("fc_link_up") is False:
-        t = r.t + r.cfg.ground_link_timeout_ms + 1  # ground link lost as well
-    else:
-        r.hb(at=t - 1)
     r.tick(at=t, **vehicle)
     assert r.state is S.RETURN
     assert event in r.names()
 
 
-# Finding DT-1: the T17 / T18 thresholds are safety budgets; each gets a
+# Finding DT-1: the T17 thresholds are safety budgets; each gets a
 # just-passes / just-fails pair against the primed or configured value.
 
 
@@ -895,19 +891,65 @@ def test_m_t17_flight_time_cap_boundary() -> None:
     assert "budget:flight_time" in r.names()
 
 
-def test_m_t18_ground_link_timeout_boundary() -> None:
-    """T18, [U6], DT-1: a ground-heartbeat silence of exactly
-    ground_link_timeout_ms is not link loss; 1 ms more fires T18
-    failsafe:ground_link."""
-    r = searching()
-    r.hb()
-    t_hb, timeout = r.t, r.cfg.ground_link_timeout_ms
+# B-D7: a lost Wi-Fi ground heartbeat alone is no trigger. Each airborne state
+# is held by the inputs it needs and gets no heartbeat. LOST cannot be held:
+# its AUTO row takes the first input, so it has its own test.
+
+_HOLD_TRACK: dict[MissionState, dict[str, Any]] = {
+    S.ACQUIRING: {"state": "confirmed"},
+    S.ENGAGED: {"state": "confirmed"},
+    S.COASTING: {"state": "coasting", "hits": 0, "misses": 1},
+    S.TOUCH: {"state": "confirmed"},
+}
+_HELD_AIRBORNE = sorted(DOC_A - {S.LOST}, key=lambda st: st.value)
+_GROUND_TIMEOUT_MS = MissionConfig().ground_link_timeout_ms
+
+
+def _fly_without_heartbeat(r: Run, gap_ms: int) -> None:
+    """Ticks every 100 ms (and a packet of track 7 between them where the
+    state has a candidate or an engaged track) until a tick is stamped more
+    than ``gap_ms`` after now. No ground heartbeat and no command."""
+    assert r.state is not None
+    track = _HOLD_TRACK.get(r.state)
+    end = r.t + gap_ms
+    while r.t <= end:
+        if track is not None:
+            r.trk(7, dt=50, **track)
+        r.tick(dt=50 if track is not None else 100)
+
+
+@pytest.mark.parametrize("gap_ms", [_GROUND_TIMEOUT_MS + 1, 12 * _GROUND_TIMEOUT_MS])
+@pytest.mark.parametrize("state", _HELD_AIRBORNE, ids=lambda st: st.value)
+def test_m_t18_b_d7_ground_heartbeat_gap_causes_no_transition(
+    state: MissionState, gap_ms: int
+) -> None:
+    """T18, [U6], B-D7: in every airborne state that can be held, a ground
+    heartbeat silence longer than ground_link_timeout_ms (by 1 ms, the old
+    trigger, and 12 times as long) causes no transition and no failsafe
+    event. Discrimination: the next tick with the FC link down fires T18 to
+    RETURN, and its event is failsafe:fc_link, never failsafe:ground_link."""
+    r = BUILDERS[state]()
+    r.hb()  # the last ground heartbeat
+    t_hb, rows = r.t, len(r.log)
+    _fly_without_heartbeat(r, gap_ms)
+    assert r.t > t_hb + gap_ms and r.kind == "TICK"
+    assert r.state is state and len(r.log) == rows
+    assert not [n for n in r.names() if n.startswith("failsafe:")]
+    r.tick(fc_link_up=False)
+    assert r.log[-1] == (r.t, "T18", state, S.RETURN, Source.FAILSAFE)
+    assert len(r.log) == rows + 1
+    assert [n for n in r.names() if n.startswith("failsafe:")] == ["failsafe:fc_link"]
+
+
+def test_m_t18_b_d7_lost_takes_its_auto_row_after_a_heartbeat_gap() -> None:
+    """T18, T15, [M4], B-D7: in LOST, the first tick after a ground heartbeat
+    silence longer than ground_link_timeout_ms fires T15 (AUTO) to SEARCH.
+    Before B-D7 that tick fired T18, which ranks above AUTO."""
+    r = lost()
     rows = len(r.log)
-    r.tick(at=t_hb + timeout)
-    assert r.state is S.SEARCH and len(r.log) == rows
-    r.tick(at=t_hb + timeout + 1)
-    assert r.log[-1][:2] == (r.t, "T18") and r.state is S.RETURN
-    assert "failsafe:ground_link" in r.names()
+    r.tick(at=r.t + r.cfg.ground_link_timeout_ms + 1)  # the approve was the last heartbeat
+    assert [row[1] for row in r.log[rows:]] == ["T15"] and r.state is S.SEARCH
+    assert not [n for n in r.names() if n.startswith("failsafe:")]
 
 
 def test_m_auto_row_consumes_its_input() -> None:

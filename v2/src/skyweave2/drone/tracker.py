@@ -1,4 +1,4 @@
-"""Tracker (DRONE_CONTRACTS_D0.md [K1]-[K4], [P2], [P2a]; V-D10). PROVISIONAL.
+"""Tracker (DRONE_CONTRACTS_D0.md [K1]-[K4], [P2], [P2a]; V-D10, E2a4-D1). PROVISIONAL.
 
 This is a reimplementation of the tracker v0 *spec on record* (brief §2:
 per-axis 2-state KF [pos, vel], constant velocity; IoU association; M-of-N
@@ -54,6 +54,18 @@ Why the shape:
   :attr:`Tracker.degraded_dropped`; the next good frame predicts over the
   real time gap. It is the dropped-frame path the tracker already has
   ([S11]); the mission's ``track_timeout_ms`` bounds the gap ([P2a]).
+- Held attitude that is too old (E2a4-D1): a frame newer than the newest
+  ``ATTITUDE`` sample is de-rotated with that sample, held ([G1]). While the
+  vehicle turns, a held sample turns the vehicle's rotation into target
+  motion (E2a4-F15). So such a frame is used only when the sample is at most
+  ``attitude_hold_max_ms`` old at ``t_cap``; otherwise it is dropped whole, on
+  the same path as an attitude-degraded frame, and counted in
+  :attr:`Tracker.hold_dropped`. A frame whose ``t_cap`` lies between two
+  samples is never dropped by this rule, whatever their spacing. The age is
+  the attitude source's ``attitude_age_ms(t_cap)`` ([F3]'s term, asked at
+  ``t_cap``): at or above 0 the newest sample is the one held, below 0 a
+  newer sample exists. The rule is off when the limit is not below the
+  source's ``attitude_bound_ms`` ([G1] drops those frames first).
 - [K2] Association is greedy by descending IoU between each track's predicted
   box and each detection box, compared in that track's tangent plane: the
   centers are tangent-plane points, the sizes are the pixel sizes (1 px = 1
@@ -102,7 +114,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from typing import Any
 
-from skyweave2.drone.camera import AttitudeSource, CameraModel
+from skyweave2.drone.camera import AttitudeHistory, CameraModel
 from skyweave2.drone.packets import Box, DetectionPacket, TrackPacket, TrackState
 from skyweave2.drone.types import Attitude
 
@@ -125,7 +137,7 @@ def id_base_from_start(start_t_ms: int) -> int:
     return start_t_ms * ID_BASE_PER_MS
 
 
-_INT_FIELDS = ("id_base", "m_confirm", "n_confirm", "coast_cap")
+_INT_FIELDS = ("id_base", "m_confirm", "n_confirm", "coast_cap", "attitude_hold_max_ms")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -149,6 +161,7 @@ class TrackerConfig:
     init_size_rate_sigma_px_s: float = 100.0  # E1, [K1] w/h rate prior at birth
     min_size_px: float = 1.0  # E1, [P2] w, h > 0 floor while coasting
     recenter_deg: float = 5.0  # E2a-4, [K1] re-center the tangent plane past this (V-D10)
+    attitude_hold_max_ms: int = 30  # E2a4-D1, [K1] oldest held ATTITUDE sample a frame may use
 
     def __post_init__(self) -> None:
         for f in fields(self):
@@ -171,6 +184,10 @@ class TrackerConfig:
             raise ValueError(f"tracker iou_min must be in (0, 1], got {self.iou_min}")
         if self.recenter_deg > 45.0:
             raise ValueError(f"tracker recenter_deg must be in (0, 45], got {self.recenter_deg}")
+        if self.attitude_hold_max_ms < 0:
+            raise ValueError(
+                f"tracker attitude_hold_max_ms must be >= 0, got {self.attitude_hold_max_ms}"
+            )
 
     def to_obj(self) -> dict[str, Any]:
         """Recording / scorecard form."""
@@ -182,7 +199,9 @@ class TrackerConfig:
 
     @classmethod
     def from_obj(cls, obj: Mapping[str, Any]) -> TrackerConfig:
-        """Inverse of :meth:`to_obj`; every key is required, unknown keys refused."""
+        """Inverse of :meth:`to_obj`; every key is required, unknown keys refused.
+        So a recording made before a key existed does not read (E2a4-F11 for
+        ``recenter_deg``, E2a4-F18 for ``attitude_hold_max_ms``)."""
         if not isinstance(obj, Mapping):
             raise ValueError("tracker config must be an object")
         names = {f.name for f in fields(cls)}
@@ -487,11 +506,12 @@ class Tracker:
     One instance per companion process run (E2-D5: the companion core owns
     it). ``cam`` is the configured camera (mount, lens, distortion; V-D1,
     V-D11) and ``attitude`` the companion's attitude history, sampled at each
-    frame's ``t_cap`` ([G1]). Feed every detection packet, in arrival order,
-    to :meth:`update`; it returns that frame's track packets.
+    frame's ``t_cap`` ([G1]) and asked how old its newest sample is there
+    (E2a4-D1). Feed every detection packet, in arrival order, to
+    :meth:`update`; it returns that frame's track packets.
     """
 
-    def __init__(self, config: TrackerConfig, cam: CameraModel, attitude: AttitudeSource) -> None:
+    def __init__(self, config: TrackerConfig, cam: CameraModel, attitude: AttitudeHistory) -> None:
         self.config = config
         self.cam = cam
         self.stale_dropped = 0
@@ -499,6 +519,10 @@ class Tracker:
         self.degraded_dropped = 0
         """Detection packets dropped whole because they were attitude-degraded
         ([G1]): no attitude sample within the bound of their ``t_cap``."""
+        self.hold_dropped = 0
+        """Detection packets dropped whole because their attitude was the newest
+        sample held more than ``attitude_hold_max_ms`` (E2a4-D1). A frame is
+        counted here or in :attr:`degraded_dropped`, never in both."""
         self.boxes_unusable = 0
         """Boxes ignored because their center has no finite ray (V-D11)."""
         self.last_t_cap: int | None = None
@@ -517,6 +541,10 @@ class Tracker:
         att = self._attitude.attitude_at(t_cap)
         if att is None:
             self.degraded_dropped += 1  # V-D10: no attitude at t_cap, no world direction
+            return []
+        held_ms = self._attitude.attitude_age_ms(t_cap)
+        if held_ms is not None and held_ms > cfg.attitude_hold_max_ms:
+            self.hold_dropped += 1  # E2a4-D1: the newest sample, held too long
             return []
         rot = r_ned_cam(att, cam)
         if self.last_t_cap is not None:

@@ -9,8 +9,10 @@ browser is the client. Three endpoints and no others:
   [R2] ``ground_hb``) only when it carries the shared token in the
   ``X-Skyweave-Token`` request header and the token matches (E1-D15). A poll
   with no token or a wrong one is counted and is not a heartbeat, so another
-  device on the access point can read the status but cannot hold off the T18
-  ground-link failsafe.
+  device on the access point can read the status but does not show as the
+  ground link. Since B-D7 a missing heartbeat causes no transition: the page
+  shows the ground link as LOST after ``ground_link_timeout_ms`` and that is
+  all.
 - ``POST /command``: one command packet [P5]; the response is its ack.
 
 [U2] Exactly four commands, from four buttons: ``prime`` (with a parameter
@@ -112,7 +114,7 @@ TOKEN_STORAGE_KEY = "skyweave-ui-token"
 
 POLL_MS = 500
 """Page state-poll period (Provisional, E1): ten heartbeats inside the 5 s
-``ground_link_timeout_ms`` (T18)."""
+``ground_link_timeout_ms`` (a display value since B-D7)."""
 
 RECENT_EVENTS = 16  # events kept for the page ([U4]); display only
 TRACK_MEMORY = 32  # newest track packets kept, by id, for the engaged / candidate lines
@@ -156,7 +158,9 @@ class ViewModel:
     mode and armed come from the FC's own frames through
     :class:`vehicle_state.VehicleState` at ``t`` ([M2a]: unknown while the link
     is down). The ground link is the newest ground heartbeat: a UI poll that
-    carried the token ([U6]) or an authenticated ground command ([R2]).
+    carried the token ([U6]) or an authenticated ground command ([R2]). It
+    shows as lost when that heartbeat is older than ``ground_link_timeout_ms``;
+    that is display only (B-D7).
     """
 
     t: int

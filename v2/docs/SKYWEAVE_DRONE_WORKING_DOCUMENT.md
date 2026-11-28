@@ -797,6 +797,10 @@ than carried forward.
     between the ground laptop and the drone at search altitude, and does it
     hold the ground UI link inside the ground-link timeout
     (`DRONE_CONTRACTS_D0.md` T18)? Added 2026-10-08.
+    **Amended 2026-11-28** (`DRONE_CONTRACTS_D0.md` decision B-D7): a lost
+    ground link no longer sends the vehicle home, so the timeout only
+    decides when the page shows the link as lost. The range still decides
+    if the operator sees the page and can send commands in flight.
 
 ## 16. Source-note references to verify
 

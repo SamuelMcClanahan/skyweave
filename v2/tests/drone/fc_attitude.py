@@ -76,3 +76,7 @@ class FcAttitude:
 
     def attitude_at(self, t_ms: int) -> Attitude | None:
         return self.deliver(t_ms + ATTITUDE_PERIOD_MS).attitude_at(t_ms)
+
+    def attitude_age_ms(self, t_ms: int) -> int | None:
+        """E2a4-D1: the production answer, after the same delivery."""
+        return self.deliver(t_ms + ATTITUDE_PERIOD_MS).attitude_age_ms(t_ms)

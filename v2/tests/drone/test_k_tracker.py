@@ -16,6 +16,10 @@ pixel expectations still hold. Two of them place their boxes around the
 image center, where the tangent plane is the image plane exactly, because
 they pin exact IoU values ([K2] now compares boxes in the tangent plane).
 
+Held attitude (E2a4-D1): a frame newer than the newest ``ATTITUDE`` sample is
+used only while that sample is at most ``attitude_hold_max_ms`` (30) old. The
+tests of that rule script the FC's sample times themselves.
+
 Defaults under test (Provisional, brief §6): M = 3 of N = 5, coast_cap = 20.
 """
 
@@ -35,8 +39,8 @@ from skyweave2.drone.harness.camera_sim import CameraSimConfig, Pose, SyntheticC
 from skyweave2.drone.harness.targets import SlowKite, StaticBalloon, Trajectory
 from skyweave2.drone.packets import Box, DetectionPacket, TrackPacket, TrackState
 from skyweave2.drone.tracker import Tracker, TrackerConfig, id_base_from_start
-from skyweave2.drone.vehicle_state import VehicleState
-from tests.drone.fc_attitude import LINK, FcAttitude, RollPitchYaw
+from skyweave2.drone.vehicle_state import VehicleState, parse_frames
+from tests.drone.fc_attitude import LINK, FcAttitude, RollPitchYaw, attitude_frame
 
 T, C, CO = TrackState.TENTATIVE, TrackState.CONFIRMED, TrackState.COASTING
 FRAME_MS = 17
@@ -588,9 +592,15 @@ def test_k_vd10_attitude_degraded_frames_are_dropped_whole() -> None:
     track goes on under the same id, confirmed, with hits and age_frames one
     more than before it: the dropped frames were never counted. A second
     tracker that is never shown the dropped frames gives byte-identical
-    packets. Before any ATTITUDE at all, a frame is dropped the same way."""
+    packets. Before any ATTITUDE at all, a frame is dropped the same way.
+
+    E2a4-D1 (finding E2a4-F17): this test pins the [G1] bound alone, so its
+    trackers hold a sample for as long as [G1] does (``attitude_hold_max_ms``
+    = ``attitude_bound_ms``). The frames, the FC script and every assertion
+    are as before the hold rule; the tests below cover the rule's default."""
     dets = [_det(i, _box(500.0, 400.0)) for i in range(90)]  # t_cap 1000 .. 2513
-    trk = Tracker(_cfg(), CAM, FcAttitude(silent=((1500, 2000),)))
+    g1_only = _cfg(attitude_hold_max_ms=LINK.attitude_bound_ms)
+    trk = Tracker(g1_only, CAM, FcAttitude(silent=((1500, 2000),)))
     outs = [_feed(trk, det) for det in dets]
     for det, out in zip(dets, outs, strict=True):
         if 1600 <= det.t_cap <= 1960:
@@ -604,7 +614,7 @@ def test_k_vd10_attitude_degraded_frames_are_dropped_whole() -> None:
     assert (after.track_id, after.state) == (before.track_id, C)
     assert (after.hits, after.age_frames) == (before.hits + 1, before.age_frames + 1)
 
-    ctl = Tracker(_cfg(), CAM, FcAttitude(silent=((1500, 2000),)))
+    ctl = Tracker(g1_only, CAM, FcAttitude(silent=((1500, 2000),)))
     kept = [det for det, out in zip(dets, outs, strict=True) if out]
     want = [P.encode(p) for det in kept for p in _feed(ctl, det)]
     assert [P.encode(p) for out in outs for p in out] == want
@@ -702,3 +712,183 @@ def test_k_vd10_pixels_hold_when_the_line_of_sight_has_no_image() -> None:
     assert len(frozen) == 1
     (u, v, du, dv) = next(iter(frozen))
     assert (du, dv) == (0.0, 0.0) and u <= us[-1] and math.isfinite(v)
+
+
+# ---------------------------------------------------------------------------
+# Held attitude that is too old (E2a4-D1): [K1], [G1]
+# ---------------------------------------------------------------------------
+
+
+def _fc_samples(*samples: tuple[int, RollPitchYaw]) -> VehicleState:
+    """The production attitude source after the FC's ``ATTITUDE`` frames
+    ``(receive ms, (roll, pitch, yaw))`` came in, and nothing later."""
+    vehicle = VehicleState(LINK)
+    for t_ms, rpy in samples:
+        for msg in parse_frames(attitude_frame(t_ms, rpy)):
+            vehicle.ingest(msg, t_ms)
+    return vehicle
+
+
+def _one(t_cap: int, u: float = CX, v: float = CY) -> DetectionPacket:
+    return DetectionPacket(t_cap=t_cap, frame_seq=t_cap, boxes=(_box(u, v),))
+
+
+def test_k_e2a4d1_frame_between_two_samples_is_used_whatever_their_spacing() -> None:
+    """[K1], [G1], E2a4-D1: the hold rule is about a held sample only. A frame
+    whose t_cap lies between two ATTITUDE samples is used as before, with
+    the interpolated attitude, even when both samples are further away than
+    attitude_hold_max_ms (30 ms).
+
+    The FC is heard at 1000 (yaw 0) and at 1090 (yaw 9 deg). A box at the
+    image center captured at 1045 is 45 ms from each sample. It gives one
+    packet, nothing is counted as dropped, and its line of sight points
+    4.5 deg east of north: the yaw half-way between the two samples (the
+    test's own script). The same frame at a tracker that has heard only the
+    first sample rests on a sample held for 45 ms, and is dropped."""
+    both = _fc_samples((1000, (0.0, 0.0, 0.0)), (1090, (0.0, 0.0, 9.0 * DEG)))
+    trk = Tracker(_cfg(), CAM, both)
+    (pkt,) = _feed(trk, _one(1045))
+    assert (trk.hold_dropped, trk.degraded_dropped, trk.last_t_cap) == (0, 0, 1045)
+    assert pkt.los == pytest.approx((math.cos(4.5 * DEG), math.sin(4.5 * DEG), 0.0), abs=1e-6)
+
+    early = Tracker(_cfg(), CAM, _fc_samples((1000, (0.0, 0.0, 0.0))))
+    assert _feed(early, _one(1045)) == []
+    assert (early.hold_dropped, early.degraded_dropped, early.last_t_cap) == (1, 0, None)
+
+
+@pytest.mark.parametrize(
+    ("limit", "held_ms", "used"),
+    [(None, 0, True), (None, 30, True), (None, 31, False), (10, 10, True), (10, 11, False)],
+    ids=["default_0", "default_30", "default_31", "limit10_10", "limit10_11"],
+)
+def test_k_e2a4d1_held_sample_is_used_up_to_attitude_hold_max_ms(
+    limit: int | None, held_ms: int, used: bool
+) -> None:
+    """[K1], E2a4-D1: a frame newer than the newest ATTITUDE sample is used only
+    if that sample is at most attitude_hold_max_ms old at t_cap. The default
+    is 30 ms (Provisional): a sample held 30 ms is used, one held 31 ms is
+    not (mutation check on the default), and the config key moves the limit
+    (10: 10 ms used, 11 ms not). A frame at the sample's own time is held
+    0 ms. A dropped frame gives no packet, is counted in hold_dropped and
+    not in degraded_dropped (it is inside attitude_bound_ms, [G1]), and is
+    not an accepted frame (last_t_cap does not move)."""
+    cfg = _cfg() if limit is None else _cfg(attitude_hold_max_ms=limit)
+    assert _cfg().attitude_hold_max_ms == 30
+    trk = Tracker(cfg, CAM, _fc_samples((1000, (0.0, 0.0, 0.0))))
+    out = _feed(trk, _one(1000 + held_ms))
+    if used:
+        assert len(out) == 1
+        assert (trk.hold_dropped, trk.degraded_dropped) == (0, 0)
+        assert trk.last_t_cap == 1000 + held_ms
+    else:
+        assert out == []
+        assert (trk.hold_dropped, trk.degraded_dropped) == (1, 0)
+        assert trk.last_t_cap is None
+
+
+def test_k_e2a4d1_dropped_frames_change_no_track_and_the_next_predicts_over_the_gap() -> None:
+    """[K1], E2a4-D1, E2a4-F3: a frame dropped for a sample held too long takes
+    the attitude-degraded path. It gives no packet and changes no track, and
+    the next good frame predicts over the real time gap.
+
+    A target crosses the image center at 300 px/s (noise-free boxes, 60 fps,
+    level vehicle). The FC is silent from 1500 to 1580: its last frame before
+    that is at 1480. The frames captured at 1527 and 1544 rest on that sample
+    held 47 and 64 ms: both are dropped and counted in hold_dropped; none is
+    attitude-degraded. The frame at 1510 (held 30 ms) is used, and so is the
+    one at 1561 (the FC is back before it arrives). At 1561 the track has the
+    same id, is confirmed, and has hits and age_frames one more than at
+    1510: the dropped frames were never counted. Its center is on the box
+    (within 0.5 px) and its rate is still 300 px/s within 5 px/s: a
+    prediction over one frame period in place of the real 51 ms would leave
+    a 10 px innovation and a rate step of tens of px/s. A second tracker
+    that is never shown the two frames gives byte-identical packets."""
+
+    def u_at(t_cap: int) -> float:
+        return CX - 150.0 + 300.0 * (t_cap - T0_MS) / 1000.0
+
+    dets = [_one(T0_MS + FRAME_MS * i, u_at(T0_MS + FRAME_MS * i)) for i in range(50)]
+    trk = Tracker(_cfg(), CAM, FcAttitude(silent=((1500, 1580),)))
+    outs = {det.t_cap: _feed(trk, det) for det in dets}
+    assert [t for t, out in outs.items() if not out] == [1527, 1544]
+    assert (trk.hold_dropped, trk.degraded_dropped, trk.stale_dropped) == (2, 0, 0)
+    (before,), (after,) = outs[1510], outs[1561]
+    assert (after.track_id, after.state) == (before.track_id, C)
+    assert (after.hits, after.age_frames) == (before.hits + 1, before.age_frames + 1)
+    assert after.u == pytest.approx(u_at(1561), abs=0.5)
+    assert before.du == pytest.approx(300.0, abs=5.0)
+    assert after.du == pytest.approx(300.0, abs=5.0)
+
+    ctl = Tracker(_cfg(), CAM, FcAttitude(silent=((1500, 1580),)))
+    want = [P.encode(p) for det in dets if outs[det.t_cap] for p in _feed(ctl, det)]
+    assert [P.encode(p) for out in outs.values() for p in out] == want
+    assert ctl.hold_dropped == 0
+
+
+def _yaw_ramp(t_ms: int) -> RollPitchYaw:
+    """A steady turn at ``search_yaw_rate`` (45 deg/s, §9) from 25 deg left of
+    north; the forward camera keeps a target to the north in view for 1.3 s."""
+    return (0.0, 0.0, (-25.0 + 45.0 * (t_ms - T0_MS) / 1000.0) * DEG)
+
+
+def test_k_e2a4f15_attitude_gap_in_a_turn_and_the_false_rate() -> None:
+    """[K1], E2a4-D1, finding E2a4-F15: the case that motivated the rule. The
+    vehicle turns at 45 deg/s past a static balloon (noise-free boxes, 60
+    fps). The FC's frames stop for 220 ms (one sample, then the next 220 ms
+    later). The true line-of-sight rate is 0. The gap is tried at each of
+    the five ways it can fall against the frame times (the 20 ms sample grid
+    and the 60 fps frame grid line up again every 100 ms).
+
+    Without the rule (attitude_hold_max_ms = attitude_bound_ms, 100): the
+    frames after the last sample are de-rotated with it for up to 100 ms
+    while the vehicle turns. The track's rate climbs past 0.5 rad/s, and
+    after the gap the balloon gets a new id, every time.
+
+    With the default (30 ms): the rule drops 4 or 5 frames per gap and [G1]
+    the rest. The rate stays under 0.3 rad/s on every packet. That is not
+    zero: a sample held 30 ms in a 45 deg/s turn is 1.35 deg (24 px) off,
+    and the one or two frames that are still used carry that error (finding
+    E2a4-F19). The track keeps its id through the gap in at least 4 of the 5
+    cases.
+
+    With the limit at 0 no held sample is used at all, and nothing false is
+    left: the rate stays under 0.01 rad/s and the id is kept every time. So
+    the false rate comes from held samples and from nothing else."""
+    dets = _render(CAM, _yaw_ramp, AHEAD, 1.3, CLEAN)
+
+    def run(limit: int, gap_start: int) -> tuple[float, int, Tracker]:
+        fc = FcAttitude(_yaw_ramp, silent=((gap_start, gap_start + 200),))
+        trk = Tracker(_cfg(attitude_hold_max_ms=limit), CAM, fc)
+        pkts = [p for det in dets for p in _feed(trk, det)]
+        settled = [p for p in pkts if p.t_cap >= T0_MS + 300]
+        return max(_rate(p) for p in settled), len({p.track_id for p in pkts}), trk
+
+    kept_default = 0
+    for gap_start in (1500, 1520, 1540, 1560, 1580):
+        rate, ids, trk = run(LINK.attitude_bound_ms, gap_start)
+        assert rate > 0.5 and ids == 2
+        assert trk.hold_dropped == 0 and trk.degraded_dropped >= 5
+
+        rate, ids, trk = run(_cfg().attitude_hold_max_ms, gap_start)
+        assert rate < 0.3
+        assert trk.hold_dropped in (4, 5) and trk.degraded_dropped >= 5
+        kept_default += ids == 1
+
+        rate, ids, trk = run(0, gap_start)
+        assert rate < 0.01 and ids == 1
+        assert trk.hold_dropped == 6
+    assert kept_default >= 4
+
+
+def test_k_e2a4d1_attitude_hold_max_ms_is_a_whole_number_of_ms_from_0_up() -> None:
+    """[K1], [R2], E2a4-D1: attitude_hold_max_ms is tracker config: an int >= 0
+    (0: no held sample is used), default 30. It travels in the config object
+    ([R2] meta.config.tracker) as an int and reads back equal."""
+    cfg = _cfg(attitude_hold_max_ms=0)
+    obj = cfg.to_obj()
+    assert obj["attitude_hold_max_ms"] == 0 and type(obj["attitude_hold_max_ms"]) is int
+    assert TrackerConfig.from_obj(obj) == cfg
+    assert _cfg().to_obj()["attitude_hold_max_ms"] == 30
+    for bad in (-1, 30.0, True):
+        with pytest.raises(ValueError):
+            _cfg(attitude_hold_max_ms=bad)

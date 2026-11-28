@@ -63,6 +63,7 @@ from skyweave2.drone.packets import (
     CommandPacket,
     DetectionPacket,
     MissionState,
+    MissionStatePacket,
     PrimeParams,
     TrackPacket,
     TrackState,
@@ -70,7 +71,7 @@ from skyweave2.drone.packets import (
     canonical_json,
     strict_json_loads,
 )
-from skyweave2.drone.recording import Record, Recorder, Stream, read_records
+from skyweave2.drone.recording import Record, Recorder, RecordingError, Stream, read_records
 from skyweave2.drone.tracker import id_base_from_start
 from skyweave2.drone.types import LandedState, VelocityCommand
 from skyweave2.drone.vehicle_state import LinkConfig, parse_frames
@@ -79,6 +80,13 @@ from tests.drone.fc_attitude import attitude_frame
 S = MissionState
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "r_touch_trial.jsonl"
+PRE_B_D7_FIXTURE = FIXTURE.with_name("r_pre_b_d7_ground_link.jsonl")
+"""A recording in which the old T18 ground-link rule fired. It was made on
+commit 65f7522, the last before B-D7, by the U bench (real core, real
+recorder, real MAVLink frames, a step clock): prime at 10100 ms (the last
+ground heartbeat), the switch into GUIDED, takeoff, then an FC tick every
+250 ms and no heartbeat. T18 fired at 15250 ms with ``failsafe:ground_link``.
+The current code cannot make this recording again; do not regenerate it."""
 REGENERATE = os.environ.get("SKYWEAVE_REGENERATE_DRONE_FIXTURES") == "1"
 
 # -- the scripted trial's facts ----------------------------------------------
@@ -459,6 +467,30 @@ def test_r3_live_recording_replays_exactly(fresh: Path) -> None:
 def test_r3_committed_fixture_replays_exactly(committed_replay: ReplayResult) -> None:
     """[R3]: the committed recording replays exactly under the current code."""
     assert committed_replay.mismatch() is None
+
+
+def test_r3_b_d7_recording_made_under_the_old_ground_link_rule_does_not_replay() -> None:
+    """[R3], [R2], B-D7, B-F41: a recording in which the old T18 rule fired
+    (one failsafe:ground_link event) still reads, but it cannot replay,
+    because this code never fires that rule. Replay stops with a clear error
+    that names B-D7. Discrimination: the same recording cut before the stamp
+    at which the old rule fired replays exactly."""
+    lines = PRE_B_D7_FIXTURE.read_text(encoding="ascii").splitlines()
+    records = list(read_records(lines))
+    fired = [
+        r.t_rx
+        for r in records
+        if isinstance(r.packet, MissionStatePacket)
+        for e in r.packet.events
+        if e.name == "failsafe:ground_link"
+    ]
+    assert len(fired) == 1
+    with pytest.raises(RecordingError, match="B-D7"):
+        replay(lines)
+    before = [line for line, r in zip(lines, records, strict=True) if r.t_rx < fired[0]]
+    cut = replay(before)
+    assert cut.mismatch() is None and cut.recorded_mission_states
+    assert cut.transitions[-1][3] is S.SEARCH
 
 
 def test_r3_fixture_covers_the_whole_touch_trial(
@@ -878,10 +910,13 @@ def _tracker_detections(seed: int) -> list[DetectionPacket]:
     return dets
 
 
-def _tracker_recording(dets: list[DetectionPacket]) -> list[str]:
+def _tracker_recording(
+    dets: list[DetectionPacket], fc_silent: tuple[int, int] | None = None
+) -> list[str]:
     """A core that runs the tracker, fed the frames (each 10 ms after capture),
     the FC's ATTITUDE every 20 ms (a slow yaw and a small pitch, so the
-    tracker really de-rotates, V-D10) and a tick every 50 ms, recorded."""
+    tracker really de-rotates, V-D10) and a tick every 50 ms, recorded. The FC
+    sends no ATTITUDE in the board-ms window ``fc_silent`` (start, end)."""
     buf = io.StringIO()
     config = CoreConfig(mission=MissionConfig(coast_cap=5)).with_tracker(TRACKER_T0)
     core = CompanionCore(config, recorder=Recorder(buf), t_start_ms=TRACKER_T0)
@@ -891,7 +926,8 @@ def _tracker_recording(dets: list[DetectionPacket]) -> list[str]:
         while t_att <= t:
             s = (t_att - TRACKER_T0) / 1000.0
             rpy = (0.0, 0.02 * math.sin(2.0 * s), 0.05 * s)
-            core.on_mavlink_rx(attitude_frame(t_att, rpy), t_att)
+            if fc_silent is None or not fc_silent[0] <= t_att < fc_silent[1]:
+                core.on_mavlink_rx(attitude_frame(t_att, rpy), t_att)
             t_att += 20
         while t_tick <= t:
             core.on_tick(t_tick)
@@ -926,6 +962,51 @@ def test_r3_e2d5_replay_reruns_the_tracker_and_matches_every_track_record() -> N
     assert (replay(lines[:first_track] + lines[first_track + 1 :]).mismatch() or "").startswith(
         "track"
     )
+
+
+def _with_tracker_config(lines: list[str], change: Callable[[dict[str, Any]], None]) -> list[str]:
+    """The recording with its ``meta.config.tracker`` object changed in place."""
+    meta = json.loads(lines[0])
+    change(meta["config"]["tracker"])
+    return [canonical_json(meta).decode("ascii"), *lines[1:]]
+
+
+def test_r3_e2a4d1_frames_dropped_for_a_held_attitude_replay_exactly() -> None:
+    """[R3], [R2], [K1], E2a4-D1: the hold rule reads only what the recording
+    carries (each frame's t_cap, the ATTITUDE receive times, and
+    attitude_hold_max_ms in meta.config.tracker), so replay drops the same
+    frames. The FC is silent from 600 to 700 ms into the run; its last sample
+    before that is at 580. The frames captured at 627 and 660 arrive on that
+    sample held 47 and 80 ms: they are recorded as detections and have no
+    track record. Every other frame has one. Replay matches every track
+    record. Replayed with a limit of 100 in meta.config, the two frames are
+    tracked, which shows up as a track mismatch: the key drives replay."""
+    dets = _tracker_detections(seed=20261128)
+    lines = _tracker_recording(dets, fc_silent=(TRACKER_T0 + 600, TRACKER_T0 + 700))
+    result = replay(lines)
+    assert result.mismatch() is None
+    assert result.config.tracker is not None and result.config.tracker.attitude_hold_max_ms == 30
+    tracked = {p.t_cap for _, p in result.recorded_tracks}
+    assert [d.t_cap for d in dets if d.t_cap not in tracked] == [
+        TRACKER_T0 + 627,
+        TRACKER_T0 + 660,
+    ]
+
+    def lift(tracker: dict[str, Any]) -> None:
+        tracker["attitude_hold_max_ms"] = 100
+
+    assert (replay(_with_tracker_config(lines, lift)).mismatch() or "").startswith("track")
+
+
+def test_r2_e2a4f18_recording_without_attitude_hold_max_ms_does_not_read() -> None:
+    """[R2], [R3], finding E2a4-F18 (the E2a4-F11 rule): every tracker key is
+    required in meta.config.tracker. A recording made before E2a4-D1 has no
+    attitude_hold_max_ms; replay refuses it with an error that names the
+    key, and never guesses a limit."""
+    lines = _tracker_recording(_tracker_detections(seed=20261128)[:5])
+    old = _with_tracker_config(lines, lambda tracker: tracker.pop("attitude_hold_max_ms"))
+    with pytest.raises(RecordingError, match="attitude_hold_max_ms"):
+        replay(old)
 
 
 def test_r2_e2d5_tracker_config_rides_in_meta_and_shares_coast_cap() -> None:

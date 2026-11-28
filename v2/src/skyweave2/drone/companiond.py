@@ -185,6 +185,8 @@ class Companion:
         self.input_errors = 0  # inputs whose processing raised; logged, loop kept alive
         self._degraded_logged = 0  # tracker.degraded_dropped at the last warning
         self._next_degraded_log = 0
+        self._hold_logged = 0  # tracker.hold_dropped at the last warning
+        self._next_hold_log = 0
 
     def _open(self, sock: _Sock) -> _Sock:
         self._stack.callback(sock.close)
@@ -250,6 +252,7 @@ class Companion:
         for dg in self.commands.poll_raw():
             self._guarded("command", lambda d=dg: self._command(d))
         self._log_degraded(now)
+        self._log_hold(now)
         t = self.clock()
         if self._next_tick is None or t >= self._next_tick:
             self._guarded("tick", lambda: self._forward(self.core.on_tick(t)))
@@ -277,6 +280,24 @@ class Companion:
         )
         self._degraded_logged = tracker.degraded_dropped
         self._next_degraded_log = now + DEGRADED_LOG_MS
+
+    def _log_hold(self, now: int) -> None:
+        """E2a4-D1: the tracker drops a detection frame whose attitude is the
+        newest sample held more than ``attitude_hold_max_ms``. Say so, with
+        its own count, at most once per ``DEGRADED_LOG_MS``."""
+        tracker = self.core.tracker
+        if tracker is None or tracker.hold_dropped == self._hold_logged:
+            return
+        if now < self._next_hold_log:
+            return
+        log.warning(
+            "tracker dropped %d detection frames so far: the newest FC attitude was held "
+            "more than attitude_hold_max_ms (%d ms) at t_cap (E2a4-D1)",
+            tracker.hold_dropped,
+            tracker.config.attitude_hold_max_ms,
+        )
+        self._hold_logged = tracker.hold_dropped
+        self._next_hold_log = now + DEGRADED_LOG_MS
 
     def _command(self, dg: Datagram) -> None:
         ack = self.ui.receiver.receive(dg.data, self.clock())

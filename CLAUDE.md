@@ -18,7 +18,8 @@ drone work, read these instead of the detection list:
    and §7 still hold.
 3. `v2/docs/DRONE_CONTRACTS_D0.md`: the fenced drone contract. §11.1
    holds the 2026-11-20 vetting decisions (`V-` IDs) and §11.2 the
-   2026-11-21 E2 planning decisions (`E2-` IDs). A clause changes only in
+   2026-11-21 E2 planning decisions (`E2-` IDs). §11.3 to §11.5 hold the
+   later decisions (`E1-D12`.., `B-`, `E2a4-`). A clause changes only in
    a PR that cites its decision ID.
 4. `v2/docs/TESTING_DOCTRINE.md`: still applies.
 
