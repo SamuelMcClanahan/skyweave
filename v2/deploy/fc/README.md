@@ -24,7 +24,7 @@ the E1 brief.
 | Item | Assumed |
 | --- | --- |
 | FC | Matek H743-SLIM, firmware target `MatekH743` (not `MatekH743-bdshot`), ArduCopter 4.7.x |
-| Board version | The owner says V3. The E1 brief §1 says V4. Section 2 has a check for this |
+| Board version | V4 (the owner confirmed this on 2026-11-28; the E1 brief §1 agrees). Section 2 has a sensor check |
 | Frame | X quad, 210 mm motor diagonal, about 0.64 kg, top-heavy cone tower |
 | Motors, propellers | T-Motor Velox V2207 1750KV, Gemfan 51433 (5.1 in, 3 blades) |
 | ESC | 4-in-1, AM32 firmware, 55 A. DShot300. No bidirectional DShot, no ESC telemetry |
