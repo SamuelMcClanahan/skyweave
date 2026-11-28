@@ -398,6 +398,44 @@ def test_f1_udp_proof_not_peer_bound() -> None:
 
 
 # ---------------------------------------------------------------------------
+# [F1] (c): real FC, bench mode (B-D1). The serial half is in test_f_real_fc.py.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("real_fc", [False, True])
+def test_f1c_real_fc_loopback_link_writes_without_the_sitl_proof(
+    peer: MavPeer, real_fc: bool
+) -> None:
+    """[F1] (b)/(c), [F2], [F8], [F9], B-D1: on a loopback endpoint with no SITL proof,
+    a ``real_fc`` link writes the stream requests once the FC is heard, its HEARTBEAT on
+    the health beat (an onboard controller, no mode), a tone and an exit request. The
+    same link without ``real_fc`` writes zero bytes and counts the attempts."""
+    clock = StepClock()
+    link = FcLink(peer.endpoint, clock, LinkConfig(real_fc=real_fc))
+    link.connect(timeout_s=2.0)
+    peer.accept()
+    peer.send(link, heartbeat(GUIDED), attitude(), rc(1100))  # an FC; never SIMSTATE
+    assert not link.sitl_proven
+    assert link.maybe_health() is not None
+    tone = link.request(FcRequest(kind=FcRequestKind.TONE, value="ENGAGED"))
+    rtl = link.request(FcRequest(kind=FcRequestKind.MODE_RTL))
+    frames = parse_frames(peer.drain())
+    if real_fc:
+        assert (tone, rtl) == (True, True)
+        assert types(frames) == ["COMMAND_LONG"] * 7 + ["HEARTBEAT", "PLAY_TUNE", "COMMAND_LONG"]
+        assert commands(frames) == [SET_INTERVAL] * 7 + [SET_MODE]
+        hb = frames[7]
+        assert (hb.get_srcSystem(), hb.get_srcComponent()) == (1, 191)
+        assert hb.type == mavlink2.MAV_TYPE_ONBOARD_CONTROLLER
+        assert (hb.base_mode, hb.custom_mode) == (0, 0)
+        assert link.blocked_writes == 0
+    else:
+        assert (tone, rtl) == (False, False)
+        assert frames == []
+        assert link.blocked_writes == 2  # the SITL link never tries a HEARTBEAT
+
+
+# ---------------------------------------------------------------------------
 # [F5]: the setpoint gate
 # ---------------------------------------------------------------------------
 

@@ -71,6 +71,10 @@ class LinkConfig:
     here unlocks it. ``link_bound_ms`` is the contract's ``fc_link_bound_ms``.
     ``telemetry_hz`` and ``heartbeat_hz`` are the [F2] request rates for the
     [M2a] telemetry (Provisional, E1).
+
+    ``real_fc`` is the [F1] (c) bench mode (B-D1): only an explicit ``True``
+    lets fc_link open a serial device and write without the SITL proof. It
+    cannot be combined with ``setpoints_enabled``; that pair is refused here.
     """
 
     attitude_hz: float = 50.0
@@ -80,6 +84,7 @@ class LinkConfig:
     telemetry_hz: float = 10.0
     heartbeat_hz: float = 2.0
     setpoints_enabled: bool = False
+    real_fc: bool = False
     v_xy_hard: float = 5.0
     v_z_hard: float = 2.0
     yaw_rate_hard: float = math.radians(90.0)
@@ -93,6 +98,13 @@ class LinkConfig:
     fc_compid: int = 1
 
     def __post_init__(self) -> None:
+        if not isinstance(self.real_fc, bool):
+            raise ValueError("real_fc must be a bool")
+        if self.real_fc and self.setpoints_enabled:
+            raise ValueError(
+                "real_fc with setpoints_enabled is refused ([F1] (c), B-D1): "
+                "the setpoint gate cannot be unlocked on a real FC"
+            )
         if not 1 <= self.approve_channel <= 18:
             raise ValueError("approve_channel must be an RC_CHANNELS channel, 1..18")
         if not (self.approve_pwm_valid_min <= self.approve_pwm_high <= self.approve_pwm_valid_max):
@@ -114,16 +126,21 @@ class LinkConfig:
     @classmethod
     def from_obj(cls, obj: Any) -> LinkConfig:
         """Inverse of :meth:`to_obj`. Every field is required, unknown keys are
-        refused, and nothing is coerced (an int field never takes a bool)."""
+        refused, and nothing is coerced (an int field never takes a bool). One
+        exception: a recording made before B-D1 has no ``real_fc`` key and
+        reads as ``real_fc = False`` (the only mode that existed)."""
         if not isinstance(obj, Mapping):
             raise ValueError("link config must be a JSON object")
         names = {f.name for f in fields(cls)}
-        if set(obj) != names:
-            missing = sorted(names - set(obj))
-            unknown = sorted(set(obj) - names)
+        given = set(obj) | {"real_fc"}
+        if given != names:
+            missing = sorted(names - given)
+            unknown = sorted(given - names)
             raise ValueError(f"link config keys: missing {missing}, unknown {unknown}")
         kwargs: dict[str, Any] = {}
         for f in fields(cls):
+            if f.name not in obj:
+                continue  # real_fc, before B-D1: the default
             val = obj[f.name]
             if f.type == "bool":
                 if not isinstance(val, bool):

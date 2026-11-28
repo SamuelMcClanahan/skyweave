@@ -1,7 +1,8 @@
 """fc_link v1: MAVLink2 between the companion and the FC (DRONE_CONTRACTS_D0.md §6).
 
-Phase E1 is SITL only, and this module is built so that nothing in it can
-command a real flight controller ([F1], E1-D7):
+This module is built so that nothing in it can command a real flight
+controller ([F1], E1-D7, B-D1). Without the ``real_fc`` option it is SITL
+only:
 
 * (a) the endpoint must be a literal ``127.0.0.1`` TCP or UDP endpoint; a
   serial device, a hostname (even ``localhost``), or any other host is refused
@@ -18,7 +19,24 @@ command a real flight controller ([F1], E1-D7):
   prove nor feed a link whose writes go to the first. ArduCopter 4.7.0 SITL
   streams on SERIAL1 receive-only when the SITL defaults file sets ``MAV2_*``
   rates (``sitl.py`` documents the experiment), so the contract's one allowed
-  pre-proof HEARTBEAT is never needed and fc_link sends no HEARTBEAT at all.
+  pre-proof HEARTBEAT is never needed and a SITL link sends no HEARTBEAT at
+  all.
+
+With ``LinkConfig.real_fc = True`` it is the real FC's bench link ([F1] (c),
+B-D1):
+
+* the endpoint may also be ``serial:<device>:<baud>`` (:class:`SerialTransport`);
+  a non-loopback host is still refused;
+* the write path does not wait for the SITL proof. What can then be written:
+  the [F2] stream requests (when the FC autopilot is first heard, and again
+  each time it is heard after a link loss, because a rebooted FC forgets them
+  and a UART never "reconnects"), one companion ``HEARTBEAT`` per health
+  period (:meth:`FcLink.maybe_health`), tones [F8], and the [F9] exit requests;
+* the setpoint gate cannot be enabled: ``real_fc`` with ``setpoints_enabled``
+  is refused at construction (by ``LinkConfig`` and again by
+  :class:`FcLink`), and :attr:`FcLink.gate_state` is ``locked`` whenever
+  ``real_fc`` is set. So a velocity send or an arm-and-takeoff writes zero
+  bytes to a real FC and is counted in :attr:`FcLink.blocked_count`.
 
 There is no parameter-write path (no ``PARAM_SET``) and no RC override path in
 this module. The setpoint gate ([F5]) is ``locked`` unless the configuration
@@ -36,8 +54,10 @@ Every frame received or sent goes to the recorder as raw bytes ([F10]).
 from __future__ import annotations
 
 import math
+import os
 import re
 import socket
+import termios
 from typing import Any
 
 from pymavlink.dialects.v20 import ardupilotmega as mavlink2
@@ -70,7 +90,15 @@ TONES: dict[str, str] = {
 }
 """[F8] contract §9 tone table (E1): one distinct short MML tune per state name."""
 
+SERIAL_PREFIX = "serial:"
+SERIAL_BAUDS = (57600, 115200, 230400, 460800, 500000, 921600, 1500000, 2000000)
+"""[F1] (c): the rates ``serial:<device>:<baud>`` accepts (ArduPilot ``SERIALn_BAUD``
+rates from 57600 up; Linux ``termios`` has every one)."""
+
 _ENDPOINT_RE = re.compile(r"(?P<scheme>[a-z]+):(?P<host>[^:/]+):(?P<port>[0-9]{1,5})")
+# The device is an absolute path and may hold colons (/dev/serial/by-path/...):
+# the baud rate is what follows the last colon.
+_SERIAL_RE = re.compile(r"serial:(?P<device>/.+):(?P<baud>[0-9]{1,8})")
 
 
 class EndpointRefused(ValueError):
@@ -87,8 +115,8 @@ def _parse_endpoint(endpoint: Any) -> tuple[str, str, int]:
     m = _ENDPOINT_RE.fullmatch(endpoint)
     if m is None:
         raise EndpointRefused(
-            f"{endpoint!r} is not '<tcp|udp|udpin|udpout>:127.0.0.1:<port>'; serial devices "
-            "and other forms are refused in phase E1 ([F1])"
+            f"{endpoint!r} is not '<tcp|udp|udpin|udpout>:127.0.0.1:<port>'; a serial device "
+            "needs the real_fc option ([F1] (c)) and other forms are refused ([F1])"
         )
     scheme, host, port = m["scheme"], m["host"], int(m["port"])
     if scheme not in ENDPOINT_SCHEMES:
@@ -100,9 +128,32 @@ def _parse_endpoint(endpoint: Any) -> tuple[str, str, int]:
     return scheme, host, port
 
 
-def check_endpoint(endpoint: str) -> None:
-    """[F1] (a): raise :class:`EndpointRefused` unless ``endpoint`` is loopback."""
-    _parse_endpoint(endpoint)
+def _parse_serial(endpoint: str) -> tuple[str, int]:
+    m = _SERIAL_RE.fullmatch(endpoint)
+    if m is None:
+        raise EndpointRefused(
+            f"{endpoint!r} is not 'serial:<absolute device path>:<baud>' ([F1] (c))"
+        )
+    device, baud = m["device"], int(m["baud"])
+    if baud not in SERIAL_BAUDS:
+        raise EndpointRefused(f"baud {baud} refused; only {SERIAL_BAUDS} ([F1] (c))")
+    return device, baud
+
+
+def _is_serial(endpoint: Any) -> bool:
+    return isinstance(endpoint, str) and endpoint.startswith(SERIAL_PREFIX)
+
+
+def check_endpoint(endpoint: str, real_fc: bool = False) -> None:
+    """[F1] (a): raise :class:`EndpointRefused` unless ``endpoint`` is loopback.
+
+    [F1] (c): only with ``real_fc is True``, ``serial:<device>:<baud>`` is
+    accepted too. Nothing is opened and the device need not exist yet.
+    """
+    if real_fc is True and _is_serial(endpoint):
+        _parse_serial(endpoint)
+    else:
+        _parse_endpoint(endpoint)
 
 
 def clamp_velocity(cmd: VelocityCommand, cfg: LinkConfig) -> VelocityCommand:
@@ -198,6 +249,78 @@ class MavTransport:
         self.sock.close()
 
 
+class SerialTransport:
+    """Raw byte transport to one serial device ([F1] (c), B-D1; non-blocking).
+
+    The port is opened raw, 8N1, with no flow control and no modem control,
+    at the endpoint's baud rate. Every failure is an ``OSError``: a missing
+    device at open, and :class:`LinkClosed` when the device goes away under
+    us (USB or UART adapter unplugged), so the caller's reconnect loop treats
+    it like a closed socket. Bytes buffered before the open are dropped: they
+    would get a receive time that is not theirs ([F2]).
+    """
+
+    foreign_datagrams = 0  # a UDP notion; a serial line has one peer
+
+    def __init__(self, endpoint: str) -> None:
+        device, baud = _parse_serial(endpoint)
+        speed = getattr(termios, f"B{baud}", None)
+        if speed is None:
+            raise OSError(f"this platform's termios has no B{baud}")
+        self.fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            attrs = termios.tcgetattr(self.fd)
+            attrs[0] = 0  # iflag: no break, parity, CR/NL or XON/XOFF handling
+            attrs[1] = 0  # oflag: no output processing
+            attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL  # 8N1, no RTS/CTS
+            attrs[3] = 0  # lflag: no echo, no line editing, no signals
+            attrs[4] = attrs[5] = speed
+            # VMIN 1 with O_NONBLOCK: "nothing to read" is EAGAIN, so an empty
+            # read can only mean the device hung up.
+            attrs[6][termios.VMIN] = 1
+            attrs[6][termios.VTIME] = 0
+            termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
+            termios.tcflush(self.fd, termios.TCIOFLUSH)
+        except termios.error as exc:  # not an OSError; e.g. the path is not a tty
+            os.close(self.fd)
+            raise OSError(f"{device}: {exc}") from exc
+        except BaseException:
+            os.close(self.fd)
+            raise
+
+    def fileno(self) -> int:
+        return self.fd
+
+    def recv(self) -> bytes:
+        """Everything readable now; ``b""`` when nothing is. Raises :class:`LinkClosed`."""
+        chunks: list[bytes] = []
+        while True:
+            try:
+                data = os.read(self.fd, 65536)
+            except (BlockingIOError, InterruptedError):
+                break
+            except OSError as exc:  # EIO, ENXIO, ENODEV: the device is gone
+                raise LinkClosed(f"serial device gone: {exc}") from exc
+            if not data:
+                raise LinkClosed("serial device hung up")
+            chunks.append(data)
+        return b"".join(chunks)
+
+    def send(self, data: bytes) -> bool:
+        """Write one whole frame. A frame the port will not take whole (output
+        buffer full) raises :class:`LinkClosed`; a device error is an ``OSError``."""
+        try:
+            n = os.write(self.fd, data)
+        except BlockingIOError:
+            n = 0
+        if n != len(data):
+            raise LinkClosed(f"serial port took {n} of {len(data)} bytes")
+        return True
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
 class FcLink:
     """The companion's one MAVLink link to the FC ([F1]-[F11])."""
 
@@ -208,7 +331,15 @@ class FcLink:
         config: LinkConfig,
         recorder: Recorder | None = None,
     ) -> None:
-        check_endpoint(endpoint)  # [F1] (a): refused before any socket exists
+        # [F1] (c): the bench mode never has an unlockable gate. LinkConfig
+        # refuses the pair too; this is the link's own check.
+        if config.real_fc and config.setpoints_enabled:
+            raise ValueError(
+                "real_fc with setpoints_enabled is refused ([F1] (c), B-D1): "
+                "the setpoint gate cannot be unlocked on a real FC"
+            )
+        self.real_fc = config.real_fc is True
+        check_endpoint(endpoint, self.real_fc)  # [F1] (a)/(c): refused before anything opens
         self.endpoint = endpoint
         self.config = config
         self.state = VehicleState(config)
@@ -218,7 +349,7 @@ class FcLink:
             None, srcSystem=config.companion_sysid, srcComponent=config.companion_compid
         )
         self._parser: Any = None
-        self._transport: MavTransport | None = None
+        self._transport: MavTransport | SerialTransport | None = None
         self.sitl_proven = False  # [F1] (b), per connection
         self.streams_requested = False  # [F2], per connection
         self.blocked_count = 0  # [F5] gate-blocked velocity sends and arm-and-takeoffs
@@ -235,7 +366,10 @@ class FcLink:
 
     @property
     def gate_state(self) -> GateState:
-        """[F5]: ``locked`` unless the configuration explicitly enables setpoints."""
+        """[F5]: ``locked`` unless the configuration explicitly enables setpoints.
+        [F1] (c): always ``locked`` on a real FC."""
+        if self.config.real_fc is not False:
+            return GateState.LOCKED
         return GateState.ENABLED if self.config.setpoints_enabled is True else GateState.LOCKED
 
     @property
@@ -254,9 +388,14 @@ class FcLink:
 
     def connect(self, timeout_s: float) -> None:
         """Open the endpoint. Receive-only until the SITL proof ([F1] (b)); the
-        [F2] stream requests go out from :meth:`poll` right after the proof."""
+        [F2] stream requests go out from :meth:`poll` right after the proof.
+        With ``real_fc`` ([F1] (c)) they go out when the FC is heard. A serial
+        device that is missing raises ``OSError`` (the caller retries)."""
         self.close()
-        self._transport = MavTransport(self.endpoint, timeout_s)
+        if _is_serial(self.endpoint):  # only reachable with real_fc (constructor)
+            self._transport = SerialTransport(self.endpoint)
+        else:
+            self._transport = MavTransport(self.endpoint, timeout_s)
         self._parser = mavlink2.MAVLink(None)
         self._parser.robust_parsing = True
 
@@ -283,6 +422,7 @@ class FcLink:
             return 0
         t = self._clock()
         cfg = self.config
+        was_up = self.state.link_up(t)  # before this chunk ([F1] (c) below)
         n = 0
         for msg in self._parser.parse_buffer(data) or []:
             if msg.get_type() == "BAD_DATA":
@@ -299,7 +439,16 @@ class FcLink:
             ):
                 self.sitl_proven = True
         self.rx_frames += n
-        if self.sitl_proven and not self.streams_requested:
+        if self.real_fc:
+            # [F1] (c): no proof to wait for. Ask when the FC autopilot is heard,
+            # and again when it is heard after a link loss: a rebooted FC has
+            # forgotten the requests, and a UART does not close when it reboots.
+            ready = self.state.link_up(t)
+            if not was_up:
+                self.streams_requested = False
+        else:
+            ready = self.sitl_proven
+        if ready and not self.streams_requested:
             self._request_streams(t)
         return n
 
@@ -322,8 +471,9 @@ class FcLink:
     # -- send -----------------------------------------------------------------
 
     def _write(self, msg: Any, t: int) -> bool:
-        """The one write path. Zero bytes before the SITL proof ([F1] (b))."""
-        if not self.sitl_proven or self._transport is None:
+        """The one write path. Zero bytes before the SITL proof ([F1] (b)),
+        which only ``real_fc`` replaces ([F1] (c))."""
+        if not (self.sitl_proven or self.real_fc) or self._transport is None:
             self.blocked_writes += 1
             return False
         raw = bytes(msg.pack(self._mav))
@@ -433,7 +583,12 @@ class FcLink:
         )
 
     def maybe_health(self) -> FcLinkHealthPacket | None:
-        """[F4]: a health packet once per ``health_period_ms`` (recorded when due)."""
+        """[F4]: a health packet once per ``health_period_ms`` (recorded when due).
+
+        [F1] (c): on a real FC's open link the companion ``HEARTBEAT`` goes out
+        on the same beat (an onboard controller; it carries no mode and no
+        command). A SITL link sends none.
+        """
         pkt = self.health_packet()
         if self._last_health_t is not None and pkt.t - self._last_health_t < (
             self.config.health_period_ms
@@ -442,4 +597,13 @@ class FcLink:
         self._last_health_t = pkt.t
         if self._recorder is not None:
             self._recorder.packet(pkt.t, pkt)
+        if self.real_fc and self._transport is not None:
+            hb = self._mav.heartbeat_encode(
+                mavlink2.MAV_TYPE_ONBOARD_CONTROLLER,
+                mavlink2.MAV_AUTOPILOT_INVALID,
+                0,
+                0,
+                mavlink2.MAV_STATE_ACTIVE,
+            )
+            self._write(hb, pkt.t)
         return pkt

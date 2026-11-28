@@ -36,14 +36,28 @@ anything is opened. The setpoint gate is locked unless ``--enable-setpoints``
 is given ([F5]). The process has no parameter-write path, no RC override, and
 records no frames.
 
+Real FC, bench mode ([F1] (c), B-D1): only with ``--real-fc`` the endpoint may
+be ``serial:<device>:<baud>`` and the link writes without the SITL proof
+(stream requests, its heartbeat, tones, exit requests). In that mode the
+setpoint gate cannot be unlocked: ``--real-fc`` with ``--enable-setpoints`` is
+refused before anything opens, so arm, takeoff and velocity setpoints write
+zero bytes. A serial device that is missing or unplugged is retried every
+``fc_retry_ms``; the loop keeps running. The recording's ``meta.config`` says
+which mode ran (``link.real_fc``).
+
 The UI token comes from the environment variable named by :data:`UI_ENV_VAR`
 (not argv, which other users can read in the process table). It never enters
 a configuration object, a recording, or a log ([P5c]).
 
-Run (SITL only in E1)::
+Run (SITL)::
 
     SKYWEAVE_UI_TOKEN=... python -m skyweave2.drone.companiond \\
         --fc tcp:127.0.0.1:5762 --record flight.jsonl
+
+Run (real FC on the bench: props off, no power to the motors)::
+
+    SKYWEAVE_UI_TOKEN=... python -m skyweave2.drone.companiond \\
+        --real-fc --fc serial:/dev/ttyS4:921600 --record bench.jsonl
 """
 
 from __future__ import annotations
@@ -120,7 +134,8 @@ class Companion:
     def __init__(
         self, config: CompanionConfig, ui_token: str, *, clock: Clock | None = None
     ) -> None:
-        check_endpoint(config.fc_endpoint)  # [F1] (a): refused before anything opens
+        # [F1] (a)/(c): refused before anything opens
+        check_endpoint(config.fc_endpoint, config.core.link.real_fc)
         self.config = config
         self.clock: Clock = clock if clock is not None else live_clock()
         self.lock = threading.Lock()
@@ -179,7 +194,8 @@ class Companion:
         return self.server.url
 
     def start(self) -> None:
-        """Serve the UI and open the FC link (receive-only until the SITL proof)."""
+        """Serve the UI and open the FC link (receive-only until the SITL proof;
+        with ``real_fc`` there is no proof to wait for, [F1] (c))."""
         self.server.start()
         with self.lock:
             self._connect(self.clock())
@@ -265,7 +281,10 @@ class Companion:
             self._next_connect = now + self.config.fc_retry_ms
             log.warning("FC link %s not open (%s); retrying", self.config.fc_endpoint, exc)
             return
-        log.info("FC link %s open (receive-only until the SITL proof)", self.config.fc_endpoint)
+        if self.config.core.link.real_fc:
+            log.info("FC link %s open (REAL FC, bench mode)", self.config.fc_endpoint)
+        else:
+            log.info("FC link %s open (receive-only until the SITL proof)", self.config.fc_endpoint)
 
     def _forward(self, out: CoreOutput) -> None:
         """What every core output does: publish (tracks, then mission states),
@@ -280,13 +299,30 @@ class Companion:
             self.fc_link.send_velocity(out.setpoint)
 
 
-def main(argv: list[str] | None = None) -> int:
+def config_from_args(argv: list[str] | None = None) -> CompanionConfig:
+    """The command line as the process configuration (nothing is opened).
+
+    ``--real-fc`` with ``--enable-setpoints`` raises ``ValueError``: the
+    setpoint gate cannot be unlocked on a real FC ([F1] (c), B-D1).
+    """
     parser = argparse.ArgumentParser(
         prog="python -m skyweave2.drone.companiond",
-        description="SkyWeave companion process (phase E1: SITL only). "
-        f"The UI token is read from ${UI_ENV_VAR}.",
+        description="SkyWeave companion process (SITL, or a real FC on the bench with "
+        f"--real-fc). The UI token is read from ${UI_ENV_VAR}.",
     )
-    parser.add_argument("--fc", required=True, help="FC endpoint, tcp:127.0.0.1:<port> ([F1])")
+    parser.add_argument(
+        "--fc",
+        required=True,
+        help="FC endpoint ([F1]): tcp:127.0.0.1:<port> or udp|udpin|udpout:127.0.0.1:<port>; "
+        "with --real-fc also serial:<device>:<baud>, for example serial:/dev/ttyS4:921600",
+    )
+    parser.add_argument(
+        "--real-fc",
+        action="store_true",
+        help="real FC, bench mode ([F1] (c), B-D1): allow a serial endpoint and write "
+        "without the SITL proof (stream requests, heartbeat, tones, exit requests). "
+        "Setpoints cannot be unlocked in this mode: refused together with --enable-setpoints",
+    )
     parser.add_argument("--record", required=True, type=Path, help="new recording file (.jsonl)")
     parser.add_argument("--ui-host", default=LOOPBACK)
     parser.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT)
@@ -294,22 +330,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--enable-setpoints",
         action="store_true",
-        help="unlock the setpoint gate ([F5]); locked by default",
+        help="unlock the setpoint gate ([F5]); locked by default; SITL only, never with --real-fc",
     )
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    ui_token = os.environ.get(UI_ENV_VAR, "")
-    if not ui_token:
-        log.error("set %s to the shared UI token", UI_ENV_VAR)
-        return 2
-    config = CompanionConfig(
+    link = LinkConfig(  # refuses real_fc with setpoints_enabled ([F1] (c))
+        setpoints_enabled=bool(args.enable_setpoints), real_fc=bool(args.real_fc)
+    )
+    return CompanionConfig(
         fc_endpoint=args.fc,
         recording=args.record,
-        core=CoreConfig(link=LinkConfig(setpoints_enabled=bool(args.enable_setpoints))),
+        core=CoreConfig(link=link),
         tick_hz=args.tick_hz,
         ui_host=args.ui_host,
         ui_port=args.ui_port,
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    try:
+        config = config_from_args(argv)
+    except ValueError as exc:
+        log.error("companion not started: %s", exc)
+        return 2
+    ui_token = os.environ.get(UI_ENV_VAR, "")
+    if not ui_token:
+        log.error("set %s to the shared UI token", UI_ENV_VAR)
+        return 2
     try:
         companion = Companion(config, ui_token)
     except (OSError, ValueError) as exc:  # messages never carry the token
@@ -318,6 +365,14 @@ def main(argv: list[str] | None = None) -> int:
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     try:
+        if config.core.link.real_fc:
+            log.info(
+                "REAL FC, bench mode on %s: setpoints cannot be unlocked; arm, takeoff and "
+                "velocity setpoints write zero bytes. Props off, no power to the motors",
+                config.fc_endpoint,
+            )
+        else:
+            log.info("SITL mode on %s: receive-only until the SITL proof", config.fc_endpoint)
         companion.start()
         log.info("ground UI at %s; gate %s", companion.ui_url, config.core.gate.value)
         companion.run(stop)
