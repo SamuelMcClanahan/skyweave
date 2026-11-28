@@ -6,7 +6,8 @@ planning decisions; E2a-1 and E2a-2: [C2], [C3], [G1], [G2], [G4], [G6],
 [R2], [R4] and §9 for V-D1, E2-D2 and V-D11); 2026-11-24 (§11.3 E1
 leftover decisions; [P5], [M5], [M8], [G5], [G7], [G10], [G12], [U3], [U6], [U7]; amended
 2026-11-27: E1-D15 keeps the token across a reload; §11.4 bench bring-up
-decisions, [F1] part (c))
+decisions, [F1] part (c)); 2026-11-28 (E2a-4: [P2], [P2b], [G1], [K1], [K2]
+and §10 for V-D10; §11.5 findings)
 **Status:** §2 (JSON wire v1) is FROZEN per `PHASE_E1_BRIEF.md` 3.7. §1 and
 §3-§8 are behavior clauses written in phase E1, labeled clause by clause.
 Nothing in this document is Measured. Numbers marked Provisional are
@@ -137,15 +138,33 @@ frame share that frame's `t_cap`.
 | `t_cap` | int >= 0 | board ms | `t_cap` of the detection frame this state belongs to |
 | `track_id` | int >= 1 | - | Unique within one board boot; never reused, including across tracker restarts |
 | `state` | string | - | `tentative`, `confirmed`, or `coasting` |
-| `u` | float | px | Filtered box center, u |
-| `v_px` | float | px | Filtered box center, v |
-| `du` | float | px/s | Rate of `u` |
-| `dv` | float | px/s | Rate of `v_px` |
+| `u` | float | px | Filtered box center, u: the filtered line of sight projected into the raw image [C2] with the attitude at `t_cap` (V-D10, [P2b]) |
+| `v_px` | float | px | Filtered box center, v, the same way |
+| `du` | float | px/s | Rate of `u` from the line-of-sight rate alone, with the camera held at the attitude at `t_cap`. The vehicle's own rotation is not in it (V-D10, [P2b]) |
+| `dv` | float | px/s | Rate of `v_px`, the same way |
 | `w` | float > 0 | px | Filtered box width |
 | `h` | float > 0 | px | Filtered box height |
 | `hits` | int >= 0 | frames | Consecutive frames with an associated detection, ending at this frame (0 if this frame was a miss) |
 | `misses` | int >= 0 | frames | Consecutive frames without an associated detection, ending at this frame (0 if this frame was a hit) |
 | `age_frames` | int >= 1 | frames | Frames since birth, birth frame counted |
+| `los_n`, `los_e`, `los_d` | float, optional | - | (V-D10, additive) The filtered line of sight in NED [C3], a unit vector (norm 1 within 1e-6) |
+| `dlos_n`, `dlos_e`, `dlos_d` | float, optional | 1/s | (V-D10, additive) The time derivative of that unit vector. Its norm is the line-of-sight rate in rad/s |
+
+**[P2b] Line of sight on the track packet (V-D10, E2a-4).** The six `los`
+fields are additive in wire v1 ([C7]). A packet has all six or none; a
+packet with some of them, or with a `los` that is not a unit vector, is
+rejected. The companion's tracker [K1] always sends them. A packet without
+them is still a v1 track packet (a recording made before V-D10, or another
+tracker); [G1] says how guidance reads it. `u`, `v_px`, `du`, `dv` keep their
+names and units. They now describe the filtered line of sight in the image
+at `t_cap`: `u`, `v_px` are where it falls in the raw image [C2] with the
+attitude at `t_cap` (so [G1] applied to them gives `los` back), and `du`,
+`dv` are the image rate that `dlos` alone gives with the camera held at that
+attitude. A static target seen from a turning vehicle has `du` = `dv` = 0
+while `u`, `v_px` move from packet to packet. When the line of sight has no
+image at `t_cap` (it lies behind the image plane, or outside the lens model,
+[G1]), `u` and `v_px` keep the values of the track's previous packet and
+`du`, `dv` are 0. `w` and `h` stay the box size in raw pixels.
 
 **[P2a] Track death.** `coast_cap` is one configuration value shared by the
 tracker and the companion (it is in the recording's `meta.config` [R2]). A
@@ -472,7 +491,14 @@ Every transition the code makes is a row here; any other change is a defect.
 
 - **[G1] De-rotation.** A track's line of sight in NED is
   `los = R_ned_body(att(t_cap)) . R_body_cam . normalize(ray)`, with
-  `ray = ((u - cx)/f, (v_px - cy)/f, 1)`. Attitude samples are indexed by
+  `ray = ((u - cx)/f, (v_px - cy)/f, 1)`. The tracker applies this to each
+  detection box center before it filters ([K1], V-D10), and its track packet
+  carries the filtered result (`los_*`, [P2b]). Guidance takes that line of
+  sight as it is; it does not de-rotate `u`, `v_px` a second time (V-D10).
+  For a packet without the `los` fields, guidance applies the formula to the
+  packet's `u`, `v_px`, as before V-D10. The two paths agree whenever the
+  line of sight has an image, because `u`, `v_px` are that line of sight
+  projected with the same attitude sample ([P2b]). Attitude samples are indexed by
   their board-ms receive time [F2] (`time_boot_ms` is stored, not mapped, in
   v1; E1-F8). If `t_cap` lies between two samples, roll, pitch, and unwrapped
   yaw are interpolated linearly; outside the stored span the nearest sample
@@ -841,7 +867,7 @@ Tone table (E1, [F8], [M12]): `ACQUIRING`, `ENGAGED`, `TOUCH`, `LOST`,
 | P | [C5]-[C9], [P1]-[P5] | Golden packet fixtures beside the tests; byte-exact canonical encoding; decode/encode round-trip; unknown-field tolerance; version, type, range, and undecodable-input rejection through one error type | fast |
 | R | [R1]-[R4] | Recording round-trip; token never recorded; replay of a recorded stream reproduces mission states, acks (except `rejected_malformed`), and setpoints, and, when the tracker runs in the core, the track records (E2-D5); miss vector recomputed offline | fast |
 | M | [M1]-[M12], T01-T24 | Every transition and every command rejection; precedence; lock stickiness against a higher-scoring track; approve settle; edge-gated launch; exit retries | fast |
-| K | [K1]-[K4], [P2a] | Provisional tracker: M-of-N confirm, coast cap and final packet, id uniqueness across restarts | fast |
+| K | [K1]-[K4], [P2a], [P2b] | Provisional tracker: M-of-N confirm, coast cap and final packet, id uniqueness across restarts; world angles (V-D10): one id through the vehicle's yaw and pitch, a zenith pass, re-centering, degraded frames dropped, the packet's line of sight and pixels | fast |
 | G | [G1]-[G12] | Synthetic geometry: known offsets give known commands, commit decisions, and miss vectors | fast |
 | F | [F1]-[F11] | Interlock refusal and SITL proof, gate provably blocks sends, setpoint form and limits, staleness via injected clock, radio approve detector; SITL scripted run (arm, takeoff, velocity, land) and injected attitude staleness | fast + slow (SITL) |
 | D | [P1], [C1], [C2], B-D2 | percepd v1 (`test_d_percepd.py`): letterbox and its inverse, decode per output layout, NMS, class filter, flight-grid mapping, packets through the frozen decoder, keep-latest gaps, source and send failures. One optional test runs a real model when a file is given | fast |
@@ -852,9 +878,29 @@ Tone table (E1, [F8], [M12]): `ACQUIRING`, `ENGAGED`, `TOUCH`, `LOST`,
 Tracker clauses (Provisional reimplementation, brief §2 spec):
 
 - **[K1]** Per-axis 2-state Kalman filter `[pos, vel]`, constant velocity, on
-  box center u, v and size w, h.
-- **[K2]** IoU association; a track confirms after M hits in its first N
-  frames.
+  the box center and on the size w, h. The center is filtered in world
+  angles (V-D10). The tracker undistorts each box center (V-D11) and
+  de-rotates it with the attitude at the frame's `t_cap` ([G1]) before it
+  filters it, so the vehicle's own rotation is not in a track. It does not
+  filter azimuth and elevation (azimuth is singular at the zenith, where the
+  `cone_up` view is centered). Each track keeps a reference direction `d0`
+  (its first line of sight) and two axes `e1`, `e2` across it, all fixed in
+  NED. The two center filters run on the gnomonic coordinates of the line of
+  sight in that tangent plane: `x = f (los . e1) / (los . d0)`,
+  `y = f (los . e2) / (los . d0)`, with `f` the lens `f` in px, so one unit
+  is one pixel at the image center. When the filtered direction is more than
+  `recenter_deg` (5 deg, Provisional) from `d0`, `d0` moves to it; the line
+  of sight and its rate do not change. The size filters run on the raw pixel
+  width and height. A box whose center has no finite ray ([G1]) is ignored.
+  An attitude-degraded detection frame ([G1]: no attitude sample within
+  `attitude_bound_ms` of its `t_cap`) is dropped whole: it gives no packet,
+  changes no track, and is counted. The next good frame predicts over the
+  real time gap, and `track_timeout_ms` [P2a] bounds the gap for the
+  mission. So without `ATTITUDE` from the FC there are no tracks.
+- **[K2]** IoU association in the track's tangent plane (V-D10): the track's
+  predicted box and each detection box are compared with their centers at
+  their [K1] tangent-plane points and their pixel sizes as the extents. A
+  track confirms after M hits in its first N frames.
 - **[K3]** A confirmed track coasts on a miss and dies per [P2a].
 - **[K4]** `track_id` uniqueness per [P2]: ids start from a base derived from
   the tracker's start time on the board clock.
