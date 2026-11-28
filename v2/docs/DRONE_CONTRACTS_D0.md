@@ -4,7 +4,8 @@
 probe scenarios for V-F3, V-D15, V-D16, V-F2); 2026-11-21 (§11.2 E2
 planning decisions; E2a-1 and E2a-2: [C2], [C3], [G1], [G2], [G4], [G6],
 [R2], [R4] and §9 for V-D1, E2-D2 and V-D11); 2026-11-24 (§11.3 E1
-leftover decisions; [P5], [M5], [M8], [G5], [G7], [G10], [G12], [U6], [U7])
+leftover decisions; [P5], [M5], [M8], [G5], [G7], [G10], [G12], [U3], [U6], [U7]; amended
+2026-11-27: E1-D15 keeps the token across a reload)
 **Status:** §2 (JSON wire v1) is FROZEN per `PHASE_E1_BRIEF.md` 3.7. §1 and
 §3-§8 are behavior clauses written in phase E1, labeled clause by clause.
 Nothing in this document is Measured. Numbers marked Provisional are
@@ -637,7 +638,10 @@ Every transition the code makes is a row here; any other change is a defect.
   `approve_engage`, `mark_complete`, `abort`. No joystick, no manual velocity,
   no other command, ever. Any other command name is refused.
 - **[U3]** Ack by id [P5a] with a fresh random `cmd_id` per command, and the
-  shared token [P5c]. The page never stores the token beyond its own memory.
+  shared token [P5c]. The page keeps the token in its own memory and in the
+  tab's `sessionStorage`, so a reload of the same tab keeps it (E1-D15). It
+  never writes the token to `localStorage`, a cookie, or a URL. Closing the
+  tab drops it.
 - **[U4]** The page shows the state banner, engaged track (and the candidate
   awaiting approval), battery, and link health (FC link, attitude age, RC,
   gate state, ground link), plus the trial echo and recent events.
@@ -648,9 +652,11 @@ Every transition the code makes is a row here; any other change is a defect.
   the token matches ([P5c] compare). The page sends the header once the
   operator has typed the token. `GET /state` answers every poll with the
   view; a poll with no token or a wrong one is not a heartbeat, writes no
-  `ground_hb` record, and is counted. The token never travels in a URL. After
-  a page reload the heartbeat stops until the token is typed again; in
-  flight, T18 then fires after `ground_link_timeout_ms`.
+  `ground_hb` record, and is counted. The token never travels in a URL. A
+  reload of the same tab keeps the token [U3], so the heartbeat resumes with
+  the first poll after the reload. A new tab, a closed tab, or a browser
+  restart has no token: the heartbeat stops until the operator types it
+  again, and in flight T18 fires after `ground_link_timeout_ms`.
 - **[U7]** (E1-D12) The page sends `approve_engage` only with
   `params.track_id` set to the candidate it displays. With no candidate
   displayed it sends nothing.
@@ -951,5 +957,5 @@ Numbers are Provisional; none is Measured. [F1] still holds.
 | E1-D12 | Closes E1-F5. `approve_engage` may carry `params.track_id`. The mission accepts it only when that id is the current candidate; a different id is `rejected_state`. The UI page always sends the id of the candidate it displays, and sends no approve when it displays none. The radio approve carries no id and works as before. Additive in wire v1. Changes [P5], [M5], [M8]; adds [U7] | Chosen |
 | E1-D13 | Closes E1-F15. The trial `v_max` caps every velocity command in every direction: the altitude hold and the terminal climb obey it too. Adds [G12]; changes [G5], [G10]. The E1 gate primes 2.5 m/s, above `v_climb` and `v_alt_max`, so its commands do not change. E2-D4 still governs the E2 gate | Chosen |
 | E1-D14 | Closes E1-F16. The standoff hold clock keeps running through a short dropout (the track coasting, up to `coast_cap`). It restarts only when the vehicle leaves the tolerance, attitude is degraded, or the track is lost. `hold_complete` is still emitted only on a real (non-coasting) packet. Changes [G7]. Standoff trials stay out of E2 (E2-D7); this makes them testable with bad frames (V-D16) | Chosen |
-| E1-D15 | Closes E1-F17. Only a state poll that carries the right token is a ground heartbeat. Another device on the access point can still read the status page, but it no longer holds off the T18 ground-link failsafe. Accepted consequence: a page reload in flight stops the heartbeat until the operator types the token again, and T18 sends the vehicle to `RETURN` after `ground_link_timeout_ms`. The token now also travels in clear on each poll (E1-F14 already accepts clear text for controlled demos). Changes [U6] | Chosen |
+| E1-D15 | Closes E1-F17. Only a state poll that carries the right token is a ground heartbeat. Another device on the access point can still read the status page, but it no longer holds off the T18 ground-link failsafe. A page reload must not break the ground link (Samuel, 2026-11-27): the page keeps the token in the tab's `sessionStorage`, so a reload of the same tab keeps the heartbeat. Accepted consequence: a closed tab, a new tab or a browser restart stops the heartbeat until the operator types the token again, and T18 then sends the vehicle to `RETURN` after `ground_link_timeout_ms`. The token now also travels in clear on each poll (E1-F14 already accepts clear text for controlled demos). Changes [U3], [U6] | Chosen |
 | E1-D16 | Closes E1-F23. The switch position that brief 3.11 calls MANUAL is `ALT_HOLD` on the vehicle: the FC holds height while the pilot steers, which is the easiest takeover by sight. `STABILIZE` is the fallback if `ALT_HOLD` behaves badly on the first manual flights. The operator sets the flight-mode parameters (V-D7). The SITL harness keeps `STABILIZE` for that position, because the mission asks only whether the mode is `GUIDED`. No code change | Chosen (Provisional until the first manual flights) |
