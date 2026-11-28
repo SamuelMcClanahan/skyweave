@@ -99,8 +99,9 @@ not connect to GitHub, and the clock was wrong after each power cycle.
    (about 100 MB) and its `.sha256` file.
 
 The bundle contains the code, CPython 3.10 for the board, the wheels that
-`v2/uv.lock` pins (with hash checks), and this directory. If percepd needs
-more packages, give its extra: `--extras drone,<extra-name>`.
+`v2/uv.lock` pins (with hash checks), and this directory. The default
+extras are `drone,percepd`; `percepd` brings ONNX Runtime for the detector.
+To change them: `--extras <list>`.
 
 ### 4.2 Copy to the board
 
@@ -138,8 +139,8 @@ rsync -av --exclude .venv --exclude __pycache__ <repository>/v2 <user>@<board-ad
 sudo skyweave/v2/deploy/cubie/install.sh
 ```
 
-`uv` downloads CPython 3.10 and the locked packages. For more extras:
-`--extras drone,<extra-name>`.
+`uv` downloads CPython 3.10 and the locked packages. The default extras are
+`drone,percepd`. To change them: `--extras <list>`.
 
 ## 5. Configure
 
@@ -260,8 +261,10 @@ repository.
    ```
 
 2. Write its path to `SKYWEAVE_MODEL`.
-3. The line `SKYWEAVE_PERCEPD_CMD` is the full percepd command line. The
-   flag names of percepd are not final. If they change, change this line.
+3. The line `SKYWEAVE_PERCEPD_CMD` is the full percepd command line. Its
+   flags are those of percepd v1. The percepd README
+   (`v2/src/skyweave2/drone/percepd/README.md`) tells where to get the COCO
+   test model (`yolox_tiny.onnx`) and lists every flag.
 
 `SKYWEAVE_COMPANION_CMD` is the full companion command line. Do not add
 `--enable-setpoints`. The launcher refuses it (B-D1).

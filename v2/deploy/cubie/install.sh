@@ -38,7 +38,7 @@ readonly APT_PACKAGES=(ca-certificates iproute2 udev v4l-utils rsync)
 CLOCK_FLOOR_EPOCH=1793491200
 
 SOURCE=""
-EXTRAS=drone # repository-checkout mode only; a bundle has its own list
+EXTRAS=drone,percepd # repository-checkout mode only; a bundle has its own list
 DRY_RUN=0
 UNINSTALL=0
 PURGE=0

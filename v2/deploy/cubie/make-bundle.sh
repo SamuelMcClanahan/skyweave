@@ -13,12 +13,12 @@
 #   - requirements.txt with hashes (uv export from v2/uv.lock),
 #   - this deploy directory (install.sh, service files, README).
 # Default --out: the directory _local/bundles in the repository, if git
-# ignores it there. Default --extras: drone.
+# ignores it there. Default --extras: drone,percepd.
 set -euo pipefail
 export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXTRAS=drone
+EXTRAS=drone,percepd
 OUT_DIR=""
 PYTHON_REQUEST=cpython-3.10-linux-aarch64-gnu
 # pip tags for the board: CPython 3.10, glibc aarch64. Debian 13 has glibc
