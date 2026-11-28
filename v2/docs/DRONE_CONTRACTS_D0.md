@@ -5,7 +5,8 @@ probe scenarios for V-F3, V-D15, V-D16, V-F2); 2026-11-21 (§11.2 E2
 planning decisions; E2a-1 and E2a-2: [C2], [C3], [G1], [G2], [G4], [G6],
 [R2], [R4] and §9 for V-D1, E2-D2 and V-D11); 2026-11-24 (§11.3 E1
 leftover decisions; [P5], [M5], [M8], [G5], [G7], [G10], [G12], [U3], [U6], [U7]; amended
-2026-11-27: E1-D15 keeps the token across a reload)
+2026-11-27: E1-D15 keeps the token across a reload; §11.4 bench bring-up
+decisions, [F1] part (c))
 **Status:** §2 (JSON wire v1) is FROZEN per `PHASE_E1_BRIEF.md` 3.7. §1 and
 §3-§8 are behavior clauses written in phase E1, labeled clause by clause.
 Nothing in this document is Measured. Numbers marked Provisional are
@@ -586,7 +587,15 @@ Every transition the code makes is a row here; any other change is a defect.
   exception: a companion `HEARTBEAT`, if SITL needs one before it streams on
   that port); every blocked write is counted. The proof resets on reconnect.
   SITL stream rates for that port come from the SITL defaults file. fc_link
-  has no parameter-write code path at all.
+  has no parameter-write code path at all. (c) Real FC, bench mode (B-D1).
+  Only with the explicit option `real_fc` (companiond `--real-fc`), fc_link
+  also accepts a serial endpoint `serial:<device>:<baud>` and does not wait
+  for the SITL proof of (b): it may write the [F2] stream requests, a
+  companion `HEARTBEAT`, tones [F8] and the [F9] exit requests. With
+  `real_fc`, the setpoint gate [F5] cannot be enabled: construction with
+  `real_fc` and setpoints enabled is refused. So no velocity setpoint, arm
+  or takeoff ever reaches a real FC in this phase. Without the option, (a)
+  and (b) hold unchanged. The recording's `meta.config` says which mode ran.
 - **[F2] Attitude subscription.** After the proof, fc_link requests
   `ATTITUDE` at 50 Hz with `MAV_CMD_SET_MESSAGE_INTERVAL`, plus the telemetry
   [M2a] needs (`HEARTBEAT`, `EXTENDED_SYS_STATE`, `GLOBAL_POSITION_INT`,
@@ -966,3 +975,18 @@ Numbers are Provisional; none is Measured. [F1] still holds.
 | E1-F31 | No gate scene has a dropout inside a running hold: in S3 the short dropout falls during the approach. So E1-D14 is covered by fast tests only (one runs the real companion core). A standoff probe with random dropout (V-D16) would cover it on SITL | Finding |
 | E1-F32 | [G7] checks tolerance and attitude only at engaged-track packets. While the track coasts, `|q|` is not checked and guidance commands zero velocity ([G10]). The number of coasting stretches in one hold is not bounded. `hold_complete` can come later than start + `hold_time_s`, on the next real packet | Finding |
 | E1-F33 | From a read of the code, not measured: with random dropout, each single coasting frame fires T08 then T09 and resets the [G3] limiter to zero. At 2 % dropout and 60 fps that is about 1.2 resets per second, so the approach to a standoff point may be slow. Check before standoff trials run with bad frames | Finding |
+
+### 11.4 Bench bring-up decisions (2026-11-27)
+
+Samuel's next step is to power the vehicle on the bench: props off, no
+power to the motors, no flight. He made the decisions below with Claude on
+2026-11-27. They lift the E1 "SITL only" fence for bench work only. Nothing
+here lets the companion arm, take off or command a real FC. Numbers are
+Provisional; none is Measured.
+
+| ID | Item | Label |
+| --- | --- | --- |
+| B-D1 | The companion may talk to the real FC on the bench. [F1] gets part (c): with the explicit `real_fc` option, fc_link accepts a serial endpoint and skips the SITL proof, so it can request telemetry, send its heartbeat, play tones and send exit requests. In that mode the setpoint gate cannot be unlocked, so velocity setpoints, arm and takeoff still write zero bytes. Bench rule for the operator: props off and no power to the motors. Unlocking setpoints on a real FC needs a later recorded decision, after manual flights with the companion powered and logging (E1 brief §9) | Chosen |
+| B-D2 | percepd v1 is written new (the v0 source is still missing, V-F4). It is a Python process: it reads the camera, runs a detector behind a small backend interface, and sends one [P1] detection packet per processed frame to the companion's detection port, with `t_cap` on the board monotonic clock [C1]. The first backend is ONNX Runtime on the CPU with a COCO-trained YOLO model, for testing that the chain works; a class filter picks which COCO classes become boxes. The NPU backend and the single-class balloon model come later. The CPU backend's speed and latency are not the flight numbers. [P1] does not change | Chosen (Provisional) |
+| B-D3 | The repo gets an install script and service files for the Cubie A7S, under `v2/deploy/cubie/`. They install the drone stack, start the companion and percepd at boot, and bind the ground UI to the access-point address. The UI token lives in a root-only environment file on the board and never in the repo | Chosen |
+| B-D4 | The repo gets an FC parameter baseline for this airframe, under `v2/deploy/fc/`. The 1251-parameter baseline that the E1 brief names was not found in the repo or in `_local/`, so this file is built new from the ArduPilot documentation and the V-F6 airframe numbers. The operator loads it with a ground station; fc_link still has no parameter-write path ([F1]). Every value is Provisional until bench and flight tests confirm it | Chosen (Provisional) |
