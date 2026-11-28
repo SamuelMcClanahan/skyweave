@@ -490,10 +490,11 @@ def test_k_vd10_static_target_keeps_one_id_while_the_vehicle_yaws_and_pitches(
     keeps one track id on every frame, with detector noise and 2 % misses.
 
     The vehicle's rotation is not in the track: after the first 0.5 s the
-    line-of-sight rate stays under 0.2 rad/s (the vehicle turns at 0.79 rad/s
-    or more; 0.2 rad/s is about 5 standard deviations of the filter's rate
-    noise at 1 px detector noise) and the line of sight stays within 0.25 deg
-    of the true one (the target and vehicle positions this test placed).
+    line-of-sight rate stays under 0.1 rad/s (declared tolerance: the target
+    does not move, the vehicle turns at 0.79 rad/s or more, and 1 px of
+    detector noise leaves a few hundredths of a rad/s in the rate) and the
+    line of sight stays within 0.25 deg of the true one (the target and
+    vehicle positions this test placed).
 
     Mutation check: the same frames with the attitude withheld (a source that
     says "level, not turning") give a line-of-sight rate over 0.4 rad/s, so
@@ -506,7 +507,7 @@ def test_k_vd10_static_target_keeps_one_id_while_the_vehicle_yaws_and_pitches(
     assert len({o[0].track_id for o in outs}) == 1
     assert outs[-1][0].state is C
     settled = [o[0] for o in outs if o[0].t_cap >= T0_MS + SETTLE_MS]
-    assert max(_rate(p) for p in settled) < 0.2
+    assert max(_rate(p) for p in settled) < 0.1
     assert max(_angle_deg(p.los, _truth_los(target, p.t_cap)) for p in settled) < 0.25
 
     blind = Tracker(_cfg(), cam, FcAttitude())  # no de-rotation: level, not turning
