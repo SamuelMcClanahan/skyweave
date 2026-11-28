@@ -11,8 +11,6 @@ Work happens on the drone stack (`v2/src/skyweave2/drone/`). The ground
 detection line below (D8, C-004) is parked; do not start work on it. For
 drone work, read these instead of the detection list:
 
-0. `v2/docs/DRONE_HANDOFF.md`, if it exists: the state of open work, what
-   is not verified, and the next steps.
 1. `v2/docs/PHASE_E2_BRIEF.md`: the current phase brief (E2, balloon
    intercept; ratified by Samuel merging PR #4 on 2026-11-21). Part E2a
    is sanctioned; E2b is an outline.
