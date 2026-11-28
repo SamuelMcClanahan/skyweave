@@ -91,12 +91,19 @@ BATT_FS_VOLTSRC,0
 BATT_FS_LOW_ACT,2
 BATT_FS_CRT_ACT,1
 
-# --- 6. Radio, ground station and EKF failsafes ---
+# --- 6. Radio, companion-loss and EKF failsafes ---
 FS_THR_ENABLE,1
 FS_THR_VALUE,975
 RC_FS_TIMEOUT,1.0
-FS_OPTIONS,0
-FS_GCS_ENABLE,0
+# Companion loss (contract B-D5): the FC ground-station failsafe watches the
+# HEARTBEAT of MAVLink system 1. That is the companion (system 1, component
+# 191). No heartbeat for 3 s gives RTL. A ground station (system 255) does
+# not count. FS_OPTIONS 16 = bit 4 only: no mode change in a pilot mode.
+FS_GCS_ENABLE,1
+FS_GCS_TIMEOUT,3
+MAV_GCS_SYSID,1
+MAV_GCS_SYSID_HI,0
+FS_OPTIONS,16
 FS_EKF_ACTION,1
 FS_EKF_THRESH,0.8
 FS_CRASH_CHECK,1

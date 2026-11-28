@@ -132,6 +132,16 @@ FORBIDDEN_PATTERNS: tuple[tuple[str, str], ...] = (
 
 ALT_HOLD, GUIDED, RTL = 2.0, 4.0, 6.0
 
+COMPANION_SYSID = 1.0
+"""The MAVLink system ID of the companion's ``HEARTBEAT`` (B-D5). It is
+``skyweave2.drone.vehicle_state.LinkConfig.companion_sysid``; the drone fast
+test ``test_f_companion_loss.py`` compares the two, because ``lint`` imports
+nothing from the package."""
+
+FS_OPTIONS_PILOT_MODES = 16
+"""``FS_OPTIONS`` bit 4: the ground-station failsafe changes nothing in a
+pilot mode. Bits 0 to 2 let a failsafe continue in AUTO or GUIDED."""
+
 
 def _flight_mode_slot(pwm: int) -> int:
     """ArduCopter's six flight-mode slots by PWM (the mode-switch thresholds)."""
@@ -230,6 +240,38 @@ def _guided_timeout(p: dict[str, float]) -> str | None:
     return None
 
 
+def _failsafe_options(p: dict[str, float]) -> str | None:
+    v = p.get("FS_OPTIONS")
+    if v is None or v != int(v) or v < 0:
+        return f"FS_OPTIONS is {v}; a bitmask is needed"
+    if int(v) & 0b111:
+        return f"FS_OPTIONS {v:g} sets a bit of 0 to 2: a failsafe would continue in AUTO or GUIDED"
+    if int(v) != FS_OPTIONS_PILOT_MODES:
+        return f"FS_OPTIONS is {v:g}, expected {FS_OPTIONS_PILOT_MODES} (bit 4 only)"
+    return None
+
+
+def _companion_loss(p: dict[str, float]) -> str | None:
+    if p.get("FS_GCS_ENABLE") != 1:
+        return f"FS_GCS_ENABLE is {p.get('FS_GCS_ENABLE')}, expected 1 (RTL, V-D13)"
+    sysid, hi = p.get("MAV_GCS_SYSID"), p.get("MAV_GCS_SYSID_HI")
+    if sysid != COMPANION_SYSID:
+        return f"MAV_GCS_SYSID is {sysid}, expected {COMPANION_SYSID:g} (the companion's system ID)"
+    if hi is None or hi >= sysid:
+        return (
+            f"MAV_GCS_SYSID_HI is {hi}; it must be below MAV_GCS_SYSID, or a second "
+            "MAVLink system (a ground station) can hide a companion loss"
+        )
+    return None
+
+
+def _companion_timeout(p: dict[str, float]) -> str | None:
+    t = p.get("FS_GCS_TIMEOUT")
+    if t is None or not 3.0 <= t <= 5.0:
+        return f"FS_GCS_TIMEOUT is {t}; it must be in [3, 5] s"
+    return None
+
+
 def _log_bits(p: dict[str, float]) -> str | None:
     v = int(p.get("LOG_BITMASK", 0))
     return None if v & 1 and v & (1 << 12) else "LOG_BITMASK needs Fast Attitude (0) and PID (12)"
@@ -256,7 +298,11 @@ RULES: tuple[tuple[str, str, Callable[[dict[str, float]], str | None]], ...] = (
     ("R08", "No arm switch; no transmitter arming in GUIDED (E1-D4)", _no_auto_arm),
     ("R09", "Arming checks all on", _eq("ARMING_SKIPCHK", 0)),
     ("R10", "Radio failsafe is RTL (V-D13)", _eq("FS_THR_ENABLE", 1)),
-    ("R11", "A failsafe is never ignored in GUIDED", _eq("FS_OPTIONS", 0)),
+    (
+        "R11",
+        "A failsafe is never ignored in GUIDED or AUTO; only companion loss in a pilot mode (B-D5)",
+        _failsafe_options,
+    ),
     ("R12", "Fence on, outside the mission geofence; RTL below the ceiling", _fence),
     ("R13", "GUID_TIMEOUT is not above the tested 3 s (E1-F21)", _guided_timeout),
     ("R14", "Battery thresholds are ordered", _batt_order),
@@ -264,6 +310,12 @@ RULES: tuple[tuple[str, str, Callable[[dict[str, float]], str | None]], ...] = (
     ("R16", "Harmonic notch stays off until it is set up from a log", _eq("INS_HNTCH_ENABLE", 0)),
     ("R17", "Logging has fast attitude and PID", _log_bits),
     ("R18", "No calibration, tuning, site or simulator value", _forbidden),
+    ("R19", "Companion loss gives RTL; the FC watches the companion only (B-D5)", _companion_loss),
+    (
+        "R20",
+        "Companion-loss timeout: one lost 1 Hz heartbeat does not trigger; at most 5 s (B-D5)",
+        _companion_timeout,
+    ),
 )
 """Project rules. A rule returns None (holds) or the reason it fails."""
 
