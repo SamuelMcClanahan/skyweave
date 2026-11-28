@@ -28,6 +28,10 @@ Why the shape:
 - Exits are requests ([M10], [M11]): RTL / LAND go to the FC only while the
   newest snapshot says link up and GUIDED, and stop for the rest of that state
   once the pilot or an FC failsafe picked another mode.
+- Link loss (T18) means the FC link only (B-D7). A lost Wi-Fi ground
+  heartbeat causes no transition: the radio and the FC own that case (B-D6).
+  The mission still takes each heartbeat as an input, because an HB can fire
+  an "any" row.
 
 Usage by the core: call one ``on_*`` method per input, then
 :meth:`Mission.maybe_publish` with that input's stamp and
@@ -219,7 +223,7 @@ class MissionConfig:
     coast_cap: int = 20
     track_timeout_ms: int = 500
     reacquire_window_ms: int = 10_000
-    ground_link_timeout_ms: int = 5_000
+    ground_link_timeout_ms: int = 5_000  # B-D7: the page's display value; no transition reads it
     takeoff_done_frac: float = 0.9
     publish_period_ms: int = 200  # 5 Hz on ticks, plus one packet per transition [P3]
     approve_settle_ms: int = 1_000  # [M8]
@@ -326,6 +330,7 @@ class Mission:
         self._candidate_since: int | None = None  # T05 stamp, for [M8]
         self._candidate_seen: int | None = None
         self._snap: VehicleSnapshot | None = None  # newest tick's snapshot [M2]
+        # B-D7: bookkeeping only. No transition reads the newest ground heartbeat.
         self._last_ground_hb: int | None = None
         self._saw_non_guided = False  # T03 edge gate (E1-D4)
         self._launch_t: int | None = None
@@ -441,7 +446,7 @@ class Mission:
 
     def on_ground_heartbeat(self, t_ms: int) -> None:
         """HB input: a UI state poll that carried the token ([U6], E1-D15).
-        It matches only "any" rows."""
+        It matches only "any" rows. A missing heartbeat causes nothing (B-D7)."""
         first = self._begin(HB)
         self._last_ground_hb = t_ms
         self._run(_Input(kind=HB, t=t_ms, first=first))
@@ -683,15 +688,6 @@ class Mission:
             return "reacquire"
         return None
 
-    def _link_loss(self, t: int) -> str | None:
-        """T18, first in [M4] order: fc_link, ground_link."""
-        if self._link_snap() is None:
-            return "fc_link"
-        last = self._last_ground_hb
-        if last is None or t - last > self._cfg.ground_link_timeout_ms:
-            return "ground_link"
-        return None
-
     # -- row triggers (pure: they read state and say what firing would do) ---
 
     def _trig_prime(self, inp: _Input) -> _Firing | None:  # T01, T02, T24
@@ -846,8 +842,11 @@ class Mission:
         return None if name is None else _Firing(events=(f"budget:{name}",))
 
     def _trig_t18(self, inp: _Input) -> _Firing | None:
-        name = self._link_loss(inp.t)
-        return None if name is None else _Firing(events=(f"failsafe:{name}",))
+        # B-D7: FC link loss only. A lost Wi-Fi ground heartbeat is not a
+        # trigger; `failsafe:ground_link` is never produced again.
+        if self._link_snap() is not None:
+            return None
+        return _Firing(events=("failsafe:fc_link",))
 
     def _trig_t19(self, inp: _Input) -> _Firing | None:
         if inp.command is CommandName.ABORT and inp.valid:

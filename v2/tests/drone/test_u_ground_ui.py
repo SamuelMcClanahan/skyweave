@@ -68,6 +68,8 @@ from skyweave2.drone.types import LandedState
 from skyweave2.drone.vehicle_state import parse_frames
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "r_touch_trial.jsonl"
+PRE_B_D7_FIXTURE = FIXTURE.with_name("r_pre_b_d7_ground_link.jsonl")
+"""A recording made on commit 65f7522, the last before B-D7: see test_r_replay."""
 
 T0 = 10_000  # board ms
 UI_TOKEN = "ui-test-token"  # not a credential; must never reach a recording, page, or log
@@ -687,39 +689,85 @@ def _to_search(bench: _Bench) -> int:
     return T0 + 250
 
 
+def _failsafe_events(bench: _Bench) -> list[str]:
+    return [
+        e.name
+        for r in bench.records(Stream.MISSION_STATE)
+        if isinstance(r.packet, MissionStatePacket)
+        for e in r.packet.events
+        if e.name.startswith("failsafe:")
+    ]
+
+
 @pytest.mark.parametrize(
-    ("token", "fires"),
+    ("token", "lost"),
     [(None, True), (WRONG_TOKEN, True), (UI_TOKEN, False)],
     ids=["no_token", "wrong_token", "right_token"],
 )
-def test_u6_e1_f17_only_token_bearing_polls_hold_off_the_ground_link_failsafe(
-    bench: _Bench, token: str | None, fires: bool
+def test_u6_b_d7_lost_ground_link_is_shown_and_causes_no_transition(
+    bench: _Bench, token: str | None, lost: bool
 ) -> None:
-    """[U6], T18, E1-D15 (closes finding E1-F17): in flight, a device that
-    polls GET /state every 250 ms without the right token does not keep the
-    ground link alive: T18 fires (failsafe:ground_link, RETURN) once
-    ground_link_timeout_ms has passed since the last real heartbeat (the
-    prime). The same polls with the token are heartbeats, and the mission
-    stays in SEARCH."""
+    """[U6], [U4], T18, B-D7 (E1-D15 still decides which polls count): in
+    flight, polls every 250 ms without the right token are not heartbeats.
+    The page shows the ground link as up until the newest heartbeat (the
+    prime) is older than ground_link_timeout_ms, then as LOST. The mission
+    stays in SEARCH: no T18, no failsafe event. The first poll with the token
+    shows the link up again, still in SEARCH. With the token on every poll
+    the link shows up throughout. Discrimination: then the FC goes silent,
+    and T18 fires to RETURN with failsafe:fc_link. The recording replays
+    ([R3])."""
     _to_search(bench)
     last_hb = T0 + 100
     timeout = bench.core.config.mission.ground_link_timeout_ms
     flying = {"armed": True, "landed": LandedState.IN_AIR, "alt_m": 10.0}
     t = T0 + 500
+    shown: list[bool] = []
     while t <= last_hb + timeout + 500:
-        assert bench.poll(t - 10, token=token)["heartbeat"] is (not fires)
+        state = bench.poll(t - 10, token=token)
+        assert state["heartbeat"] is (not lost)
+        if lost:
+            up = (t - 10) - last_hb <= timeout
+            assert state["view"]["ground_link"] == {"last_hb_t": last_hb, "up": up}
+        else:
+            assert state["view"]["ground_link"] == {"last_hb_t": t - 10, "up": True}
+        shown.append(state["view"]["ground_link"]["up"])
+        doc = _Doc(state["html"])
+        assert doc.value("ground-link") is shown[-1]
+        assert doc.text("ground-link").startswith("up" if shown[-1] else "LOST")
         bench.fc_tick(t, _fc_flight(t, mode=GUIDED_MODE, **flying))
         t += 250
-    events = [
-        e.name
-        for r in bench.records(Stream.MISSION_STATE)
-        if isinstance(r.packet, MissionStatePacket)
-        for e in r.packet.events
-    ]
-    assert ("failsafe:ground_link" in events) is fires
-    assert ("T18" in bench.tids()) is fires
-    assert bench.core.mission.state is (MissionState.RETURN if fires else MissionState.SEARCH)
-    assert bench.service.polls_unauthenticated == (bench.service.polls if fires else 0)
+    assert shown[0] is True and shown[-1] is (not lost)
+    assert bench.core.mission.state is MissionState.SEARCH
+    assert "T18" not in bench.tids() and _failsafe_events(bench) == []
+
+    back = bench.poll(t - 10)  # the page has the token again
+    assert back["heartbeat"] is True
+    assert back["view"]["ground_link"] == {"last_hb_t": t - 10, "up": True}
+    assert back["view"]["mission_state"] == "SEARCH"
+    assert _Doc(back["html"]).text("ground-link").startswith("up")
+    assert "T18" not in bench.tids()
+
+    silent = t + bench.core.config.link.link_bound_ms
+    bench.fc_tick(t, _fc_flight(t, mode=GUIDED_MODE, **flying))
+    bench.fc_tick(silent + 1, b"")  # no FC frame for longer than fc_link_bound_ms
+    assert bench.core.mission.state is MissionState.RETURN
+    assert bench.tids()[-1] == "T18" and _failsafe_events(bench) == ["failsafe:fc_link"]
+    assert replay(bench.lines()).mismatch() is None
+
+
+def test_u5_b_d7_page_renders_a_recording_made_under_the_old_ground_link_rule() -> None:
+    """[U5], §4.6, B-D7, B-F41: the reason name failsafe:ground_link stays
+    valid for old recordings. The committed recording made before B-D7 (the
+    old T18 rule fired in it) still reads, and the page renders it: banner
+    RETURN, the event in the recent events, the ground link LOST."""
+    lines = PRE_B_D7_FIXTURE.read_text(encoding="ascii").splitlines()
+    view = view_from_recording(lines)
+    assert view.mission_state == "RETURN"
+    assert "failsafe:ground_link" in [name for _, name in view.events]
+    doc = _Doc(render_page(view))
+    assert doc.text("banner") == "RETURN"
+    assert "failsafe:ground_link" in doc.text("events")
+    assert doc.value("ground-link") is False and doc.text("ground-link").startswith("LOST")
 
 
 def test_u6_p5c_poll_tokens_never_recorded_or_logged(

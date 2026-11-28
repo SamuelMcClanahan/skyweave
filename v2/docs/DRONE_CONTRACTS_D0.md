@@ -8,7 +8,7 @@ leftover decisions; [P5], [M5], [M8], [G5], [G7], [G10], [G12], [U3], [U6], [U7]
 2026-11-27: E1-D15 keeps the token across a reload; §11.4 bench bring-up
 decisions, [F1] part (c)); 2026-11-28 (E2a-4: [P2], [P2b], [G1], [K1], [K2]
 and §10 for V-D10; §11.5 findings; decisions B-D5 to B-D8 and E2a4-D1, recorded
-before their code)
+before their code; B-D7 built: T18, [M4], [U6], §9 `ground_link_timeout_ms`)
 **Status:** §2 (JSON wire v1) is FROZEN per `PHASE_E1_BRIEF.md` 3.7. §1 and
 §3-§8 are behavior clauses written in phase E1, labeled clause by clause.
 Nothing in this document is Measured. Numbers marked Provisional are
@@ -379,10 +379,13 @@ ack (companion -> the command's sender):
   ranked highest here:
   T19 > T20 > T18 > T17 > T13 > T06, T10 > T07 > T11, T12, T14 > T08, T09 >
   T05 > T03, T04, T23 > T01, T02, T24 > AUTO (T15, T16, T21, T22).
-  When several T17 (or T18) conditions hold at once, the event names the
-  first in this order: fc_link, ground_link; flight_time, battery, geofence,
-  reacquire. A row's side effects (setting or clearing the candidate or the
-  engaged id, requests, tones) happen only when that row fires.
+  When several T17 conditions hold at once, the event names the first in
+  this order: flight_time, battery, geofence, reacquire. T18 has one
+  condition, FC link down, and its event is `failsafe:fc_link` (B-D7; before
+  B-D7 a lost ground heartbeat was a second T18 condition, named
+  `failsafe:ground_link`, after fc_link). A row's side effects (setting or
+  clearing the candidate or the engaged id, requests, tones) happen only when
+  that row fires.
 - **[M4a] AUTO rows** fire on the first input after the one that entered their
   From state, and consume it: that input causes the AUTO row or a
   higher-ranked row, never a second transition. A command whose own row does
@@ -411,7 +414,7 @@ Every transition the code makes is a row here; any other change is a defect.
 | T15 | `LOST` | `SEARCH` | any | AUTO; opens the reacquire window (`reacquire_window_ms`) | AUTO |
 | T16 | `COMPLETE`, `MISS` | `RETURN` | any | AUTO (v1: one pass, unconditional RTL) | AUTO |
 | T17 | `A` | `RETURN` | TICK | Budget: flight time since LAUNCH > `flight_time_cap_s`; battery < `battery_floor_pct`; `home_dist` > `geofence_radius_m`; or the reacquire window expired before `ENGAGED` | BUDGET |
-| T18 | `A` | `RETURN` | TICK | Link loss: FC link down, or no ground heartbeat for `ground_link_timeout_ms` | FAILSAFE |
+| T18 | `A` | `RETURN` | TICK | Link loss: FC link down. A lost ground heartbeat is not a trigger (B-D7) | FAILSAFE |
 | T19 | every state | `ABORT` | CMD | `abort` accepted (unprimed: see [M5]) | HUMAN |
 | T20 | `A` | `ABORT` | TICK | Link up and a known mode other than `GUIDED` (radio hard abort, or an FC failsafe) | FAILSAFE |
 | T21 | `ABORT` | `RETURN` | any | AUTO, vehicle airborne or unknown | AUTO |
@@ -692,7 +695,10 @@ Every transition the code makes is a row here; any other change is a defect.
   reload of the same tab keeps the token [U3], so the heartbeat resumes with
   the first poll after the reload. A new tab, a closed tab, or a browser
   restart has no token: the heartbeat stops until the operator types it
-  again, and in flight T18 fires after `ground_link_timeout_ms`.
+  again. A stopped heartbeat causes no transition in any state (B-D7): the
+  page shows the ground link as lost when the newest heartbeat is older than
+  `ground_link_timeout_ms`, and the vehicle continues its trial. The radio
+  and the FC own loss of control (B-D6).
 - **[U7]** (E1-D12) The page sends `approve_engage` only with
   `params.track_id` set to the candidate it displays. With no candidate
   displayed it sends nothing.
@@ -832,7 +838,7 @@ From brief §6 unless marked "E1". All Provisional.
 | `v_max_hard` | 5.0 m/s (E1) | prime validation |
 | `track_timeout_ms` | 500 (E1) | [P2a] |
 | `fc_link_bound_ms` | 1000 (E1) | [P4] |
-| `ground_link_timeout_ms` | 5000 (E1) | T18 |
+| `ground_link_timeout_ms` | 5000 (E1) | [U4], [U6]: display only (B-D7); T18 does not read it |
 | `takeoff_done_frac` | 0.9 (E1) | T04 |
 | `approve_settle_ms` | 1000 (E1) | [M8] |
 | `exit_retry_ms` | 1000 (E1) | [M10] |
