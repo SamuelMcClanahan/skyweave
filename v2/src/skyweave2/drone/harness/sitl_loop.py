@@ -800,13 +800,15 @@ def _fc_counters(fc: FcLink | None) -> dict[str, int]:
 
 def _tracker_counters(core: CompanionCore | None) -> dict[str, int]:
     """What the tracker refused (V-D10: a frame with no attitude at its
-    ``t_cap`` is dropped whole)."""
+    ``t_cap`` is dropped whole, ``degraded_dropped``; E2a4-D1: so is a frame
+    on a sample held too long, ``hold_dropped``)."""
     if core is None or core.tracker is None:
         return {}
     trk = core.tracker
     return {
         "stale_dropped": trk.stale_dropped,
         "degraded_dropped": trk.degraded_dropped,
+        "hold_dropped": trk.hold_dropped,
         "boxes_unusable": trk.boxes_unusable,
     }
 
