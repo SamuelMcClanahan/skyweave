@@ -5,7 +5,8 @@ probe scenarios for V-F3, V-D15, V-D16, V-F2); 2026-11-21 (§11.2 E2
 planning decisions; E2a-1 and E2a-2: [C2], [C3], [G1], [G2], [G4], [G6],
 [R2], [R4] and §9 for V-D1, E2-D2 and V-D11); 2026-11-24 (§11.3 E1
 leftover decisions; [P5], [M5], [M8], [G5], [G7], [G10], [G12], [U3], [U6], [U7]; amended
-2026-11-27: E1-D15 keeps the token across a reload)
+2026-11-27: E1-D15 keeps the token across a reload; §11.4 bench bring-up
+decisions, [F1] part (c))
 **Status:** §2 (JSON wire v1) is FROZEN per `PHASE_E1_BRIEF.md` 3.7. §1 and
 §3-§8 are behavior clauses written in phase E1, labeled clause by clause.
 Nothing in this document is Measured. Numbers marked Provisional are
@@ -586,7 +587,15 @@ Every transition the code makes is a row here; any other change is a defect.
   exception: a companion `HEARTBEAT`, if SITL needs one before it streams on
   that port); every blocked write is counted. The proof resets on reconnect.
   SITL stream rates for that port come from the SITL defaults file. fc_link
-  has no parameter-write code path at all.
+  has no parameter-write code path at all. (c) Real FC, bench mode (B-D1).
+  Only with the explicit option `real_fc` (companiond `--real-fc`), fc_link
+  also accepts a serial endpoint `serial:<device>:<baud>` and does not wait
+  for the SITL proof of (b): it may write the [F2] stream requests, a
+  companion `HEARTBEAT`, tones [F8] and the [F9] exit requests. With
+  `real_fc`, the setpoint gate [F5] cannot be enabled: construction with
+  `real_fc` and setpoints enabled is refused. So no velocity setpoint, arm
+  or takeoff ever reaches a real FC in this phase. Without the option, (a)
+  and (b) hold unchanged. The recording's `meta.config` says which mode ran.
 - **[F2] Attitude subscription.** After the proof, fc_link requests
   `ATTITUDE` at 50 Hz with `MAV_CMD_SET_MESSAGE_INTERVAL`, plus the telemetry
   [M2a] needs (`HEARTBEAT`, `EXTENDED_SYS_STATE`, `GLOBAL_POSITION_INT`,
@@ -835,6 +844,7 @@ Tone table (E1, [F8], [M12]): `ACQUIRING`, `ENGAGED`, `TOUCH`, `LOST`,
 | K | [K1]-[K4], [P2a] | Provisional tracker: M-of-N confirm, coast cap and final packet, id uniqueness across restarts | fast |
 | G | [G1]-[G12] | Synthetic geometry: known offsets give known commands, commit decisions, and miss vectors | fast |
 | F | [F1]-[F11] | Interlock refusal and SITL proof, gate provably blocks sends, setpoint form and limits, staleness via injected clock, radio approve detector; SITL scripted run (arm, takeoff, velocity, land) and injected attitude staleness | fast + slow (SITL) |
+| D | [P1], [C1], [C2], B-D2 | percepd v1 (`test_d_percepd.py`): letterbox and its inverse, decode per output layout, NMS, class filter, flight-grid mapping, packets through the frozen decoder, keep-latest gaps, source and send failures. One optional test runs a real model when a file is given | fast |
 | U | [U1]-[U7] | Headless: command idempotency, invalid-state rejection, four commands only, render from a recorded stream | fast |
 | S | [S0]-[S8] | Closed-loop SITL scenarios under gate seeds, `gate_repeats` times, [R3] per run, scorecard emitted | slow (SITL) |
 | S (probe) | [S9]-[S12] | Probe worlds and seeds, wind and airframe through the defaults file, bad frames (gate camera output unchanged), probe scoring; the cone frame hovers and the wind pushes, on SITL | fast + slow (SITL) |
@@ -966,3 +976,48 @@ Numbers are Provisional; none is Measured. [F1] still holds.
 | E1-F31 | No gate scene has a dropout inside a running hold: in S3 the short dropout falls during the approach. So E1-D14 is covered by fast tests only (one runs the real companion core). A standoff probe with random dropout (V-D16) would cover it on SITL | Finding |
 | E1-F32 | [G7] checks tolerance and attitude only at engaged-track packets. While the track coasts, `|q|` is not checked and guidance commands zero velocity ([G10]). The number of coasting stretches in one hold is not bounded. `hold_complete` can come later than start + `hold_time_s`, on the next real packet | Finding |
 | E1-F33 | From a read of the code, not measured: with random dropout, each single coasting frame fires T08 then T09 and resets the [G3] limiter to zero. At 2 % dropout and 60 fps that is about 1.2 resets per second, so the approach to a standoff point may be slow. Check before standoff trials run with bad frames | Finding |
+
+### 11.4 Bench bring-up decisions (2026-11-27)
+
+Samuel's next step is to power the vehicle on the bench: props off, no
+power to the motors, no flight. He made the decisions below with Claude on
+2026-11-27. They lift the E1 "SITL only" fence for bench work only. Nothing
+here lets the companion arm, take off or command a real FC. Numbers are
+Provisional; none is Measured.
+
+| ID | Item | Label |
+| --- | --- | --- |
+| B-D1 | The companion may talk to the real FC on the bench. [F1] gets part (c): with the explicit `real_fc` option, fc_link accepts a serial endpoint and skips the SITL proof, so it can request telemetry, send its heartbeat, play tones and send exit requests. In that mode the setpoint gate cannot be unlocked, so velocity setpoints, arm and takeoff still write zero bytes. Bench rule for the operator: props off and no power to the motors. Unlocking setpoints on a real FC needs a later recorded decision, after manual flights with the companion powered and logging (E1 brief §9) | Chosen |
+| B-D2 | percepd v1 is written new (the v0 source is still missing, V-F4). It is a Python process: it reads the camera, runs a detector behind a small backend interface, and sends one [P1] detection packet per processed frame to the companion's detection port, with `t_cap` on the board monotonic clock [C1]. The first backend is ONNX Runtime on the CPU with a COCO-trained YOLO model, for testing that the chain works; a class filter picks which COCO classes become boxes. The NPU backend and the single-class balloon model come later. The CPU backend's speed and latency are not the flight numbers. [P1] does not change | Chosen (Provisional) |
+| B-D3 | The repo gets an install script and service files for the Cubie A7S, under `v2/deploy/cubie/`. They install the drone stack, start the companion and percepd at boot, and bind the ground UI to the access-point address. The UI token lives in a root-only environment file on the board and never in the repo | Chosen |
+| B-D4 | The repo gets an FC parameter baseline for this airframe, under `v2/deploy/fc/`. The 1251-parameter baseline that the E1 brief names was not found in the repo or in `_local/`, so this file is built new from the ArduPilot documentation and the V-F6 airframe numbers. The operator loads it with a ground station; fc_link still has no parameter-write path ([F1]). Every value is Provisional until bench and flight tests confirm it | Chosen (Provisional) |
+| B-F1 | `real_fc` lives in the link config (`vehicle_state.LinkConfig`); `meta.config` carries it as `link.real_fc`. A recording made before B-D1 has no key and reads as false | Finding |
+| B-F2 | With `real_fc`, the [F2] stream requests go out when the FC is first heard and again after a link loss. There is no `COMMAND_ACK` check and no retry while the link stays up. The FC forgets the requests on reboot. A lost request shows as link up with stale attitude; restart the companion. Not checked on hardware | Finding |
+| B-F3 | With `real_fc`, the companion sends a `HEARTBEAT` at 1 Hz (`ONBOARD_CONTROLLER`) whenever the port is open, also before the FC is heard, and tones the same way. They reach whatever device the operator names. [F1] (c) gives no rate | Chosen (Provisional) |
+| B-F4 | The serial transport uses the standard library (termios): raw 8N1, no flow control, a fixed list of rates. The port is not opened exclusively. If the port will not take a whole frame, the link closes and reopens, and a torn frame can reach the FC (dropped by CRC). A pulled wire on a hardware UART is silence, not a hangup: the link reports down after `fc_link_bound_ms`. Tested on a pseudo-terminal only | Finding |
+| B-F5 | The ground UI and the health packet [P4] do not show `real_fc`. Only the start log and `meta.config` do | Finding |
+| B-F6 | `--real-fc` on a loopback endpoint also skips the SITL proof (the gate stays locked). It allows a rehearsal against SITL; a loopback bridge to a real FC is then writable for tones and exit requests | Finding |
+| B-F7 | percepd v1 maps detector edge coordinates to [C2] by subtracting 0.5 px, so the image spans [-0.5, 1919.5] x [-0.5, 1199.5]; boxes are clipped to it. [C2] and [P1] do not state the box-edge convention | Chosen (Provisional) |
+| B-F8 | `t_cap` is the board clock when the frame grab returns. Exposure, readout, USB, driver queue and scheduling delays are not measured (E1-F1 stays open). percepd logs the gap to the V4L2 buffer timestamp as a bench aid | Finding |
+| B-F9 | The tracker ignores a packet whose `t_cap` is not newer than the last one, so two frames grabbed in the same millisecond lose the second. Not seen in tests | Finding |
+| B-F10 | A frame on which the detector fails sends no packet (a `frame_seq` gap). An empty packet would claim "no target" | Chosen (Provisional) |
+| B-F11 | COCO stand-in settings: model YOLOX-Tiny (Apache-2.0, not in the repo), classes `sports ball`, `kite`, `frisbee`, best allowed class, confidence 0.25, NMS IoU 0.45, at most 20 boxes. Not tuned on a real balloon. A source that is not 1920 x 1200 is stretched to the flight grid (bench sources only) | Provisional |
+| B-F12 | percepd's grab thread converts every 1920 x 1200 YUYV frame to BGR, also frames it then drops. The CPU cost on the A7S is unknown. CPU inference took about 40 ms a frame on an Apple M4 ARM container; that is not the board's number | Finding |
+| B-F13 | Not built from E1 brief work item 7: percepd config file, heartbeat, kernel preflight, cue hook, NPU model. The two Ultralytics output decoders are tested on synthetic tensors only | Deferred |
+| B-F14 | percepd v1 meets E1-F2 (packets carry `v`) and E1-F10 (the companion records the detections it receives; seen in a two-process run) | Finding |
+| B-F15 | The UART device name on the Cubie A7S is not known; the deploy config has a placeholder. The pin logic voltage against the FC pads is unchecked | Finding |
+| B-F16 | The board bring-up notes say the kernel that runs the NPU had no driver for the A7S Wi-Fi chip. The access point and the NPU may need different kernels. The CPU backend (B-D2) lets the bench run on a kernel with Wi-Fi. Open for Samuel before flight | Finding |
+| B-F17 | One recording has no size limit while the companion runs; the deploy prunes old recordings only at companion start. A companion start that fails after it opens the recording leaves a small file per retry | Finding |
+| B-F18 | The deploy accepts a narrower token alphabet than [P5c]: 8-256 characters of `[A-Za-z0-9._-]`, because the systemd environment file changes quotes and backslashes | Chosen (deploy rule) |
+| B-F19 | The board has no real-time clock: journal times and the UTC part of recording names can be wrong. Order comes from the sequence number in the name and from board ms [C1] | Finding |
+| B-F20 | ArduCopter 4.7 renamed parameters and changed units (`ANGLE_MAX` is `ATC_ANGLE_MAX` in degrees, `ARMING_CHECK` is `ARMING_SKIPCHK`, `WPNAV_*` is `WP_*` in m/s). V-D7 and E2-F1 use an old name. The baseline uses the 4.7 names, checked against the 4.7.0 metadata and the pinned SITL | Finding |
+| B-F21 | In SITL 4.7.0 the `WP_SPD*` limits do not limit GUIDED velocity setpoints (an 8 m/s setpoint reached 8.1 m/s with `WP_SPD` 5; one run). The [F6] limits are the only limit on a commanded velocity | Finding |
+| B-F22 | ExpressLRS sends channel 5 as a 2-position arm channel. The baseline puts the mode switch on channel 6, the emergency stop on 7 and approve on 8. The harness uses channel 5; no code depends on it | Finding |
+| B-F23 | Board version conflict: the E1 brief says H743-SLIM V4, Samuel says V3. Firmware target `MatekH743` is assumed for both. Check on the bench | Finding |
+| B-F24 | The battery current scale is unknown for the 4-in-1 ESC, and the voltage scale has two documented values (11.0 and 10.5). Until they are calibrated, the battery percentage and so the T17 battery floor are not trustworthy; the FC voltage failsafes are the backstop | Finding |
+| B-F25 | Companion loss in GUIDED: the vehicle stops after `GUID_TIMEOUT` and hovers (E1-F6). The baseline leaves the FC ground-station failsafe off. Option before autonomy: that failsafe on the companion's heartbeat. Open for Samuel | Finding |
+| B-F26 | The bidirectional-DShot firmware build for this board has no tunes, only a beep (ArduPilot board page). That conflicts with the distinct tones of [F8]. Decide before using RPM telemetry | Finding |
+| B-F27 | The FC failsafe action is RTL (V-D13), which needs a proven compass and GPS. For the first manual flights Samuel can choose Land until an RTL test passes | Finding |
+| B-F28 | The motor emergency stop (RC option 31) stops the motors only while the switch is high. On release while armed, the motors can start again. Test on the bench with props off; consider a latching switch | Finding |
+| B-F29 | The baseline has first-flight limits and FC failsafes that the SITL gate does not exercise (fence, battery failsafes, `WP_SPD*`, the mode-switch slots). Before autonomy, run the gate with the baseline as a defaults file | Finding |
+| B-F30 | Nothing in B-D1 to B-D4 is Measured on hardware. The serial link ran on a pseudo-terminal, percepd on image files, the install in a Debian 13 ARM container (with systemd in a container), the parameter file in SITL | Provisional |

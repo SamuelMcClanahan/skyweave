@@ -1,0 +1,17 @@
+# SkyWeave udev rules for the Cubie A7S (contract B-D3).
+# Installed as /etc/udev/rules.d/60-skyweave.rules by install.sh.
+
+# Camera: AR0234 global-shutter USB3 UVC module. This rule makes the stable
+# name /dev/skyweave-cam for its capture node and gives group "video" access.
+# A UVC camera has two video nodes; index 0 is the capture node.
+# The USB id 1bcf:2d50 comes from the 2026-09 board bring-up. CHECK it with
+# "lsusb". If your camera shows a different id, change the two values below,
+# then do:  sudo udevadm control --reload-rules && sudo udevadm trigger
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="1bcf", ATTRS{idProduct}=="2d50", ATTR{index}=="0", SYMLINK+="skyweave-cam", GROUP="video", MODE="0660"
+
+# FC serial port: an on-board UART (/dev/ttyS* or /dev/ttyAS*) already has
+# group "dialout" from the Debian default rules, and its name does not
+# change. No rule is necessary. If you use a USB serial adapter instead,
+# remove the "#" from the rule below and set its USB id (from "lsusb"). Then
+# set SKYWEAVE_FC_DEVICE=/dev/skyweave-fc in /etc/skyweave/skyweave.env.
+#SUBSYSTEM=="tty", ATTRS{idVendor}=="CHANGE_ME", ATTRS{idProduct}=="CHANGE_ME", SYMLINK+="skyweave-fc", GROUP="dialout", MODE="0660"

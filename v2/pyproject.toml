@@ -38,6 +38,11 @@ dev = [
 drone = [
   "pymavlink>=2.4.50",
 ]
+# percepd v1 (drone contract B-D2): the CPU detector backend. Imported lazily;
+# nothing else in the drone stack or its tests needs it.
+percepd = [
+  "onnxruntime>=1.17",
+]
 # Regeneration only (`python -m skyweave2.transport.generate`). Deliberately
 # NOT in `dev`: the generated module is checked in, so the documented
 # `uv sync --extra dev` + `uv run pytest` path never needs a protoc toolchain.

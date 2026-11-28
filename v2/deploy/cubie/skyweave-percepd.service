@@ -1,0 +1,48 @@
+# SkyWeave percepd (contract B-D2, B-D3): camera -> detector -> detection
+# packets to the companion on 127.0.0.1.
+#
+# The camera can be absent at start. If percepd stops, systemd starts it
+# again, with no limit. This unit and skyweave-companion.service do not
+# depend on each other.
+
+[Unit]
+Description=SkyWeave percepd (camera and detector)
+Documentation=file:///opt/skyweave/README.md
+# Never stop the restart attempts (no start-rate limit).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=skyweave
+Group=skyweave
+WorkingDirectory=/var/lib/skyweave
+EnvironmentFile=/etc/skyweave/skyweave.env
+# percepd does not need the UI token ([P5c]).
+UnsetEnvironment=SKYWEAVE_UI_TOKEN
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/var/lib/skyweave
+ExecStart=/opt/skyweave/bin/skyweave-run percepd
+# The detector on the CPU must not take processor time from the companion.
+Nice=5
+
+# Restart after each exit. The delay grows from 1 s to 15 s.
+# Exit code 78 is a configuration error: no restart until the operator
+# corrects /etc/skyweave/skyweave.env and starts the service.
+Restart=always
+RestartSec=1
+RestartSteps=4
+RestartMaxDelaySec=15
+RestartPreventExitStatus=78
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=skyweave-percepd
+
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,47 @@
+# SkyWeave companion process (contract [C10], B-D3): tracker, mission,
+# guidance, fc_link, ground UI and recorder in one Python process.
+#
+# Bench mode only (B-D1): /opt/skyweave/bin/skyweave-run refuses a command
+# line with --enable-setpoints, and companiond refuses it with --real-fc.
+#
+# This unit and skyweave-percepd.service do not depend on each other. If one
+# stops, the other continues.
+
+[Unit]
+Description=SkyWeave companion (mission, fc_link, ground UI, recorder)
+Documentation=file:///opt/skyweave/README.md
+After=network.target
+# Never stop the restart attempts (no start-rate limit).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=skyweave
+Group=skyweave
+WorkingDirectory=/var/lib/skyweave
+# Root-owned, mode 0600. systemd reads it before it drops to User=.
+EnvironmentFile=/etc/skyweave/skyweave.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/skyweave/bin/skyweave-run companion
+
+# Restart after each exit. The delay grows from 1 s to 15 s.
+# Exit code 78 is a configuration error: no restart until the operator
+# corrects /etc/skyweave/skyweave.env and starts the service.
+Restart=always
+RestartSec=1
+RestartSteps=4
+RestartMaxDelaySec=15
+RestartPreventExitStatus=78
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=skyweave-companion
+
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
