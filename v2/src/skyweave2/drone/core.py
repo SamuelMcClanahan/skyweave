@@ -610,6 +610,11 @@ def _open(source: str | Path | Iterable[str]) -> tuple[CoreConfig, Iterator[Reco
     return config, records
 
 
+PRE_B_D7_EVENT = "failsafe:ground_link"
+"""§4.6: the event of the old T18 ground-link rule. Valid in old recordings;
+never produced since B-D7."""
+
+
 def replay(source: str | Path | Iterable[str]) -> ReplayResult:
     """[R3]: feed a recording's input records, in file order, into a fresh core
     built from its ``meta.config``; collect what it produces.
@@ -622,6 +627,10 @@ def replay(source: str | Path | Iterable[str]) -> ReplayResult:
     When ``meta.config`` has a tracker (E2-D5), ``detection`` records are the
     inputs in place of ``track`` records, and the ``track`` records join the
     outputs compared.
+
+    A recording in which the old T18 rule fired (a ``failsafe:ground_link``
+    event, made before B-D7) cannot replay: this code never fires that rule.
+    Replay stops at that record with a :class:`RecordingError` (B-F41).
     """
     config, records = _open(source)
     core = CompanionCore(config)
@@ -647,6 +656,13 @@ def replay(source: str | Path | Iterable[str]) -> ReplayResult:
             continue
         if stream is Stream.MISSION_STATE:
             assert isinstance(r.packet, MissionStatePacket)
+            if any(e.name == PRE_B_D7_EVENT for e in r.packet.events):
+                raise RecordingError(
+                    f"the recording has a {PRE_B_D7_EVENT} event at t={t}: it was made "
+                    "before decision B-D7, when T18 also fired on a lost ground "
+                    "heartbeat. This code never fires that rule, so the recording "
+                    "does not replay ([R3], B-F41). It still reads and renders"
+                )
             rec_states.append((t, r.packet))
             continue
         if stream is Stream.ACK:

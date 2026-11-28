@@ -63,6 +63,7 @@ from skyweave2.drone.packets import (
     CommandPacket,
     DetectionPacket,
     MissionState,
+    MissionStatePacket,
     PrimeParams,
     TrackPacket,
     TrackState,
@@ -70,7 +71,7 @@ from skyweave2.drone.packets import (
     canonical_json,
     strict_json_loads,
 )
-from skyweave2.drone.recording import Record, Recorder, Stream, read_records
+from skyweave2.drone.recording import Record, Recorder, RecordingError, Stream, read_records
 from skyweave2.drone.tracker import id_base_from_start
 from skyweave2.drone.types import LandedState, VelocityCommand
 from skyweave2.drone.vehicle_state import LinkConfig, parse_frames
@@ -79,6 +80,13 @@ from tests.drone.fc_attitude import attitude_frame
 S = MissionState
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "r_touch_trial.jsonl"
+PRE_B_D7_FIXTURE = FIXTURE.with_name("r_pre_b_d7_ground_link.jsonl")
+"""A recording in which the old T18 ground-link rule fired. It was made on
+commit 65f7522, the last before B-D7, by the U bench (real core, real
+recorder, real MAVLink frames, a step clock): prime at 10100 ms (the last
+ground heartbeat), the switch into GUIDED, takeoff, then an FC tick every
+250 ms and no heartbeat. T18 fired at 15250 ms with ``failsafe:ground_link``.
+The current code cannot make this recording again; do not regenerate it."""
 REGENERATE = os.environ.get("SKYWEAVE_REGENERATE_DRONE_FIXTURES") == "1"
 
 # -- the scripted trial's facts ----------------------------------------------
@@ -459,6 +467,30 @@ def test_r3_live_recording_replays_exactly(fresh: Path) -> None:
 def test_r3_committed_fixture_replays_exactly(committed_replay: ReplayResult) -> None:
     """[R3]: the committed recording replays exactly under the current code."""
     assert committed_replay.mismatch() is None
+
+
+def test_r3_b_d7_recording_made_under_the_old_ground_link_rule_does_not_replay() -> None:
+    """[R3], [R2], B-D7, B-F41: a recording in which the old T18 rule fired
+    (one failsafe:ground_link event) still reads, but it cannot replay,
+    because this code never fires that rule. Replay stops with a clear error
+    that names B-D7. Discrimination: the same recording cut before the stamp
+    at which the old rule fired replays exactly."""
+    lines = PRE_B_D7_FIXTURE.read_text(encoding="ascii").splitlines()
+    records = list(read_records(lines))
+    fired = [
+        r.t_rx
+        for r in records
+        if isinstance(r.packet, MissionStatePacket)
+        for e in r.packet.events
+        if e.name == "failsafe:ground_link"
+    ]
+    assert len(fired) == 1
+    with pytest.raises(RecordingError, match="B-D7"):
+        replay(lines)
+    before = [line for line, r in zip(lines, records, strict=True) if r.t_rx < fired[0]]
+    cut = replay(before)
+    assert cut.mismatch() is None and cut.recorded_mission_states
+    assert cut.transitions[-1][3] is S.SEARCH
 
 
 def test_r3_fixture_covers_the_whole_touch_trial(
