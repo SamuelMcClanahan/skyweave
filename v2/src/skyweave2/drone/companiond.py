@@ -86,6 +86,7 @@ from skyweave2.drone.vehicle_state import LinkConfig
 
 UI_ENV_VAR = "SKYWEAVE_UI_TOKEN"
 DEFAULT_UI_PORT = 8080  # E1 choice, not a contract value
+DEGRADED_LOG_MS = 5000  # at most one "frames dropped, no attitude" warning per this long
 
 log = logging.getLogger(__name__)
 
@@ -182,6 +183,8 @@ class Companion:
         self._next_connect: int | None = None
         self.ticks = 0
         self.input_errors = 0  # inputs whose processing raised; logged, loop kept alive
+        self._degraded_logged = 0  # tracker.degraded_dropped at the last warning
+        self._next_degraded_log = 0
 
     def _open(self, sock: _Sock) -> _Sock:
         self._stack.callback(sock.close)
@@ -246,6 +249,7 @@ class Companion:
             )
         for dg in self.commands.poll_raw():
             self._guarded("command", lambda d=dg: self._command(d))
+        self._log_degraded(now)
         t = self.clock()
         if self._next_tick is None or t >= self._next_tick:
             self._guarded("tick", lambda: self._forward(self.core.on_tick(t)))
@@ -256,6 +260,23 @@ class Companion:
         pkt = self.fc_link.maybe_health()  # [F4] about 1 Hz; fc_link records it
         if pkt is not None:
             self.health.send(pkt)
+
+    def _log_degraded(self, now: int) -> None:
+        """V-D10: the tracker drops a detection frame that has no attitude at
+        its ``t_cap``. Say so (at most once per ``DEGRADED_LOG_MS``): with no
+        ATTITUDE from the FC there are no tracks at all."""
+        tracker = self.core.tracker
+        if tracker is None or tracker.degraded_dropped == self._degraded_logged:
+            return
+        if now < self._next_degraded_log:
+            return
+        log.warning(
+            "tracker dropped %d detection frames so far: no FC attitude within "
+            "attitude_bound_ms of t_cap (V-D10: no attitude, no tracks)",
+            tracker.degraded_dropped,
+        )
+        self._degraded_logged = tracker.degraded_dropped
+        self._next_degraded_log = now + DEGRADED_LOG_MS
 
     def _command(self, dg: Datagram) -> None:
         ack = self.ui.receiver.receive(dg.data, self.clock())
