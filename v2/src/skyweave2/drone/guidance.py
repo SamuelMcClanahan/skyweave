@@ -3,10 +3,12 @@
 Guidance turns the one track the mission lets it see into velocity setpoints
 and three events (``commit``, ``pass_done``, ``hold_complete``):
 
-- [G1] de-rotation: the track's pixel center becomes a NED line of sight with
-  the FC attitude at the frame's capture time ``t_cap``. The box is first
-  undistorted into the pinhole image (V-D11, :func:`pinhole_box`); [G2],
-  [G4] and [G6] use the same undistorted box.
+- [G1] line of sight: the tracker's, when the packet carries it (V-D10: the
+  tracker de-rotated each box with the FC attitude at the frame's capture
+  time ``t_cap`` and filtered in world angles). Otherwise the track's pixel
+  center is de-rotated here with that attitude. The box is undistorted into
+  the pinhole image (V-D11, :func:`pinhole_box`); [G2], [G4] and [G6] use
+  that undistorted box.
 - [G2] size range ``Z = f W / w`` (assume-and-bound fallback below
   ``w_min_px``). Onboard scope is bearing plus size range; no 3D estimation.
 - [G3] the pluggable law (v1: pure pursuit to a standoff point level with the
@@ -261,11 +263,20 @@ def pinhole_box(track: TrackPacket, cam: CameraModel) -> tuple[float, float, flo
 
 
 def derotate(track: TrackPacket, cam: CameraModel, att: Attitude) -> np.ndarray:
-    """[G1] unit line of sight in NED: ``R_ned_body(att) R_body_cam normalize(ray)``,
-    the ray of the undistorted box center (V-D11).
+    """[G1] unit line of sight in NED.
+
+    A packet that carries the tracker's line of sight (``los_*``, V-D10) gives
+    it as it is: the tracker de-rotated each box center with the attitude at
+    ``t_cap`` and filtered the result, so guidance does not de-rotate ``u``,
+    ``v_px`` a second time. A packet without it (made before V-D10, or by
+    another tracker) is de-rotated here: ``R_ned_body(att) R_body_cam
+    normalize(ray)``, the ray of the undistorted box center (V-D11).
 
     ``att`` is the [G1] sample for ``track.t_cap`` (see ``VehicleState.attitude_at``).
     """
+    los = track.los
+    if los is not None:
+        return np.array(los, dtype=float)
     u, v, _ = pinhole_box(track, cam)
     ray = cam.ray(u, v)
     return r_ned_body(att) @ cam.rotation() @ (ray / np.linalg.norm(ray))

@@ -97,6 +97,7 @@ from skyweave2.drone.recording import Recorder, Stream, read_records
 from skyweave2.drone.sitl import PilotLink, SitlPaths
 from skyweave2.drone.tracker import Tracker, TrackerConfig
 from skyweave2.drone.types import LandedState, VehicleSnapshot
+from tests.drone.fc_attitude import FcAttitude
 
 S = MissionState
 JOBS = int(os.environ.get("SKYWEAVE_HARNESS_JOBS", str(DEFAULT_JOBS)))
@@ -364,7 +365,9 @@ def test_s3_scripted_dropouts_straddle_the_coast_cap() -> None:
         ),
         seed=seed,
     )
-    tracker = Tracker(TrackerConfig(id_base=0, coast_cap=coast_cap))
+    # V-D10: the tracker gets the pose's attitude as real ATTITUDE frames.
+    fc = FcAttitude(lambda _t: (pose.roll, pose.pitch, pose.yaw))
+    tracker = Tracker(TrackerConfig(id_base=0, coast_cap=coast_cap), world.camera_model, fc)
     by_id: dict[int, list[TrackPacket]] = {}
     dropped = {"short": 0, "long": 0}
     k = 0

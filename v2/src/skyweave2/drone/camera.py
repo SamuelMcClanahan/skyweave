@@ -291,6 +291,15 @@ class CameraModel:
         x, y = self.undistort_normalized((u - self.cx) / self.f_px, (v - self.cy) / self.f_px)
         return self.cx + self.f_px * x, self.cy + self.f_px * y
 
+    def distort_rate_px(self, u: float, v: float, du: float, dv: float) -> tuple[float, float]:
+        """The raw pixel rate of the pinhole pixel ``(u, v)`` moving at
+        ``(du, dv)`` px/s: the Jacobian of :meth:`distort_px` at ``(u, v)``
+        applied to the rate. Unchanged when the camera has no distortion."""
+        if not self.distorted:
+            return du, dv
+        j11, j12, j22 = self._jacobian((u - self.cx) / self.f_px, (v - self.cy) / self.f_px)
+        return j11 * du + j12 * dv, j12 * du + j22 * dv
+
     def _jacobian(self, x: float, y: float) -> tuple[float, float, float]:
         """``(j11, j12, j22)`` of :meth:`distort_normalized` at ``(x, y)``; the
         Jacobian is symmetric (``j21 = j12``). It is also the pixel Jacobian of

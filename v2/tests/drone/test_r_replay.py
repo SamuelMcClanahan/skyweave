@@ -74,6 +74,7 @@ from skyweave2.drone.recording import Record, Recorder, Stream, read_records
 from skyweave2.drone.tracker import id_base_from_start
 from skyweave2.drone.types import LandedState, VelocityCommand
 from skyweave2.drone.vehicle_state import LinkConfig, parse_frames
+from tests.drone.fc_attitude import attitude_frame
 
 S = MissionState
 
@@ -878,14 +879,20 @@ def _tracker_detections(seed: int) -> list[DetectionPacket]:
 
 
 def _tracker_recording(dets: list[DetectionPacket]) -> list[str]:
-    """A core that runs the tracker, fed the frames (each 10 ms after capture)
-    and a tick every 50 ms, recorded."""
+    """A core that runs the tracker, fed the frames (each 10 ms after capture),
+    the FC's ATTITUDE every 20 ms (a slow yaw and a small pitch, so the
+    tracker really de-rotates, V-D10) and a tick every 50 ms, recorded."""
     buf = io.StringIO()
     config = CoreConfig(mission=MissionConfig(coast_cap=5)).with_tracker(TRACKER_T0)
     core = CompanionCore(config, recorder=Recorder(buf), t_start_ms=TRACKER_T0)
-    t_tick = last = TRACKER_T0
+    t_tick = t_att = last = TRACKER_T0
     for det in dets:
         t = max(det.t_cap + 10, last)  # the stale frame arrives in order
+        while t_att <= t:
+            s = (t_att - TRACKER_T0) / 1000.0
+            rpy = (0.0, 0.02 * math.sin(2.0 * s), 0.05 * s)
+            core.on_mavlink_rx(attitude_frame(t_att, rpy), t_att)
+            t_att += 20
         while t_tick <= t:
             core.on_tick(t_tick)
             t_tick += 50
@@ -947,6 +954,7 @@ def test_c10_e2d5_a_core_takes_one_route_detections_or_tracks() -> None:
         t_cap=1_000, frame_seq=0, boxes=(Box(x=10.0, y=10.0, w=8.0, h=8.0, conf=1.0),)
     )
     trk = CompanionCore(CoreConfig().with_tracker(1_000))
+    trk.on_mavlink_rx(attitude_frame(1_000), 1_000)  # V-D10: the attitude at t_cap
     (pkt,) = trk.on_detection(det, 1_010).tracks
     with pytest.raises(ValueError):
         trk.on_track(pkt, 1_020)
