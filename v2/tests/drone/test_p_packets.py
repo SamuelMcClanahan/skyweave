@@ -67,6 +67,31 @@ FIXTURES: dict[str, tuple[P.PacketKind, P.Packet]] = {
             age_frames=9,
         ),
     ),
+    # [P2] with the additive line-of-sight fields (V-D10, E2a-4): a target up
+    # and ahead (NED unit vector), moving right at 0.25 rad/s.
+    "track_los": (
+        P.PacketKind.TRACK,
+        P.TrackPacket(
+            t_cap=123456,
+            track_id=1_000_001,
+            state=P.TrackState.CONFIRMED,
+            u=960.125,
+            v_px=599.75,
+            du=-12.5,
+            dv=3.0,
+            w=40.0,
+            h=38.5,
+            hits=6,
+            misses=0,
+            age_frames=9,
+            los_n=0.8,
+            los_e=0.0,
+            los_d=-0.6,
+            dlos_n=0.0,
+            dlos_e=0.25,
+            dlos_d=0.0,
+        ),
+    ),
     "mission_state": (
         P.PacketKind.MISSION_STATE,
         P.MissionStatePacket(
@@ -285,6 +310,12 @@ def test_p_missing_v_is_rejected() -> None:
         ("track", P.PacketKind.TRACK, ("track_id",), 0),
         ("track", P.PacketKind.TRACK, ("age_frames",), 0),
         ("track", P.PacketKind.TRACK, ("h",), -2.0),
+        # [P2] line of sight (V-D10): floats, and a unit vector
+        ("track_los", P.PacketKind.TRACK, ("los_n",), True),
+        ("track_los", P.PacketKind.TRACK, ("dlos_e",), "0.25"),
+        ("track_los", P.PacketKind.TRACK, ("los_d",), None),
+        ("track_los", P.PacketKind.TRACK, ("los_n",), 0.9),
+        ("track_los", P.PacketKind.TRACK, ("los_d",), 0.0),
         ("mission_state", P.PacketKind.MISSION_STATE, ("trial", "alpha"), 0.0),
         ("mission_state", P.PacketKind.MISSION_STATE, ("trial", "beta"), 0.6),
         ("mission_state", P.PacketKind.MISSION_STATE, ("engaged_track_id",), 0),
@@ -323,6 +354,8 @@ def test_p_type_and_range_violations_are_rejected(
     [
         ("detection", P.PacketKind.DETECTION, "boxes"),
         ("track", P.PacketKind.TRACK, "misses"),
+        ("track_los", P.PacketKind.TRACK, "los_e"),  # V-D10: all six or none
+        ("track_los", P.PacketKind.TRACK, "dlos_d"),
         ("mission_state", P.PacketKind.MISSION_STATE, "engaged_track_id"),
         ("mission_state", P.PacketKind.MISSION_STATE, "trial"),
         ("fc_link_health", P.PacketKind.FC_LINK_HEALTH, "last_setpoint_t"),
@@ -590,3 +623,24 @@ def test_p_trial_echo_matches_prime() -> None:
         search_alt=10.0,
         d_s=7.0,
     )
+
+
+def test_p2_vd10_los_fields_are_additive_all_or_none() -> None:
+    """[P2], [C7], V-D10: the line-of-sight fields are additive in wire v1. The
+    track golden made before them still decodes, to a packet with no line of
+    sight, and re-encodes to the same bytes. The new golden differs from it
+    by exactly the six fields. A packet object with five of the six is
+    refused by the encoder."""
+    old = P.decode(P.PacketKind.TRACK, (GOLDEN / "track.json").read_bytes())
+    assert isinstance(old, P.TrackPacket)
+    assert old.los is None and old.dlos is None
+    assert P.encode(old) == (GOLDEN / "track.json").read_bytes()
+    new = _obj("track_los")
+    assert set(new) - set(_obj("track")) == set(P.LOS_FIELDS)
+    assert {k: v for k, v in new.items() if k not in P.LOS_FIELDS} == _obj("track")
+    pkt = P.decode(P.PacketKind.TRACK, (GOLDEN / "track_los.json").read_bytes())
+    assert isinstance(pkt, P.TrackPacket)
+    assert pkt.los == (0.8, 0.0, -0.6) and pkt.dlos == (0.0, 0.25, 0.0)
+    partial = P.TrackPacket(**{**FIXTURES["track_los"][1].__dict__, "dlos_d": None})
+    with pytest.raises(ValueError):
+        P.encode(partial)
