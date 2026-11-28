@@ -11,6 +11,8 @@ Work happens on the drone stack (`v2/src/skyweave2/drone/`). The ground
 detection line below (D8, C-004) is parked; do not start work on it. For
 drone work, read these instead of the detection list:
 
+0. `v2/docs/DRONE_HANDOFF.md`, if it exists: the state of open work, what
+   is not verified, and the next steps.
 1. `v2/docs/PHASE_E2_BRIEF.md`: the current phase brief (E2, balloon
    intercept; ratified by Samuel merging PR #4 on 2026-11-21). Part E2a
    is sanctioned; E2b is an outline.
@@ -18,7 +20,8 @@ drone work, read these instead of the detection list:
    and §7 still hold.
 3. `v2/docs/DRONE_CONTRACTS_D0.md`: the fenced drone contract. §11.1
    holds the 2026-11-20 vetting decisions (`V-` IDs) and §11.2 the
-   2026-11-21 E2 planning decisions (`E2-` IDs). A clause changes only in
+   2026-11-21 E2 planning decisions (`E2-` IDs). §11.3 to §11.5 hold the
+   later decisions (`E1-D12`.., `B-`, `E2a4-`). A clause changes only in
    a PR that cites its decision ID.
 4. `v2/docs/TESTING_DOCTRINE.md`: still applies.
 
