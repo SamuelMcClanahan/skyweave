@@ -7,7 +7,8 @@ the camera frame (the lens model, [C2]), how the camera sits on the body
 at the frame's capture time (FC attitude, ``R_ned_body = Rz(yaw) Ry(pitch)
 Rx(roll)``, [C3]). This module holds the first two, the rotation for the
 third, and ``AttitudeSource``, the interface guidance samples attitude
-through. The de-rotation itself and everything that consumes it live in
+through (``AttitudeHistory`` adds the one question the tracker asks,
+E2a4-D1). The de-rotation itself and everything that consumes it live in
 ``guidance.py``.
 
 Mount and lens are a named config choice (V-D1, E2-D2). :data:`MOUNTS` names
@@ -487,3 +488,17 @@ class AttitudeSource(Protocol):
     """
 
     def attitude_at(self, t_ms: int) -> Attitude | None: ...
+
+
+class AttitudeHistory(AttitudeSource, Protocol):
+    """An :class:`AttitudeSource` that also says how old its newest sample is
+    (the tracker's source, E2a4-D1).
+
+    ``attitude_age_ms(t_ms)`` is ``t_ms`` minus the newest sample's receive
+    time ([F3]'s term), or ``None`` with no sample. Asked at a frame's
+    ``t_cap``: at or above 0 it is the age of the sample ``attitude_at(t_cap)``
+    holds; below 0 a newer sample exists and nothing newer is held.
+    ``VehicleState`` is the one implementation.
+    """
+
+    def attitude_age_ms(self, t_ms: int) -> int | None: ...

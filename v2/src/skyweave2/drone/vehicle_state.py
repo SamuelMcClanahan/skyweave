@@ -276,7 +276,10 @@ class VehicleState:
         return self._last_rx is not None and t_ms - self._last_rx <= self.config.link_bound_ms
 
     def attitude_age_ms(self, t_ms: int) -> int | None:
-        """[F3]: ``t_ms`` minus the newest ``ATTITUDE`` receive time."""
+        """[F3]: ``t_ms`` minus the newest ``ATTITUDE`` receive time. The
+        tracker asks it at a frame's ``t_cap`` (E2a4-D1): there it is the age
+        of the sample :meth:`attitude_at` holds, or below 0 when a newer
+        sample exists."""
         return None if not self._att_t else t_ms - self._att_t[-1]
 
     def attitude_degraded(self, t_ms: int) -> bool:
