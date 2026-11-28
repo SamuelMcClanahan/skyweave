@@ -323,7 +323,11 @@ class CompanionCore:
         self.guidance = Guidance(
             config.camera, config.guidance, make_law(config.law, config.guidance)
         )
-        self.tracker = None if config.tracker is None else Tracker(config.tracker)
+        # V-D10: the tracker de-rotates each box with this vehicle state's
+        # attitude at t_cap, the sample guidance uses for the same frame ([G1]).
+        self.tracker = (
+            None if config.tracker is None else Tracker(config.tracker, config.camera, vehicle)
+        )
         self._recorder = recorder
         self._last_t: int | None = None
         if recorder is not None:

@@ -752,6 +752,7 @@ class ClosedLoop:
             "dropouts": [_window_obj(w) for w in self.script.dropouts],
             "script": [[t, note] for t, note in self.script.log.notes],
             "counters": {**self.counters, **_lag_stats(self._tick_lag)},
+            "tracker": _tracker_counters(getattr(self, "core", None)),
             "command_receiver": _receiver_counters(getattr(self, "ui", None)),
             "fc_link": _fc_counters(getattr(self, "fc", None)),
             "relay": _relay_counters(self.relay),
@@ -794,6 +795,19 @@ def _fc_counters(fc: FcLink | None) -> dict[str, int]:
         "rx_frames": fc.rx_frames,
         "rx_bad": fc.rx_bad,
         "tx_frames": fc.tx_frames,
+    }
+
+
+def _tracker_counters(core: CompanionCore | None) -> dict[str, int]:
+    """What the tracker refused (V-D10: a frame with no attitude at its
+    ``t_cap`` is dropped whole)."""
+    if core is None or core.tracker is None:
+        return {}
+    trk = core.tracker
+    return {
+        "stale_dropped": trk.stale_dropped,
+        "degraded_dropped": trk.degraded_dropped,
+        "boxes_unusable": trk.boxes_unusable,
     }
 
 

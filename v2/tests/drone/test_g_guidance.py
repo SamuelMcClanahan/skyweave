@@ -19,6 +19,7 @@ and the mission really produce.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import Any
 
@@ -227,6 +228,34 @@ def test_g1_derotation_known_pixels_and_attitudes() -> None:
     ]
     for u, v, att, want in cases:
         _approx(list(derotate(_pkt(u=u, v=v), CAM, att)), want)
+
+
+def test_g1_vd10_guidance_takes_the_trackers_line_of_sight() -> None:
+    """[G1], V-D10: a track packet that carries the tracker's line of sight
+    gives it to guidance as it is; ``u``, ``v_px`` are not de-rotated a second
+    time. A packet without the fields is de-rotated as before.
+
+    Hand: the packet's pixels sit at the principal point (dead ahead; at yaw 0
+    they de-rotate to north, az 0). Its line of sight points 30 deg right of
+    north, level: (cos 30, sin 30, 0) = (0.866025, 0.5, 0).
+    - derotate returns that vector, whatever attitude is passed (yaw 90 here).
+    - ACQUIRING, yaw_now 0: az = 30 deg -> yaw rate 1.5 * 30 = 45 deg/s =
+      0.785398 rad/s.
+    - The same packet without the fields: az 0 -> yaw rate 0.
+    """
+    los = (math.sqrt(3) / 2, 0.5, 0.0)
+    bare = _pkt()
+    carried = dataclasses.replace(
+        bare, los_n=los[0], los_e=los[1], los_d=los[2], dlos_n=0.0, dlos_e=0.0, dlos_d=0.0
+    )
+    _approx(list(derotate(carried, CAM, _att(0, yaw=90 * DEG))), los)
+    _approx(list(derotate(bare, CAM, _att(0))), (1.0, 0.0, 0.0))
+    acq = _view(S.ACQUIRING, candidate=ID)
+    for pkt, want in ((carried, 45.0 * DEG), (bare, 0.0)):
+        g = _guidance()
+        fc = _steady(900, 1100)
+        g.on_track(pkt, 1010, acq, fc(1010))
+        _approx(_cmd(g.step(1100, acq, fc(1100), _snap(1100))[0]), (0.0, 0.0, 0.0, want))
 
 
 def test_g1_attitude_sample_interpolates_holds_and_bounds() -> None:

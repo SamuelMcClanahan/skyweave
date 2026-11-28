@@ -143,9 +143,22 @@ class DetectionPacket:
     v: int = WIRE_VERSION
 
 
+LOS_FIELDS = ("los_n", "los_e", "los_d", "dlos_n", "dlos_e", "dlos_d")
+"""[P2] (V-D10): the additive line-of-sight fields of a track packet. All six
+travel together or not at all."""
+
+LOS_UNIT_TOL = 1e-6  # [P2]: |(los_n, los_e, los_d)| is 1 within this
+
+
 @dataclass(frozen=True, kw_only=True)
 class TrackPacket:
-    """[P2] tracker -> guidance and mission, one per live track per frame."""
+    """[P2] tracker -> guidance and mission, one per live track per frame.
+
+    ``los_*`` and ``dlos_*`` (V-D10, additive): the track's filtered line of
+    sight in NED, a unit vector, and its time derivative (1/s). A packet has
+    all six or none; one without them (made before V-D10, or by another
+    tracker) is still a v1 track packet.
+    """
 
     t_cap: int
     track_id: int
@@ -159,7 +172,28 @@ class TrackPacket:
     hits: int
     misses: int
     age_frames: int
+    los_n: float | None = None
+    los_e: float | None = None
+    los_d: float | None = None
+    dlos_n: float | None = None
+    dlos_e: float | None = None
+    dlos_d: float | None = None
     v: int = WIRE_VERSION
+
+    @property
+    def los(self) -> tuple[float, float, float] | None:
+        """The NED line of sight (unit vector), or ``None`` when the packet
+        carries none."""
+        if self.los_n is None or self.los_e is None or self.los_d is None:
+            return None
+        return (self.los_n, self.los_e, self.los_d)
+
+    @property
+    def dlos(self) -> tuple[float, float, float] | None:
+        """The rate of :attr:`los` (1/s), or ``None`` when the packet carries none."""
+        if self.dlos_n is None or self.dlos_e is None or self.dlos_d is None:
+            return None
+        return (self.dlos_n, self.dlos_e, self.dlos_d)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -516,6 +550,19 @@ def _event_from(obj: Any) -> Event:
     return Event(t=_int(o, "t", 0), name=_str(o, "name", MAX_EVENT_NAME_LEN))
 
 
+def _los_from(o: Mapping[str, Any]) -> dict[str, float]:
+    """[P2] (V-D10): the six line-of-sight fields, all or none. A packet
+    without them decodes as before (additive, [C7]); a packet with some of
+    them, or with a line of sight that is not a unit vector, is rejected."""
+    if not any(key in o for key in LOS_FIELDS):
+        return {}
+    out = {key: _float(o, key) for key in LOS_FIELDS}
+    norm = math.sqrt(out["los_n"] ** 2 + out["los_e"] ** 2 + out["los_d"] ** 2)
+    if not abs(norm - 1.0) <= LOS_UNIT_TOL:
+        raise PacketError("track los_n, los_e, los_d must be a unit vector")
+    return out
+
+
 def from_obj(kind: PacketKind, obj: Any) -> Packet:
     """Decode one packet object of a known kind ([C7], [C8])."""
     o = _obj(obj, "packet")
@@ -540,6 +587,7 @@ def from_obj(kind: PacketKind, obj: Any) -> Packet:
             hits=_int(o, "hits", 0),
             misses=_int(o, "misses", 0),
             age_frames=_int(o, "age_frames", 1),
+            **_los_from(o),
         )
         if not (pkt.w > 0.0 and pkt.h > 0.0):
             raise PacketError("track w and h must be > 0")
@@ -593,7 +641,7 @@ def to_obj(packet: Packet) -> dict[str, Any]:
             ],
         }
     if isinstance(packet, TrackPacket):
-        return {
+        out_trk: dict[str, Any] = {
             "v": packet.v,
             "t_cap": packet.t_cap,
             "track_id": packet.track_id,
@@ -608,6 +656,12 @@ def to_obj(packet: Packet) -> dict[str, Any]:
             "misses": packet.misses,
             "age_frames": packet.age_frames,
         }
+        los = {key: getattr(packet, key) for key in LOS_FIELDS}
+        if any(val is not None for val in los.values()):  # V-D10: all six or none
+            if any(val is None for val in los.values()):
+                raise ValueError("a track packet carries all six los fields or none ([P2])")
+            out_trk.update(los)
+        return out_trk
     if isinstance(packet, MissionStatePacket):
         trial = packet.trial
         return {

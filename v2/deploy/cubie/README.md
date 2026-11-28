@@ -343,6 +343,9 @@ Do the items in sequence. Each item has a **Pass** line.
     Pass: the number increases (one packet for each processed frame).
     Put an object of a detected class in front of the camera.
     Pass: `grep -c '"stream":"track"'` on the same file increases too.
+    The FC link must be up for this (items 7 and 8): the tracker needs the FC
+    attitude for each frame (V-D10, finding E2a4-F3). With no attitude there
+    are no tracks, and the companion log says "no FC attitude".
 12. **Recording replays.** Stop the companion, then replay its recording:
 
     ```bash

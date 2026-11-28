@@ -67,6 +67,7 @@ from skyweave2.drone.percepd.sources import (
     board_clock,
 )
 from skyweave2.drone.udp import UdpReceiver, UdpSender
+from tests.drone.fc_attitude import attitude_frame
 
 GOLDEN = Path(__file__).parent / "golden"
 GRID_W, GRID_H = P.FLIGHT_GRID_WIDTH, P.FLIGHT_GRID_HEIGHT
@@ -786,7 +787,9 @@ def test_d_stats_line_reports_rates_and_counters(caplog) -> None:
 def test_d_companion_core_tracks_percepd_packets() -> None:
     """[P1], [C10], E2-D5: packets from percepd, received on the companion's
     detection receiver, are accepted by the real companion core; its tracker
-    confirms a track at the box center on the flight grid ([C2])."""
+    confirms a track at the box center on the flight grid ([C2]). The FC's
+    ATTITUDE (level, not turning) reaches the core with each frame: the
+    tracker needs the attitude at ``t_cap`` (V-D10)."""
     clock = FakeClock(t=10_000, step=13)
     rx, tx = _link()
     core = CompanionCore(CoreConfig().with_tracker(clock.t))
@@ -798,10 +801,11 @@ def test_d_companion_core_tracks_percepd_packets() -> None:
     while p.grab_step():
         p.process_step()
         (pkt,) = _received(rx)
+        core.on_mavlink_rx(attitude_frame(pkt.t_cap), pkt.t_cap)
         out = core.on_detection(pkt, clock())
         (track,) = out.tracks
         states.append(track.state)
-    assert core.tracker.stale_dropped == 0
+    assert (core.tracker.stale_dropped, core.tracker.degraded_dropped) == (0, 0)
     assert states[-1] is TrackState.CONFIRMED and states[0] is TrackState.TENTATIVE
     assert (track.u, track.v_px) == pytest.approx((950.0, 540.0), abs=0.5)
     assert (track.w, track.h) == pytest.approx((100.0, 80.0), abs=0.5)
